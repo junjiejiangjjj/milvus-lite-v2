@@ -277,14 +277,13 @@ def test_random_insert_crash_recover(tmp_path, schema, monkeypatch, seed):
     """Random insert sizes + random crash points. All committed inserts
     must be recoverable through WAL replay.
 
-    Phase 3 limitation: get() only reads the MemTable, so we set the
-    flush threshold high enough that nothing flushes during the test.
-    Phase 4's search-with-segments will let us drop this constraint.
+    Phase-4 update: with the segment cache, get() also reads flushed
+    Parquet files, so we can let the size limit trigger natural flushes.
     """
     import random
     rng = random.Random(seed)
-    # Big enough that no flush triggers in 15 random batches of 1-5.
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 10_000)
+    # Small limit so flushes happen mid-test.
+    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 7)
 
     data_dir = str(tmp_path / f"d{seed}")
     committed_pks: set = set()
@@ -309,4 +308,118 @@ def test_random_insert_crash_recover(tmp_path, schema, monkeypatch, seed):
     for pk in committed_pks:
         rec = final.get([pk])
         assert len(rec) == 1, f"committed pk {pk} missing after final recovery (seed={seed})"
+    final.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: delete-aware crash recovery
+# ---------------------------------------------------------------------------
+
+def test_delete_then_crash_recovers_tombstone(tmp_path, schema):
+    """Insert, delete in MemTable, crash without flush. After restart
+    the delete must still be in effect (replayed from wal_delta)."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([_record(0)])
+    col.delete(["doc_0000"])
+    _simulate_crash(col)
+
+    col2 = Collection("c", data_dir, schema)
+    assert col2.get(["doc_0000"]) == []
+    col2.close()
+
+
+def test_delete_after_flush_then_crash(tmp_path, schema):
+    """Insert + flush + delete + crash. The flushed insert is in a
+    segment; the delete is in WAL. Recovery must replay the delete
+    into the MemTable so get() correctly hides the segment row."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([_record(0)])
+    col.flush()  # X is in a segment
+    col.delete(["doc_0000"])  # tombstone in MemTable + WAL
+    _simulate_crash(col)
+
+    col2 = Collection("c", data_dir, schema)
+    assert col2.get(["doc_0000"]) == []
+    col2.close()
+
+
+def test_crash_during_delete_flush(tmp_path, schema, monkeypatch):
+    """Inject a crash during the flush that carries a delete tombstone.
+    The delete must still be effective after recovery (replayed from WAL).
+    """
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    # Round 1 — clean flush so doc_0000 ends up in a segment.
+    col.insert([_record(0)])
+    col.insert([_record(1)])
+    col.flush()
+    assert col.count() == 0
+
+    # Round 2 — apply a delete and a new insert, then trigger a flush
+    # that crashes mid-save.
+    col.delete(["doc_0000"])  # tombstone for the segment row
+    col.insert([_record(2)])  # plain insert
+
+    from litevecdb.storage import manifest as manifest_mod
+    real_save = manifest_mod.Manifest.save
+
+    def crashing_save(self):
+        raise SystemExit("crash during step 5")
+
+    monkeypatch.setattr(manifest_mod.Manifest, "save", crashing_save)
+    with pytest.raises(SystemExit):
+        col.flush()  # explicit flush triggers the crashing save
+
+    _simulate_crash(col)
+    monkeypatch.setattr(manifest_mod.Manifest, "save", real_save)
+
+    # Restart — recovery must:
+    # - replay wal_delta containing delete(doc_0000) → tombstone in MemTable
+    # - replay wal_data containing insert(doc_0002) → live row in MemTable
+    # - clean up any orphan parquet files from the failed flush
+    col2 = Collection("c", data_dir, schema)
+    assert col2.get(["doc_0000"]) == []          # tombstone wins
+    assert col2.get(["doc_0001"]) != []          # untouched, still alive
+    assert col2.get(["doc_0002"]) != []          # replayed insert is alive
+    col2.close()
+
+
+def test_random_insert_delete_crash_recover(tmp_path, schema, monkeypatch):
+    """Random insert + delete sequences with random crashes. The
+    expected state is computed by a trivial Python simulator and
+    compared against the final Collection state."""
+    import random
+    rng = random.Random(13)
+    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 7)
+
+    data_dir = str(tmp_path / "d")
+    expected: dict = {}  # pk → label or None for deleted
+
+    col = Collection("c", data_dir, schema)
+    for round_idx in range(30):
+        action = rng.choice(["insert", "insert", "delete"])
+        pk = f"pk_{rng.randint(0, 4)}"
+        if action == "insert":
+            label = f"r{round_idx}"
+            col.insert([{"id": pk, "vec": [0.5, 0.25], "title": label}])
+            expected[pk] = label
+        else:
+            col.delete([pk])
+            expected[pk] = None
+
+        if rng.random() < 0.25:
+            _simulate_crash(col)
+            col = Collection("c", data_dir, schema)
+
+    _simulate_crash(col)
+    final = Collection("c", data_dir, schema)
+    for pk, exp_label in expected.items():
+        got = final.get([pk])
+        if exp_label is None:
+            assert got == [], f"pk {pk}: expected deleted, got {got}"
+        else:
+            assert len(got) == 1, f"pk {pk}: expected {exp_label}, got nothing"
+            assert got[0]["title"] == exp_label, f"pk {pk}: expected {exp_label}, got {got[0]['title']}"
     final.close()

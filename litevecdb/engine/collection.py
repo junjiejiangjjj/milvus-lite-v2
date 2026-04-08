@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pyarrow as pa
 
-from litevecdb.constants import DEFAULT_PARTITION, MEMTABLE_SIZE_LIMIT
+from litevecdb.constants import ALL_PARTITIONS, DEFAULT_PARTITION, MEMTABLE_SIZE_LIMIT
 from litevecdb.engine.flush import execute_flush
 from litevecdb.engine.operation import DeleteOp, InsertOp, Operation
 from litevecdb.engine.recovery import execute_recovery
@@ -171,6 +171,52 @@ class Collection:
             self._trigger_flush()
 
         return [r[self._pk_name] for r in records]
+
+    def delete(
+        self,
+        pks: List[Any],
+        partition_name: Optional[str] = None,
+    ) -> int:
+        """Delete a batch of pks. Returns the number of pks scheduled.
+
+        ``partition_name=None`` is a cross-partition delete: the
+        tombstone applies to whichever partition the pk currently lives
+        in, and at flush time it is replicated into the delta files of
+        every existing partition.
+
+        Phase-5 semantics:
+            - The whole batch shares ONE _seq (architectural invariant:
+              batch delete is one logical event).
+            - Deleting a non-existent pk is NOT an error — it just
+              writes a tombstone that will never match anything.
+            - This method does not return whether each pk actually
+              existed; it returns ``len(pks)`` so the caller can
+              distinguish "called with N" from "called with 0".
+        """
+        if not isinstance(pks, list):
+            raise TypeError(f"pks must be a list, got {type(pks).__name__}")
+        if not pks:
+            return 0
+
+        target_partition = partition_name if partition_name is not None else ALL_PARTITIONS
+
+        # Validate the explicit partition exists. ALL_PARTITIONS is a
+        # sentinel and is always valid.
+        if partition_name is not None and not self._manifest.has_partition(partition_name):
+            raise PartitionNotFoundError(partition_name)
+
+        # Allocate ONE seq for the whole batch.
+        seq = self._next_seq
+        self._next_seq += 1
+
+        batch = self._build_wal_delta_batch(pks, target_partition, seq)
+        op = DeleteOp(partition=target_partition, batch=batch)
+        self._apply(op)
+
+        if self._memtable.size() >= MEMTABLE_SIZE_LIMIT:
+            self._trigger_flush()
+
+        return len(pks)
 
     def get(
         self,
@@ -419,6 +465,26 @@ class Collection:
             cols["$meta"] = meta_col
 
         return pa.RecordBatch.from_pydict(cols, schema=self._wal_data_schema)
+
+    def _build_wal_delta_batch(
+        self,
+        pks: List[Any],
+        partition_name: str,
+        seq: int,
+    ) -> pa.RecordBatch:
+        """Build a wal_delta RecordBatch for a delete operation.
+
+        All rows share the same _seq and _partition (architectural
+        invariant: batch delete is one logical event).
+        """
+        return pa.RecordBatch.from_pydict(
+            {
+                self._pk_name: pks,
+                "_seq": [seq] * len(pks),
+                "_partition": [partition_name] * len(pks),
+            },
+            schema=self._wal_delta_schema,
+        )
 
     # ── lifecycle ───────────────────────────────────────────────
 
