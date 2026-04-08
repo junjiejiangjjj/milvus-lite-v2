@@ -594,38 +594,78 @@ new_wal_number = max(
 
 ### 8.1 崩溃类型
 
-| 崩溃类型 | 示例 | OS buffer cache | 数据丢失风险 |
+| 崩溃类型 | 示例 | OS buffer cache | 不开 fsync 的数据丢失风险 |
 |---------|------|----------------|------------|
-| 进程崩溃 | SIGKILL, 异常退出 | 保留（OS 会异步刷盘） | 极低 |
+| 进程崩溃（同 OS 内立即接管） | SIGKILL, 异常退出 | 保留（仍由 OS 持有） | 低——但仍有 |
+| 容器/进程被 kill 后立刻被新进程接管 | OOM-kill → restart | 仍在 cache，新进程 read 命中 | **高**——见 §8.2 反例 |
 | OS 崩溃 | 内核 panic, 断电 | 丢失 | 有 |
 
-### 8.2 MVP 策略：不 fsync
+### 8.2 默认 `sync_mode="close"`：在 close 时 fsync 一次
 
 ```python
-# MVP: 不显式调用 fsync
-writer.write_batch(record_batch)
-# 数据进入 OS buffer cache，由 OS 异步刷盘
-```
-
-**理由**：
-1. LiteVecDB 是嵌入式本地数据库，不是金融系统
-2. 进程崩溃（最常见场景）：OS buffer cache 会自动刷盘，数据不会丢
-3. OS 崩溃（罕见场景）：可能丢失最近几次写入，但不会破坏数据一致性
-4. fsync 对写性能影响显著（向量数据体积大，每次 fsync 的 IO 开销大）
-
-### 8.3 未来扩展
-
-```python
-# 未来可添加 sync_mode 参数
 class WAL:
-    def __init__(self, ..., sync_mode: str = "none"):
+    def __init__(self, ..., sync_mode: str = "close"):
         """
         sync_mode:
-          "none"   - 不 fsync（默认，最快）
-          "batch"  - 每次 write_batch 后 fsync（平衡）
-          "close"  - 仅关闭时 fsync（折中）
+          "none"   - 完全不 fsync（仅供测试 / 性能基准）
+          "close"  - 默认。在 close_and_delete 前对 sink 做一次 os.fsync
+          "batch"  - 每次 write_batch 后 fsync（最强一致性，最慢）
         """
 ```
+
+**为什么不是"none"作为默认**：
+
+考虑这个反例：
+
+```
+T0: WAL.write_insert(batch_X)   # batch X 进入 OS buffer cache，未刷盘
+T1: Collection.insert 返回成功，client 收到成功响应
+T2: 容器被 OOM-killed
+T3: 编排系统立刻拉起新容器，挂同一卷
+T4: 新进程 Collection.__init__ → recovery → 读 WAL
+```
+
+在 T4 那一刻：
+- 老进程持有的 OS buffer cache 已经随老进程消失（容器隔离）
+- batch_X 还没刷到磁盘
+- 新进程 read 看到的是**没有 batch_X 的 WAL 文件**
+- 但 client 已经被告知 "成功"——**数据丢失，违反持久性承诺**
+
+`sync_mode="close"` 在 `close_and_delete` 前调一次 `os.fsync(sink.fileno())` 就能堵掉这个窗口：
+- WAL 在 flush 触发时被 close，close 前 fsync 把整个文件持久化
+- 频率 = flush 频率 = 每 `MEMTABLE_SIZE_LIMIT` 行一次，很稀疏，性能影响可忽略
+- 关键路径："WAL 切换 → Manifest 更新"这条 commit 路径上的耐久性补齐了
+
+**`sync_mode="batch"` 的成本**：
+
+每次 `write_batch` 都 fsync。对于嵌入式向量库（vector 体积大）这个成本明显，但作为可选项保留给追求最强持久性的用户。**默认不开**。
+
+### 8.3 实现细节
+
+```python
+def write_insert(self, record_batch):
+    assert not self._closed
+    if self._data_writer is None:
+        # ... lazy init
+    self._data_writer.write_batch(record_batch)
+    if self._sync_mode == "batch":
+        os.fsync(self._data_sink.fileno())
+
+def close_and_delete(self):
+    if self._closed:
+        return
+    try:
+        if self._sync_mode in ("close", "batch") and self._data_writer is not None:
+            self._data_writer.close()                      # 写 EOS marker
+            os.fsync(self._data_sink.fileno())             # ← 强刷盘
+            self._data_sink.close()
+        # ... 同上 _delta_writer
+    finally:
+        self._closed = True
+        # ... 删文件
+```
+
+**注意**：fsync 必须在 `_data_writer.close()` 之后、`_data_sink.close()` 之前。先 close writer 把 EOS marker 写进 OS buffer，再 fsync 把整个文件含 EOS 持久化。
 
 ---
 
@@ -782,6 +822,7 @@ class WAL:
         wal_data_schema: pa.Schema,
         wal_delta_schema: pa.Schema,
         wal_number: int,
+        sync_mode: str = "close",
     ) -> None:
         """初始化 WAL（不创建文件，延迟到首次写入）。
 
@@ -790,6 +831,10 @@ class WAL:
             wal_data_schema: wal_data 文件的 Arrow Schema（含 _seq, _partition, 用户字段, $meta）
             wal_delta_schema: wal_delta 文件的 Arrow Schema（含 pk, _seq, _partition）
             wal_number: 本轮 WAL 编号 N（文件名中的 N，从 Manifest 或 recovery 推算）
+            sync_mode: 持久性策略，详见 §8。
+                - "none"  完全不 fsync（仅供测试 / 性能基准）
+                - "close" 默认。close_and_delete 前 fsync 一次
+                - "batch" 每次 write_batch 后 fsync
         """
 
     def write_insert(self, record_batch: pa.RecordBatch) -> None:
@@ -798,6 +843,12 @@ class WAL:
         首次调用时创建文件和 StreamWriter（延迟初始化）。
         record_batch 的 schema 必须与 wal_data_schema 一致（PyArrow 内部校验）。
 
+        sync_mode="batch" 时，write_batch 后 fsync 一次。
+
+        注：WAL 不知道 Operation 类型——它接受 raw RecordBatch。
+        Operation dispatch 在 Collection._apply 里完成（依赖层级原因，
+        见 modules.md §9.16.5）。
+
         Raises:
             ArrowInvalid: schema 不匹配
             OSError: 磁盘满或权限不足
@@ -805,22 +856,25 @@ class WAL:
         """
 
     def write_delete(self, record_batch: pa.RecordBatch) -> None:
-        """追加一个 RecordBatch 到 wal_delta 文件。
-
-        语义与 write_insert 对称，写入 delta 文件。
-
-        Raises:
-            ArrowInvalid: schema 不匹配
-            OSError: 磁盘满或权限不足
-            AssertionError: WAL 已关闭
-        """
+        """追加一个 RecordBatch 到 wal_delta 文件。语义与 write_insert 对称。"""
 
     def close_and_delete(self) -> None:
         """关闭 writer 并删除两个 WAL 文件。幂等操作。
 
         调用时机：flush Step 6（Manifest 已更新之后）。
-        流程：关闭 data_writer → 关闭 delta_writer → 删除 data 文件 → 删除 delta 文件。
-        文件不存在时静默跳过（幂等）。
+
+        流程（每个 writer 各自包 try/finally，互不影响）：
+            for writer in (data_writer, delta_writer):
+                writer.close()                              # 写 EOS marker
+                if sync_mode in ("close", "batch"):
+                    os.fsync(sink.fileno())                 # 强刷盘
+                sink.close()
+            for file in (data_path, delta_path):
+                if exists: os.remove(file)
+            self._closed = True
+
+        幂等性：第二次调用直接 return；任一 writer.close 失败都不影响另一个。
+        文件不存在时静默跳过删除步骤。
         """
 
     @staticmethod
@@ -838,8 +892,6 @@ class WAL:
     def recover(
         wal_dir: str,
         wal_number: int,
-        wal_data_schema: pa.Schema,
-        wal_delta_schema: pa.Schema,
     ) -> Tuple[List[pa.RecordBatch], List[pa.RecordBatch]]:
         """读取指定编号的 WAL 文件，返回 (data_batches, delta_batches)。
 
@@ -847,7 +899,8 @@ class WAL:
         - 文件截断 → 返回截断前的完整 batch，丢弃不完整部分
         - 文件严重损坏（Schema 不可读）→ 对应列表为空，日志警告
 
-        每个 RecordBatch 含 _partition 列，恢复时按 _partition 路由到 MemTable。
+        Operation 包装在 engine/recovery.py 的 replay_wal_operations() 里完成
+        （依赖层级原因，详见 modules.md §9.16.5）。
         """
 
     @property
@@ -881,12 +934,14 @@ def _cleanup_old_wals(wal_dir: str, up_to_number: int) -> None:
 | 文件格式 | Arrow IPC Streaming | 向量无写放大，零拷贝解析，Schema 内建 |
 | 文件结构 | 双文件（data + delta） | Schema 不同，延迟初始化，与 MemTable 对称 |
 | Writer 初始化 | 延迟（首次写入时创建） | 避免空文件 |
-| fsync | MVP 不 fsync | 嵌入式场景，进程崩溃由 OS cache 保护 |
+| **fsync** | **默认 `sync_mode="close"`，close 前 fsync 一次** | 覆盖容器 OOM-kill 后立即接管的崩溃场景；频率 = flush 频率，开销可忽略。详见 §8 |
 | 截断处理 | 尽力恢复（读到哪算哪） | 最大化数据恢复 |
 | Recovery 后旧 WAL | 保留，等 flush 清理 | 二次崩溃安全 |
 | WAL 编号 | 单调递增，从 Manifest 恢复 | 不重复，可追溯 |
-| close_and_delete | 幂等 | 崩溃重试安全 |
+| close_and_delete | 幂等，每个 writer 独立 try/finally | 崩溃重试安全；一个 writer 关闭失败不影响另一个 |
 | 清理范围 | flush 时清理所有 <= frozen 编号的 WAL | 统一处理残留 + 冻结 |
+| **写入入口** | **raw `write_insert / write_delete`** | WAL 不知道 Operation；dispatch 在 Collection.\_apply 里做（依赖层级原因，见 modules.md §9.16.5） |
+| **读取入口** | **`recover() → (data_batches, delta_batches)`** | engine/recovery.py 的 `replay_wal_operations` 把它包装成按 _seq 排序的 Operation 流 |
 
 ---
 

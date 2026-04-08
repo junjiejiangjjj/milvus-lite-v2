@@ -37,19 +37,21 @@ lite-v2/
 │   │   └── persistence.py          #   schema.json 读写 (save_schema / load_schema)
 │   │
 │   ├── storage/                    # ══ 存储层 ══
-│   │   ├── __init__.py             #   导出: WAL, MemTable, DataFile, DeltaLog, Manifest
-│   │   ├── wal.py                  #   WAL (Arrow IPC Streaming, 双文件, write/recover/delete)
-│   │   ├── memtable.py             #   MemTable (insert_buf + delete_buf, _partition 路由, flush 拆分)
-│   │   ├── data_file.py            #   数据 Parquet 文件 (读写, 命名, seq 范围解析)
-│   │   ├── delta_log.py            #   Delta Log (Parquet 读写 + 内存 deleted_map)
-│   │   └── manifest.py             #   Manifest (JSON, 原子更新, Partition 级文件列表)
+│   │   ├── __init__.py             #   导出: WAL, MemTable, DataFile, DeltaFile, DeltaIndex, Manifest
+│   │   ├── wal.py                  #   WAL (Arrow IPC Streaming, 双文件, write/read_operations/close, fsync)
+│   │   ├── memtable.py             #   MemTable (RecordBatch list + pk_index + delete_index, seq-aware)
+│   │   ├── data_file.py            #   数据 Parquet 无状态函数 (读写, 命名, seq 范围解析)
+│   │   ├── delta_file.py           #   delta Parquet 无状态函数 (读写)
+│   │   ├── delta_index.py          #   DeltaIndex (内存 pk→max_delete_seq, gc_below)
+│   │   └── manifest.py             #   Manifest (JSON, tmp+rename 原子, .prev 备份, Partition 文件列表)
 │   │
 │   ├── engine/                     # ══ 引擎层 ══
 │   │   ├── __init__.py             #   导出: Collection
-│   │   ├── collection.py           #   Collection 核心 (入口, _seq 分配, insert/delete/get/search, Partition CRUD)
-│   │   ├── flush.py                #   Flush 管线 (7 步: 冻结→拆分→写Parquet→更新deleted_map→更新Manifest→删WAL→Compaction)
-│   │   ├── recovery.py             #   崩溃恢复 (5 步: 加载Manifest→重放WAL→校验文件→清理孤儿→重建deleted_map)
-│   │   └── compaction.py           #   Compaction Manager (Size-Tiered, 按 Partition 独立, 文件分桶/合并/去重/过滤)
+│   │   ├── operation.py            #   InsertOp / DeleteOp / Operation Union (写编排抽象层)
+│   │   ├── collection.py           #   Collection 核心 (入口, _seq 分配, insert/delete/get/search, _apply 统一路径, Partition CRUD)
+│   │   ├── flush.py                #   Flush 管线 (7 步, 同步阻塞)
+│   │   ├── recovery.py             #   崩溃恢复 (5 步, 经 WAL.read_operations 按 seq 回放)
+│   │   └── compaction.py           #   Compaction Manager (Size-Tiered + tombstone GC)
 │   │
 │   ├── search/                     # ══ 搜索层 ══
 │   │   ├── __init__.py             #   导出: search 函数
@@ -70,17 +72,19 @@ lite-v2/
 │   │   └── test_persistence.py     #   schema.json 序列化/反序列化往返
 │   │
 │   ├── storage/
-│   │   ├── test_wal.py             #   WAL 写入/恢复往返, 双文件生命周期, 损坏处理
-│   │   ├── test_memtable.py        #   put/delete/get 语义, upsert, flush Partition 拆分
+│   │   ├── test_wal.py             #   WAL 写入/恢复往返, 双文件生命周期, 损坏处理, fsync
+│   │   ├── test_memtable.py        #   apply_insert/apply_delete/get 语义, upsert, seq-aware 乱序反例, flush Partition 拆分
 │   │   ├── test_data_file.py       #   Parquet 读写往返, 文件命名, seq 范围解析
-│   │   ├── test_delta_log.py       #   load_all/add/is_deleted, deleted_map 正确性
-│   │   └── test_manifest.py        #   加载/保存原子性, Partition 文件列表管理
+│   │   ├── test_delta_file.py      #   delta Parquet 读写往返
+│   │   ├── test_delta_index.py     #   add_batch / is_deleted / gc_below / rebuild_from
+│   │   └── test_manifest.py        #   加载/保存原子性, .prev 备份与 fallback, Partition 文件列表管理
 │   │
 │   ├── engine/
+│   │   ├── test_operation.py       #   InsertOp / DeleteOp 构造, 属性 (seq_min/seq_max/num_rows)
 │   │   ├── test_collection.py      #   Collection 级 E2E: insert/delete/get/search, Partition CRUD, upsert
-│   │   ├── test_flush.py           #   Flush 管线端到端, 6 个崩溃点场景, 恢复正确性
-│   │   ├── test_recovery.py        #   崩溃恢复 5 步, WAL 重放, 孤儿文件清理
-│   │   └── test_compaction.py      #   文件分桶, 合并去重, 删除过滤, Manifest 更新
+│   │   ├── test_flush.py           #   Flush 管线端到端, 7 个崩溃点 (含 fsync), 恢复正确性
+│   │   ├── test_recovery.py        #   崩溃恢复 5 步, WAL 按 seq 重放, 孤儿文件清理
+│   │   └── test_compaction.py      #   文件分桶, 合并去重, 删除过滤, Manifest 更新, tombstone GC
 │   │
 │   ├── search/
 │   │   ├── test_bitmap.py          #   bitmap 构建: 去重 + 删除过滤
@@ -92,6 +96,35 @@ lite-v2/
 ├── pyproject.toml
 └── requirements.txt
 ```
+
+## 架构不变量（核心约束）
+
+下列约束贯穿所有模块，是设计共识，不在每个 §9.x 接口里重复。任何模块的实现违反这里任一条都视为 bug。
+
+**正确性 / 数据一致性：**
+
+1. **`_seq` 是操作的全序**。所有"覆盖 / 丢弃 / 去重"判断必须比较 `_seq`，不依赖调用顺序或文件物理顺序。这条让 recovery 乱序回放、compaction 重排、未来引入并发都不会破坏正确性。
+2. **MemTable cross-clear 必须 seq-aware**。put 与 delete 互相清除对方 buffer 同 pk 条目前，**必须**先比较 `_seq`，只有当前操作 `_seq` 更大时才覆盖；否则当前操作直接丢弃。详见 §9.7。
+3. **Tombstone GC 规则**：`delta_index` 中 `pk → delete_seq` 条目可以丢弃，当且仅当不存在 `seq_min ≤ delete_seq` 且包含该 pk 的 data 文件。MVP 用保守版本：全局 `min_active_data_seq` 之下的所有 tombstone 均可丢。详见 §9.9 / §9.16。
+4. **文件不可变**。所有磁盘文件（data Parquet、delta Parquet、WAL Arrow、Manifest）一旦写完只能整体删除，不允许就地修改。这是 LSM 路线的基础。
+5. **Manifest 是单一真相源**，原子更新（write-tmp + rename），且保留 `manifest.json.prev` 兜底一次序列化事故。详见 §9.10。
+
+**并发模型：**
+
+6. **MVP 同步 flush**。`Collection.insert/delete` 检测到 MemTable 满后**阻塞执行** flush，flush 完成才返回。异步/后台 flush 列入 future，不进 MVP。
+   - 这条决定影响 MemTable / Collection / Search 三层接口形态。要改成异步必须先开新文档讨论锁/快照/RCU 边界。
+7. **单 writer per Collection**。Collection 不做内部加锁；同一进程多线程并发写同一 Collection 是 undefined behavior。
+8. **单进程 per data_dir**。`db.py` 启动时用 `fcntl.flock(data_dir/LOCK)` 抢占；被占用直接报错退出，不等待。
+
+**Schema / 演化：**
+
+9. **Schema 不可变**。MVP 不支持 alter table；schema 变更只能通过新建 Collection + reindex。这是简化设计的关键前提：4 套 Arrow Schema、所有历史 Parquet 文件都不需要考虑兼容。
+
+**WAL / 持久性：**
+
+10. **WAL 默认 `sync_mode="close"`**：在 `close_and_delete` 前对 sink 做一次 `os.fsync`。覆盖容器 OOM-kill 后立即接管的崩溃场景。详见 wal-design.md §8。
+
+---
 
 ## 3. 四大 Package 详解
 
@@ -117,18 +150,20 @@ from litevecdb.schema.types import DataType, FieldSchema, CollectionSchema
 
 | 子模块 | 职责 | 核心类/方法 |
 |--------|------|------------|
-| `wal.py` | WAL 持久化 | `WAL(wal_dir, wal_data_schema, wal_delta_schema)` — `write_insert(rb)`, `write_delete(rb)`, `recover()→(data_batches, delta_batches)`, `close_and_delete()` |
-| `memtable.py` | 内存缓冲 | `MemTable(schema)` — `put(_seq, _partition, **fields)`, `delete(pk, _seq, _partition)`, `get(pk)`, `flush()→Dict[partition, (data_table, delta_table)]`, `size()` |
-| `data_file.py` | 数据 Parquet | `write_data_file(table, partition_dir, seq_min, seq_max)→path`, `read_data_file(path)→pa.Table`, `parse_seq_range(filename)→(min, max)`, `get_file_size(path)→int` |
-| `delta_log.py` | 删除记录 | `DeltaLog(pk_name)` — `load_all(partition_files)`, `add(delta_table, path)`, `is_deleted(pk, data_seq)→bool`, `remove_files(files)` |
-| `manifest.py` | 全局状态 | `Manifest(data_dir)` — `load()`, `save()` (原子), `add/remove_data_file(partition, file)`, `add/remove_delta_file(partition, file)`, `add/remove_partition(name)` |
+| `wal.py` | WAL 持久化 | `WAL(wal_dir, wal_data_schema, wal_delta_schema, wal_number, sync_mode="close")` — `write(op)`, `read_operations(...)→Iterator[Operation]`, `close_and_delete()`（含 fsync） |
+| `memtable.py` | 内存缓冲 | `MemTable(schema)` — `apply_insert(batch)`, `apply_delete(batch)`, `get(pk)`, `flush()→Dict[partition, (data_table, delta_table)]`, `size()`。**内部表示：append-only RecordBatch list + pk_index + delete_index；cross-clear 必须 seq-aware**。 |
+| `data_file.py` | 数据 Parquet（无状态） | `write_data_file(table, partition_dir, seq_min, seq_max)→path`, `read_data_file(path)→pa.Table`, `parse_seq_range(filename)→(min, max)`, `get_file_size(path)→int` |
+| `delta_file.py` | delta Parquet（无状态） | `write_delta_file(...)→path`, `read_delta_file(path)→pa.Table` |
+| `delta_index.py` | 内存删除索引 | `DeltaIndex(pk_name)` — `add_batch(batch)`, `is_deleted(pk, seq)→bool`, `gc_below(min_active_seq)→int`, `rebuild_from(...)` |
+| `manifest.py` | 全局状态 | `Manifest(data_dir)` — `load()`, `save()` (原子+`.prev`), `add/remove_data_file(partition, file)`, `add/remove_delta_file(partition, file)`, `add/remove_partition(name)` |
 
 ```python
 # storage/__init__.py
 from litevecdb.storage.wal import WAL
 from litevecdb.storage.memtable import MemTable
 from litevecdb.storage.data_file import write_data_file, read_data_file
-from litevecdb.storage.delta_log import DeltaLog
+from litevecdb.storage.delta_file import write_delta_file, read_delta_file
+from litevecdb.storage.delta_index import DeltaIndex
 from litevecdb.storage.manifest import Manifest
 ```
 
@@ -138,10 +173,11 @@ from litevecdb.storage.manifest import Manifest
 
 | 子模块 | 职责 | 核心内容 |
 |--------|------|---------|
-| `collection.py` | 引擎核心 | `Collection(name, data_dir, schema)` — `insert()`, `delete()`, `get()`, `search()`, `create/drop/list_partitions()`, `add_field()`, `flush()`, `close()`, `_alloc_seq()` |
-| `flush.py` | Flush 管线 | `execute_flush(frozen_memtable, frozen_wal, manifest, delta_log, compaction_mgr)` — 7 步流程 |
-| `recovery.py` | 崩溃恢复 | `execute_recovery(data_dir, manifest, wal, delta_log)` — 5 步流程 |
-| `compaction.py` | Compaction | `CompactionManager(data_dir, schema)` — `maybe_compact(partition, data_files, delta_log, manifest)`, `_bucket_files()`, `_merge_and_dedup()` |
+| `operation.py` | 写编排抽象 | `InsertOp`, `DeleteOp`, `Operation = Union[InsertOp, DeleteOp]` — frozen dataclass + Arrow batch，纯描述无行为 |
+| `collection.py` | 引擎核心 | `Collection(name, data_dir, schema)` — `insert()`, `delete()`, `get()`, `search()`, `_apply(op)`（统一写入路径），`create/drop/list_partitions()`, `flush()`, `close()`, `_alloc_seq()` |
+| `flush.py` | Flush 管线 | `execute_flush(frozen_memtable, frozen_wal, manifest, delta_index, compaction_mgr)` — 7 步流程，**同步阻塞** |
+| `recovery.py` | 崩溃恢复 | `execute_recovery(data_dir, manifest)` — 5 步流程，经由 `WAL.read_operations()` 按 seq 回放 |
+| `compaction.py` | Compaction | `CompactionManager(data_dir, schema)` — `maybe_compact(partition, manifest, delta_index)`，含 tombstone GC |
 
 ```python
 # engine/__init__.py
@@ -570,14 +606,36 @@ class WAL:
 
 ### 9.7 storage/memtable.py
 
+**内部表示**：MemTable 不持有 `dict[pk → record_dict]`。Python dict + record dict 的内存开销是 Arrow 表示的 10-100 倍，且 flush 时还要做一次 Python → Arrow 转换。MemTable 内部维护 **append-only 的 RecordBatch list + 两个轻量索引**：
+
+```
+_insert_batches: list[pa.RecordBatch]              # append-only，每次 apply_insert 追加一个 batch
+_pk_index:       dict[pk → (batch_idx, row_idx)]   # 指向 _insert_batches 中的最新位置
+_delete_index:   dict[pk → delete_seq]             # 删除水位
+```
+
+`_pk_index` 是 lazy 的——同一 pk 的旧版本在 `_insert_batches` 中物理保留，直到 flush 时一次性 dedup 取活跃行。这样：
+
+- **写入零拷贝**：apply_insert 直接 `append(batch)` + 更新 index
+- **flush 几乎零成本**：`pa.Table.from_batches` + 按 `_pk_index.values()` take 活跃行
+- **search 拿到的是 Arrow 列**：不再二次转换
+
+**Cross-clear 必须 seq-aware**（架构不变量 §2）。put / delete 之前先比较 `_seq`，只有当前操作 `_seq` 更大才生效；否则当前操作直接丢弃。**这条不变量决定了 recovery / 未来并发写入都不会触发数据损坏。**
+
 ```python
 class MemTable:
     """Collection 级共享的内存缓冲区。
 
-    内部维护两个独立缓冲区：
-    - insert_buf: dict[pk_value → record_dict]（含 _seq, _partition, 用户字段）
-    - delete_buf: dict[pk_value → (_seq, _partition)]
-    天然 upsert 语义：相同 PK 直接覆盖。
+    内部表示：
+    - _insert_batches: list[pa.RecordBatch]，append-only
+    - _pk_index: dict[pk → (batch_idx, row_idx)]，最新位置索引
+    - _delete_index: dict[pk → delete_seq]，删除水位
+
+    cross-clear 语义：
+    - apply_insert(seq=S, pk=P) 时，若 _delete_index[P] >= S 则操作丢弃（更新的 delete 已存在）；
+      否则插入并清除 _delete_index[P]。
+    - apply_delete(seq=S, pk=P) 时，若 _insert_batches 中 P 的最新 _seq >= S 则操作丢弃；
+      否则更新 _delete_index[P]=S 并清除 _pk_index[P]。
     """
 
     def __init__(self, schema: CollectionSchema) -> None:
@@ -586,39 +644,62 @@ class MemTable:
             schema: CollectionSchema，用于确定 pk_name 和字段信息
         """
 
-    def put(self, _seq: int, _partition: str, **fields) -> None:
-        """写入一条插入记录到 insert_buf。
-        - 相同 PK 直接覆盖（upsert 语义）
-        - 清除同 PK 的 delete 记录（最后一次操作获胜）
-        fields 中必须包含主键字段。"""
+    def apply_insert(self, batch: pa.RecordBatch) -> None:
+        """追加一个 wal_data schema 的 RecordBatch。
+        - batch 的每行必须含 _seq, _partition, pk_field 和所有用户字段
+        - 内部按 seq-aware 规则更新 _pk_index 和清除 _delete_index 中过时条目
+        - batch 物理追加到 _insert_batches，旧版本不删除（flush 时 dedup）
+        """
 
-    def delete(self, pk_value: Any, _seq: int, _partition: str) -> None:
-        """写入一条删除记录到 delete_buf。
-        - 记录 (_seq, _partition)
-        - 清除同 PK 的 insert 记录（最后一次操作获胜）"""
+    def apply_delete(self, batch: pa.RecordBatch) -> None:
+        """处理一个 wal_delta schema 的 RecordBatch。
+        - batch 共享同一 _seq；内部按 seq-aware 规则更新 _delete_index
+        - 不持有 batch 引用（只取 pk + seq 写进 _delete_index）
+        - 处理 _partition='_all' 的跨 partition 删除
+        """
 
     def get(self, pk_value: Any) -> Optional[dict]:
         """点查单条记录。
-        处理 insert/delete 冲突：比较 _seq，返回较新的状态。
-        返回 record dict（不含 _partition）或 None。"""
+        通过 _pk_index 定位最新位置，再检查 _delete_index 是否覆盖。
+        返回 record dict（不含 _partition, _seq）或 None。"""
 
     def flush(self) -> Dict[str, Tuple[Optional[pa.Table], Optional[pa.Table]]]:
         """按 Partition 拆分输出 Arrow Table。
+
+        实现：
+        1. 把 _insert_batches concat 成一个大 Table
+        2. 按 _pk_index.values() 取活跃行（dedup 在这里发生）
+        3. 按 _partition 列拆分成各 partition 的 data_table
+        4. 把 _delete_index 物化成各 partition 的 delta_table
+
         Returns: {partition_name: (data_table, delta_table)}
             - data_table: 使用 data_schema（不含 _partition），可为 None
             - delta_table: 使用 delta_schema（不含 _partition），可为 None
-        调用后 insert_buf 和 delete_buf 不清空（由调用方冻结后丢弃整个 MemTable）。"""
+        调用后内部状态不清空（由调用方冻结后丢弃整个 MemTable）。"""
 
     def size(self) -> int:
-        """返回 len(insert_buf) + len(delete_buf)。"""
+        """返回 len(_pk_index) + len(_delete_index)。
+        注意是"活跃 pk 数"，不是 _insert_batches 总行数——
+        flush 触发阈值用这个，避免同 pk 反复 upsert 把内存撑爆。"""
 
     def get_active_records(
         self, partition_names: Optional[List[str]] = None
     ) -> List[dict]:
-        """返回 insert_buf 中未被 delete_buf 覆盖的活跃记录。
+        """返回 _pk_index 中未被 _delete_index 覆盖的活跃记录。
         用于 search/get 时读取 MemTable 层数据。
         partition_names 不为 None 时，只返回匹配 Partition 的记录。
         返回的 dict 不含 _partition 和 _seq（对外干净）。"""
+```
+
+**关键测试点**（实现时必须覆盖）：
+
+```python
+# 验证 seq-aware cross-clear: 乱序 apply 仍得到正确终态
+mt = MemTable(schema)
+mt.apply_insert(batch_with_pk_X_seq_7)   # 先来个 seq=7
+mt.apply_insert(batch_with_pk_X_seq_5)   # 再来个 seq=5（应丢弃）
+mt.apply_delete(batch_with_pk_X_seq_6)   # 再来个 delete seq=6（应丢弃，因 seq=7 更新）
+assert mt.get("X")["_seq"] == 7          # ← seq=7 必须保留
 ```
 
 ### 9.8 storage/data_file.py
@@ -650,50 +731,99 @@ def get_file_size(path: str) -> int:
     """返回文件字节大小，用于 Compaction 分桶。"""
 ```
 
-### 9.9 storage/delta_log.py
+### 9.9 storage/delta_file.py + storage/delta_index.py
+
+**DeltaLog 拆成两个模块**，与 `data_file.py` 对称：
+
+- `delta_file.py` —— 纯 IO 函数，无状态
+- `delta_index.py` —— 内存 `DeltaIndex` 类，独立可测
+
+**为什么拆**：原 `DeltaLog` 同时管 Parquet IO + 内存索引 + 查询，6 个方法 3 个职责，难单测；拆开后 IO 函数和 `data_file.py` 形成对称结构，内存索引可以脱离磁盘单测，未来想换实现（numpy / pyarrow dict array）也只动一处。
+
+#### 9.9.a delta_file.py（无状态 IO）
 
 ```python
-class DeltaLog:
-    """Delta Log 管理：Parquet 文件读写 + 内存 deleted_map。
+def write_delta_file(
+    delta_table: pa.Table,
+    partition_dir: str,
+    seq_min: int,
+    seq_max: int,
+) -> str:
+    """将 delta Arrow Table 写入 delta Parquet 文件。
+    文件路径: {partition_dir}/delta/delta_{seq_min:06d}_{seq_max:06d}.parquet
+    自动创建 delta/ 子目录。
+    Returns: 相对路径（相对于 Collection data_dir）。"""
 
-    deleted_map 常驻内存，启动时从所有 delta 文件重建，
-    运行时随 flush/compaction 增量更新。
+
+def read_delta_file(path: str) -> pa.Table:
+    """读取 delta Parquet 文件，返回 Arrow Table（pk_field + _seq 两列）。"""
+```
+
+#### 9.9.b delta_index.py（内存索引）
+
+```python
+class DeltaIndex:
+    """内存中的 delete 水位索引：pk → max_delete_seq。
+
+    启动时通过 rebuild_from() 从所有 delta 文件重建；
+    运行时通过 add_batch() 增量更新；
+    通过 gc_below() 在 Compaction 后回收老 tombstone（架构不变量 §3）。
     """
 
     def __init__(self, pk_name: str) -> None:
         """
         Args:
-            pk_name: 主键字段名（用于从 Parquet 中提取 PK 列）
+            pk_name: 主键字段名（用于从 batch 中提取 pk 列）
         """
 
-    def load_all(self, partition_delta_files: Dict[str, List[str]]) -> None:
-        """从所有 Partition 的 delta 文件重建 deleted_map。
-        Args:
-            partition_delta_files: {partition_name: [绝对路径列表]}
-        启动时调用一次。"""
-
-    def write_and_update(self, delta_table: pa.Table, path: str) -> None:
-        """写入新 delta Parquet 文件，同时更新内存 deleted_map。
-        flush 步骤 3（写文件）+ 步骤 4（更新内存）合并。"""
-
-    def update_memory(self, delta_table: pa.Table) -> None:
-        """只更新内存 deleted_map，不写文件。
-        用于 WAL 重放等场景。"""
+    def add_batch(self, delta_batch: pa.RecordBatch) -> None:
+        """把 delta batch 中的 (pk, _seq) 合并进内存索引。
+        - 对每个 pk 取 max(已有 seq, 新 seq)
+        - 不写磁盘
+        - 用于 flush 后更新 + WAL 重放
+        """
 
     def is_deleted(self, pk_value: Any, data_seq: int) -> bool:
-        """判断某条数据记录是否已被删除。
-        规则: deleted_map[pk] > data_seq → 已删除。"""
+        """判断某条数据记录是否被删除。
+        规则: _map.get(pk, -1) > data_seq → 已删除。"""
 
-    def remove_files(self, files: List[str]) -> None:
-        """删除已消费的 delta 文件（Compaction 后调用）。"""
+    def gc_below(self, min_active_data_seq: int) -> int:
+        """回收 delete_seq < min_active_data_seq 的所有 tombstone。
 
-    def remove_entries(self, pk_values: List[Any]) -> None:
-        """从 deleted_map 中移除指定 PK（Compaction 已物化删除后调用）。"""
+        Args:
+            min_active_data_seq: 当前 manifest 中所有 data 文件 seq_min 的最小值
+        Returns:
+            被回收的条目数
+
+        正确性：任何 delete_seq < min_active_data_seq 的 tombstone，对应的所有
+        data 行都已经被 compaction 物理消化掉，不存在残留 data 行需要它过滤，
+        因此可以安全丢弃。详见架构不变量 §3。
+        """
+
+    @classmethod
+    def rebuild_from(
+        cls,
+        pk_name: str,
+        partition_delta_files: Dict[str, List[str]],
+    ) -> "DeltaIndex":
+        """启动时一次性重建。
+        Args:
+            partition_delta_files: {partition_name: [绝对路径列表]}
+        Returns: 完整 DeltaIndex 实例
+        """
+
+    def __len__(self) -> int:
+        """当前活跃 tombstone 条目数（监控/测试用）。"""
 
     @property
-    def deleted_map(self) -> Dict[Any, int]:
-        """只读访问: pk_value → max_delete_seq。"""
+    def snapshot(self) -> Dict[Any, int]:
+        """只读快照: pk_value → max_delete_seq（拷贝，不持有内部引用）。"""
 ```
+
+**关键点**：
+- `add_batch` 接受 `pa.RecordBatch` 而不是 `pa.Table`，与 WAL / MemTable 的颗粒度统一
+- `gc_below` 是 Compaction 调用的入口，封装架构不变量 §3 的 GC 规则
+- 没有 `remove_files` 方法——文件管理是 Manifest 的事，DeltaIndex 不持有文件路径
 
 ### 9.10 storage/manifest.py
 
@@ -702,7 +832,12 @@ class Manifest:
     """全局状态快照文件，通过原子替换（write-tmp + rename）更新。
 
     记录当前 _seq、Schema 版本、各 Partition 的文件列表、活跃 WAL。
-    是系统唯一的 truth source。
+    是系统唯一的 truth source（架构不变量 §5）。
+
+    持久化布局：
+        data_dir/
+          ├── manifest.json          # 当前版本
+          └── manifest.json.prev     # 上一版本备份（兜底一次序列化事故）
     """
 
     def __init__(self, data_dir: str) -> None: ...
@@ -710,11 +845,32 @@ class Manifest:
     # ── 持久化 ──
 
     def save(self) -> None:
-        """原子更新 manifest.json：write-tmp + os.rename。version 自动 +1。"""
+        """原子更新 manifest.json，version 自动 +1。
+
+        步骤：
+        1. 序列化到 manifest.json.tmp
+        2. 若 manifest.json 存在，cp 它 → manifest.json.prev（覆盖旧 .prev）
+        3. os.rename(manifest.json.tmp, manifest.json)  ← 原子切换
+        4. fsync data_dir 目录确保 rename 持久化
+
+        失败语义：步骤 1 失败 → tmp 文件孤立，无影响；
+                  步骤 2 失败 → 抛异常，磁盘上仍是上一次成功 save 的 manifest；
+                  步骤 3 是原子的，要么成功要么失败。
+        """
 
     @classmethod
     def load(cls, data_dir: str) -> "Manifest":
-        """加载 manifest.json。文件不存在则返回初始状态（version=0, _default Partition）。"""
+        """加载 manifest.json。
+
+        加载策略：
+        1. 尝试 manifest.json
+           - 文件不存在 → 返回初始状态（version=0, _default Partition），不报错
+           - 加载成功 → 返回
+           - 加载失败（JSON 损坏、字段缺失）→ 警告日志 + 走第 2 步
+        2. 尝试 manifest.json.prev
+           - 加载成功 → 警告日志（"using prev manifest, last save likely corrupted"）+ 返回
+           - 加载失败 → 抛 ManifestCorruptedError
+        """
 
     # ── 文件管理（per Partition）──
 
@@ -794,13 +950,13 @@ class Manifest:
 def build_valid_mask(
     all_pks: np.ndarray,
     all_seqs: np.ndarray,
-    delta_log: "DeltaLog",
+    delta_index: "DeltaIndex",
 ) -> np.ndarray:
     """构建有效行 bitmap（np.ndarray[bool]，True=有效）。
 
     两步过滤：
     1. 去重：同一 PK 出现多次时，只保留 _seq 最大的行，其余标记 False
-    2. 删除过滤：调用 delta_log.is_deleted(pk, seq)，已删除标记 False
+    2. 删除过滤：调用 delta_index.is_deleted(pk, seq)，已删除标记 False
 
     将来扩展：
     3. 标量过滤（filter expression）
@@ -808,7 +964,7 @@ def build_valid_mask(
     Args:
         all_pks: shape=(N,) 所有行的主键值
         all_seqs: shape=(N,) 所有行的 _seq
-        delta_log: DeltaLog 实例，提供 is_deleted() 查询
+        delta_index: DeltaIndex 实例，提供 is_deleted() 查询
 
     Returns:
         np.ndarray[bool] shape=(N,)
@@ -857,7 +1013,7 @@ def execute_search(
     all_seqs: np.ndarray,           # shape=(N,)，所有候选行的 _seq
     all_vectors: np.ndarray,        # shape=(N, dim)，所有候选行的向量
     all_records: List[dict],        # 所有候选行的完整记录（用于返回 entity 字段）
-    delta_log: "DeltaLog",
+    delta_index: "DeltaIndex",
     top_k: int,
     metric_type: str,
 ) -> List[List[dict]]:
@@ -890,19 +1046,19 @@ def execute_flush(
     data_dir: str,
     schema: "CollectionSchema",
     manifest: "Manifest",
-    delta_log: "DeltaLog",
+    delta_index: "DeltaIndex",
     compaction_mgr: "CompactionManager",
 ) -> None:
-    """执行 Flush 管线（7 步）。
+    """执行 Flush 管线（7 步，**同步阻塞**——架构不变量 §6）。
 
     前置条件：调用方已完成 Step 1（冻结旧 MemTable/WAL，创建新的）。
 
     Step 2: frozen_memtable.flush() → {partition: (data_table, delta_table)}
-    Step 3: 写 Parquet 文件到各 Partition 目录
-    Step 4: 更新 delta_log 内存（delta_log.update_memory）
-    Step 5: 原子更新 Manifest（新增文件 + 更新 current_seq + 切换 active_wal）
-    Step 6: 删除旧 WAL（frozen_wal.close_and_delete）
-    Step 7: 按 Partition 触发 compaction_mgr.maybe_compact()
+    Step 3: 写 Parquet 文件到各 Partition 目录（含 delta Parquet）
+    Step 4: 更新 delta_index 内存（add_batch 每个 delta_table 的 RecordBatch）
+    Step 5: 原子更新 Manifest（新增文件 + 更新 current_seq + 切换 active_wal + .prev 备份）
+    Step 6: 删除旧 WAL（frozen_wal.close_and_delete，含 fsync）
+    Step 7: 按 Partition 触发 compaction_mgr.maybe_compact()（其中含 tombstone GC）
 
     崩溃安全：
     - Step 3 崩溃 → Manifest 未更新，Parquet 成为孤儿文件，recovery 清理
@@ -918,20 +1074,21 @@ def execute_recovery(
     data_dir: str,
     schema: "CollectionSchema",
     manifest: "Manifest",
-) -> Tuple["MemTable", "DeltaLog", int]:
+) -> Tuple["MemTable", "DeltaIndex", int]:
     """执行崩溃恢复（5 步）。
 
     前置条件：调用方已加载 Manifest（Step 1）。
 
-    Step 2: 扫描 wal/ 目录，有未清理的 WAL → 重放到新建 MemTable
+    Step 2: 扫描 wal/ 目录，有未清理的 WAL → 按 _seq 顺序重放 Operations 到新建 MemTable
+            （重放经由 WAL.read_operations() Iterator[Operation]，详见 §9.x operation）
     Step 3: 校验 Manifest 中的文件是否实际存在（处理 Compaction 中途崩溃）
     Step 4: 清理孤儿文件（在磁盘但不在 Manifest 中的 Parquet）
-    Step 5: 从所有 Partition 的 delta_files 重建 DeltaLog.deleted_map
+    Step 5: DeltaIndex.rebuild_from(所有 Partition 的 delta_files)
 
     Returns:
-        (memtable, delta_log, next_wal_number)
+        (memtable, delta_index, next_wal_number)
         - memtable: 重放 WAL 后的 MemTable（无 WAL 则为空 MemTable）
-        - delta_log: 重建后的 DeltaLog
+        - delta_index: 重建后的 DeltaIndex
         - next_wal_number: 下一轮 WAL 应使用的编号
     """
 ```
@@ -953,7 +1110,7 @@ class CompactionManager:
         self,
         partition: str,
         manifest: "Manifest",
-        delta_log: "DeltaLog",
+        delta_index: "DeltaIndex",
     ) -> None:
         """检查指定 Partition 是否需要 Compaction，满足条件则执行。
 
@@ -966,12 +1123,207 @@ class CompactionManager:
         2. 选择目标桶中的文件
         3. 读取并合并 Arrow Tables
         4. 按主键去重（保留 max _seq）
-        5. 用 delta_log.is_deleted() 过滤已删除记录
+        5. 用 delta_index.is_deleted() 过滤已删除记录
         6. 写入新 Parquet 文件
         7. 原子更新 Manifest（移除旧文件 + 新增新文件 + 移除已消费 delta 文件）
         8. 删除旧文件和已消费的 delta 文件
+        9. **Tombstone GC**: 调用 delta_index.gc_below(min_active_data_seq)
+           其中 min_active_data_seq 来自 Manifest 中所有 partition 的 data 文件 seq_min 的全局最小值
+        """
+
+    def _global_min_active_data_seq(self, manifest: "Manifest") -> int:
+        """计算所有 partition 中 data 文件 seq_min 的最小值。
+
+        用于 tombstone GC 触发——任何 delete_seq 小于此值的 tombstone 都
+        不可能再过滤到任何 data 行（因为所有 seq < 此值的 data 都已被
+        compaction 物理消化掉）。
+
+        Returns:
+            全局最小 seq_min；若无 data 文件，返回 sys.maxsize（GC 会清空 delta_index）
         """
 ```
+
+**Tombstone GC 不变量**（架构不变量 §3 的实现说明）：
+
+```
+对任意 delete tombstone (pk, delete_seq):
+  存在残留 data 行需要它过滤  ⟺  ∃ 某个 data 文件含 pk 且 seq_min ≤ delete_seq
+
+保守 GC 规则（MVP 用）:
+  if delete_seq < min(所有 data 文件的 seq_min):
+      drop tombstone(pk, delete_seq)
+
+正确性证明：
+  delete_seq < min_seq_min ⟹ 不存在 seq_min ≤ delete_seq 的 data 文件
+                         ⟹ 不存在残留 data 行需要它过滤
+                         ⟹ 安全可丢
+```
+
+### 9.16.5 engine/operation.py（写编排抽象层）
+
+**目的**：为 insert / delete 流水线提供统一的编排入口。**统一 orchestration，保留 representation**——schema、buffer、parquet 文件类型该分仍然分，只在编排层（Collection / WAL / MemTable / recovery）抽象一层。
+
+**为什么要有这一层**：
+
+1. Collection 的 `_apply` 是单一写入路径——任何写操作的唯一入口，未来加新操作（schema migration、bulk import）只在一处加 dispatch
+2. WAL.write / MemTable.apply 都接受 Operation，不需要为每种操作各开一个方法
+3. recovery 路径变成 5 行 `for op in WAL.read_operations(): memtable.apply(op)`，告别 row-by-row 的嵌套循环
+4. Operation 是冻结 dataclass + Arrow batch，不持有 Collection / WAL 引用——纯描述，不带行为
+
+```python
+# engine/operation.py
+
+from dataclasses import dataclass
+from typing import Union
+import pyarrow as pa
+
+
+@dataclass(frozen=True)
+class InsertOp:
+    """一次 insert 调用的事务描述。
+
+    batch 的 schema = wal_data_schema（含 _seq, _partition, 用户字段, $meta），
+    每行都已经分配独立的 _seq。
+    """
+    partition: str          # 单个 partition 名
+    batch: pa.RecordBatch   # 含 _seq, _partition, 用户字段, $meta
+
+    @property
+    def seq_min(self) -> int:
+        """batch 中最小 _seq。"""
+
+    @property
+    def seq_max(self) -> int:
+        """batch 中最大 _seq。"""
+
+    @property
+    def num_rows(self) -> int:
+        """batch 行数。"""
+
+
+@dataclass(frozen=True)
+class DeleteOp:
+    """一次 delete 调用的事务描述。
+
+    batch 的 schema = wal_delta_schema（含 pk, _seq, _partition），
+    整个 batch 共享同一个 _seq。partition 可以是 '_all'（跨所有 partition 删除）。
+    """
+    partition: str          # 可以是 ALL_PARTITIONS = "_all"
+    batch: pa.RecordBatch   # 含 pk, _seq, _partition
+
+    @property
+    def seq(self) -> int:
+        """batch 共享的 _seq。"""
+
+    @property
+    def num_rows(self) -> int:
+        """batch 行数（被删除的 pk 数）。"""
+
+
+Operation = Union[InsertOp, DeleteOp]
+```
+
+**Collection 入口的样子**（§9.17 会重写 insert/delete，这里先示意）：
+
+```python
+def insert(self, records, partition_name="_default"):
+    self._validate_records(records)
+    seq_start = self._alloc_seq(len(records))
+    batch = self._build_wal_data_batch(records, partition_name, seq_start)
+    op = InsertOp(partition=partition_name, batch=batch)
+    self._apply(op)
+    return [r[self.pk_field] for r in records]
+
+def delete(self, pks, partition_name=None):
+    seq = self._alloc_seq(1)
+    partition = partition_name or ALL_PARTITIONS
+    batch = self._build_wal_delta_batch(pks, partition, seq)
+    op = DeleteOp(partition=partition, batch=batch)
+    self._apply(op)
+    return len(pks)
+
+def _apply(self, op: Operation) -> None:
+    """单一写入路径——dispatch 到 raw batch 接口。
+
+    Operation 抽象只活在 engine 层。WAL / MemTable 不知道它，
+    所以 dispatch 必须在这里显式做。
+    """
+    if isinstance(op, InsertOp):
+        self.wal.write_insert(op.batch)
+        self.memtable.apply_insert(op.batch)
+    else:  # DeleteOp
+        self.wal.write_delete(op.batch)
+        self.memtable.apply_delete(op.batch)
+    if self.memtable.size() >= MEMTABLE_SIZE_LIMIT:
+        self._trigger_flush()
+```
+
+**WAL / MemTable 不知道 Operation**——它们仍然只接受 raw `pa.RecordBatch`，dispatch 在 Collection.\_apply 里完成。
+
+**为什么这样设计**：依赖层级。`storage/` 在 Level 2，`engine/` 在 Level 5/6，让 storage 反向 import engine 的 `Operation` 类型会破坏层级。Operation 是事务编排概念，本来就属于 engine 层。
+
+```python
+class WAL:
+    # 仍然是 raw batch 接口（Phase 1 已落地）
+    def write_insert(self, record_batch: pa.RecordBatch) -> None: ...
+    def write_delete(self, record_batch: pa.RecordBatch) -> None: ...
+
+    # Recovery 路径在 engine/recovery.py 里包装：
+    # raw WAL.recover() → 拼成 Iterator[Operation]
+    @staticmethod
+    def recover(wal_dir, wal_number) -> Tuple[List[pa.RecordBatch], List[pa.RecordBatch]]:
+        ...
+
+
+class MemTable:
+    # 仍然是 raw batch 接口
+    def apply_insert(self, batch: pa.RecordBatch) -> None: ...
+    def apply_delete(self, batch: pa.RecordBatch) -> None: ...
+```
+
+**Operation 的统一回放在 engine/recovery.py 里实现**（Phase 3 落地）：
+
+```python
+# engine/recovery.py
+def replay_wal_operations(
+    wal_dir: str, wal_number: int, pk_field: str,
+) -> Iterator[Operation]:
+    """读 WAL 文件，按 _seq 顺序 yield Operation。
+
+    实现：
+    1. WAL.recover(wal_dir, wal_number) → (data_batches, delta_batches)
+    2. 把每个 batch 包成 InsertOp(partition=..., batch=b) / DeleteOp(...)
+    3. 按起始 _seq 归并排序后 yield
+
+    按 _seq 顺序回放是为了让 recovery 后 MemTable 的 max observed seq
+    天然等于最后一次 yield 的 op.seq——并非正确性必需（MemTable 已 seq-aware），
+    而是让 next_seq 推导更干净。
+    """
+```
+
+**Recovery 受益**：
+
+```python
+def execute_recovery(...):
+    memtable = MemTable(schema)
+    max_seq = manifest.current_seq
+    for n in WAL.find_wal_files(wal_dir):
+        for op in WAL.read_operations(wal_dir, n, pk_field):
+            memtable.apply(op)
+            if isinstance(op, InsertOp):
+                max_seq = max(max_seq, op.seq_max)
+            else:
+                max_seq = max(max_seq, op.seq)
+    return memtable, delta_index, max_seq + 1
+```
+
+**保持不动的部分**（不要被"统一"诱惑）：
+
+- `insert_buf` 与 `delete_buf` 内部表示**不合并**（语义不同：覆盖 vs max 累积）
+- `wal_data_schema` 与 `wal_delta_schema` **不合并**（schema 是数据契约，不是编排概念）
+- `InsertOp` 与 `DeleteOp` **不继承共同 base class**——用 `Union` + `isinstance` dispatch
+- **不**给 Operation 加 `execute(collection)` 方法——会变成 god object
+- **不**让 storage 层 import Operation——dispatch 留在 Collection.\_apply
 
 ### 9.17 engine/collection.py
 
