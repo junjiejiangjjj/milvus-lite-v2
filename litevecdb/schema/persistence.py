@@ -1,0 +1,157 @@
+"""Schema serialization to / from JSON.
+
+Format (one schema = one JSON file):
+
+    {
+      "collection_name": "...",
+      "version": 1,
+      "enable_dynamic_field": false,
+      "fields": [
+        {
+          "name": "id",
+          "dtype": "varchar",
+          "is_primary": true,
+          "dim": null,
+          "max_length": null,
+          "nullable": false,
+          "default_value": null
+        },
+        ...
+      ]
+    }
+
+Atomic write: dump to ``path + ".tmp"`` then ``os.rename`` over the target.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any, Tuple
+
+from litevecdb.exceptions import SchemaValidationError
+from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+
+
+SCHEMA_FORMAT_VERSION = 1
+
+
+# ---------------------------------------------------------------------------
+# Save
+# ---------------------------------------------------------------------------
+
+def save_schema(
+    schema: CollectionSchema,
+    collection_name: str,
+    path: str,
+) -> None:
+    """Serialize *schema* to *path* atomically (write-tmp + rename)."""
+    payload = {
+        "collection_name": collection_name,
+        "schema_format_version": SCHEMA_FORMAT_VERSION,
+        "version": schema.version,
+        "enable_dynamic_field": schema.enable_dynamic_field,
+        "fields": [_field_to_dict(f) for f in schema.fields],
+    }
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.rename(tmp_path, path)
+
+
+# ---------------------------------------------------------------------------
+# Load
+# ---------------------------------------------------------------------------
+
+def load_schema(path: str) -> Tuple[str, CollectionSchema]:
+    """Load (collection_name, CollectionSchema) from *path*.
+
+    Raises:
+        FileNotFoundError: file does not exist
+        SchemaValidationError: JSON malformed or missing required keys
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except json.JSONDecodeError as e:
+        raise SchemaValidationError(f"schema file {path!r} is not valid JSON: {e}") from e
+
+    if not isinstance(payload, dict):
+        raise SchemaValidationError(f"schema file {path!r} root must be an object")
+
+    try:
+        collection_name = payload["collection_name"]
+        version = payload["version"]
+        enable_dynamic = payload.get("enable_dynamic_field", False)
+        fields_raw = payload["fields"]
+    except KeyError as e:
+        raise SchemaValidationError(
+            f"schema file {path!r} missing key {e.args[0]!r}"
+        ) from e
+
+    if not isinstance(fields_raw, list):
+        raise SchemaValidationError(
+            f"schema file {path!r} 'fields' must be a list"
+        )
+
+    fields = [_field_from_dict(d, path) for d in fields_raw]
+    schema = CollectionSchema(
+        fields=fields,
+        version=int(version),
+        enable_dynamic_field=bool(enable_dynamic),
+    )
+    return str(collection_name), schema
+
+
+# ---------------------------------------------------------------------------
+# Field <-> dict
+# ---------------------------------------------------------------------------
+
+def _field_to_dict(f: FieldSchema) -> dict:
+    return {
+        "name": f.name,
+        "dtype": f.dtype.value,
+        "is_primary": f.is_primary,
+        "dim": f.dim,
+        "max_length": f.max_length,
+        "nullable": f.nullable,
+        "default_value": f.default_value,
+    }
+
+
+def _field_from_dict(d: Any, source: str) -> FieldSchema:
+    if not isinstance(d, dict):
+        raise SchemaValidationError(
+            f"schema file {source!r} field entry must be an object, got {type(d).__name__}"
+        )
+    try:
+        name = d["name"]
+        dtype_str = d["dtype"]
+    except KeyError as e:
+        raise SchemaValidationError(
+            f"schema file {source!r} field missing key {e.args[0]!r}"
+        ) from e
+
+    try:
+        dtype = DataType(dtype_str)
+    except ValueError as e:
+        raise SchemaValidationError(
+            f"schema file {source!r} unknown dtype {dtype_str!r}"
+        ) from e
+
+    return FieldSchema(
+        name=str(name),
+        dtype=dtype,
+        is_primary=bool(d.get("is_primary", False)),
+        dim=d.get("dim"),
+        max_length=d.get("max_length"),
+        nullable=bool(d.get("nullable", False)),
+        default_value=d.get("default_value"),
+    )

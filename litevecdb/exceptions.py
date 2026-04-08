@@ -28,3 +28,11 @@ class DefaultPartitionError(LiteVecDBError):
 
 class WALCorruptedError(LiteVecDBError):
     """WAL file is corrupted and cannot be fully recovered."""
+
+
+class ManifestCorruptedError(LiteVecDBError):
+    """Both manifest.json and manifest.json.prev failed to load."""
+
+
+class DataDirLockedError(LiteVecDBError):
+    """Another process holds the data_dir LOCK file."""
