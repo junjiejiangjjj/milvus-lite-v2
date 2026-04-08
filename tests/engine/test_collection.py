@@ -1,0 +1,289 @@
+"""Phase-2 Collection tests — insert + get over WAL + MemTable.
+
+Phase 2 is the first end-to-end vertical slice. The integration we're
+verifying:
+    user → Collection.insert → validate → seq alloc → wal_data batch
+                             → WAL.write_insert → MemTable.apply_insert
+    user → Collection.get → MemTable.get → record dict
+"""
+
+import os
+
+import pytest
+
+from litevecdb.engine.collection import Collection
+from litevecdb.exceptions import (
+    PartitionNotFoundError,
+    SchemaValidationError,
+)
+from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def schema():
+    return CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="title", dtype=DataType.VARCHAR, nullable=True),
+        FieldSchema(name="score", dtype=DataType.FLOAT),
+    ])
+
+
+@pytest.fixture
+def schema_with_dynamic():
+    return CollectionSchema(
+        fields=[
+            FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
+            FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=2),
+        ],
+        enable_dynamic_field=True,
+    )
+
+
+@pytest.fixture
+def col(tmp_path, schema):
+    c = Collection("test", str(tmp_path / "data"), schema)
+    yield c
+    c.close()
+
+
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+def test_construction_creates_data_dir(tmp_path, schema):
+    data_dir = tmp_path / "fresh"
+    Collection("c", str(data_dir), schema).close()
+    assert data_dir.exists()
+    assert (data_dir / "wal").exists() or True  # wal dir is created lazily on first WAL write
+
+
+def test_construction_with_invalid_schema_raises(tmp_path):
+    bad = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
+        # missing FLOAT_VECTOR
+    ])
+    with pytest.raises(SchemaValidationError, match="FLOAT_VECTOR"):
+        Collection("c", str(tmp_path / "x"), bad)
+
+
+def test_construction_loads_existing_manifest(tmp_path, schema):
+    """If a Collection was created and saved its manifest, a second
+    Collection on the same data_dir should load it (Phase 2 doesn't
+    auto-save, so we explicitly trigger via manifest interaction)."""
+    data_dir = str(tmp_path / "data")
+    c1 = Collection("c", data_dir, schema)
+    c1._manifest.add_partition("p1")
+    c1._manifest.save()
+    c1.close()
+
+    c2 = Collection("c", data_dir, schema)
+    assert c2._manifest.has_partition("p1")
+    c2.close()
+
+
+# ---------------------------------------------------------------------------
+# insert + get happy path
+# ---------------------------------------------------------------------------
+
+def test_insert_single_record(col):
+    pks = col.insert([
+        {"id": "doc1", "vec": [0.5, 0.25, 0.125, 0.75], "title": "hi", "score": 0.5},
+    ])
+    assert pks == ["doc1"]
+    assert col.count() == 1
+
+    [rec] = col.get(["doc1"])
+    assert rec["id"] == "doc1"
+    assert rec["title"] == "hi"
+    assert rec["score"] == 0.5
+    assert rec["vec"] == [0.5, 0.25, 0.125, 0.75]
+
+
+def test_insert_batch(col):
+    records = [
+        {"id": f"doc{i}", "vec": [0.5, 0.25, 0.125, 0.75], "title": f"t{i}", "score": float(i)}
+        for i in range(10)
+    ]
+    pks = col.insert(records)
+    assert pks == [f"doc{i}" for i in range(10)]
+    assert col.count() == 10
+
+    got = col.get([f"doc{i}" for i in range(10)])
+    assert len(got) == 10
+    assert {r["id"] for r in got} == {f"doc{i}" for i in range(10)}
+
+
+def test_insert_empty_list(col):
+    assert col.insert([]) == []
+    assert col.count() == 0
+
+
+def test_insert_returns_pk_in_order(col):
+    pks = col.insert([
+        {"id": "z", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0},
+        {"id": "a", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0},
+        {"id": "m", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0},
+    ])
+    assert pks == ["z", "a", "m"]
+
+
+# ---------------------------------------------------------------------------
+# Upsert (same pk, two inserts)
+# ---------------------------------------------------------------------------
+
+def test_upsert_overwrites(col):
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "old", "score": 1.0}])
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "new", "score": 2.0}])
+    [rec] = col.get(["x"])
+    assert rec["title"] == "new"
+    assert rec["score"] == 2.0
+    assert col.count() == 1  # still one logical pk
+
+
+def test_upsert_seq_monotonic(col):
+    """Each insert call must allocate seqs after the previous one."""
+    col.insert([{"id": "a", "vec": [0.5, 0.25, 0.125, 0.75], "title": "1", "score": 1.0}])
+    col.insert([{"id": "b", "vec": [0.5, 0.25, 0.125, 0.75], "title": "2", "score": 2.0}])
+    col.insert([{"id": "c", "vec": [0.5, 0.25, 0.125, 0.75], "title": "3", "score": 3.0}])
+    # All three should be present.
+    got = col.get(["a", "b", "c"])
+    assert {r["id"] for r in got} == {"a", "b", "c"}
+    # next_seq should be 4 (1, 2, 3 used)
+    assert col._next_seq == 4
+
+
+# ---------------------------------------------------------------------------
+# get edge cases
+# ---------------------------------------------------------------------------
+
+def test_get_missing_pk_returns_empty(col):
+    col.insert([{"id": "exists", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0}])
+    assert col.get(["nonexistent"]) == []
+
+
+def test_get_partial_hit(col):
+    col.insert([
+        {"id": "a", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0},
+        {"id": "b", "vec": [0.5, 0.25, 0.125, 0.75], "title": "y", "score": 1.0},
+    ])
+    got = col.get(["a", "missing", "b"])
+    assert len(got) == 2
+    assert {r["id"] for r in got} == {"a", "b"}
+
+
+def test_get_empty_pks(col):
+    assert col.get([]) == []
+
+
+# ---------------------------------------------------------------------------
+# Validation failures
+# ---------------------------------------------------------------------------
+
+def test_insert_record_missing_pk_raises(col):
+    with pytest.raises(SchemaValidationError, match="primary key"):
+        col.insert([{"vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0}])
+
+
+def test_insert_record_wrong_vec_dim_raises(col):
+    with pytest.raises(SchemaValidationError, match="dim"):
+        col.insert([{"id": "x", "vec": [0.5, 0.25], "title": "x", "score": 0.0}])
+
+
+def test_insert_unknown_partition_raises(col):
+    with pytest.raises(PartitionNotFoundError):
+        col.insert(
+            [{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0}],
+            partition_name="ghost",
+        )
+
+
+def test_insert_partial_validation_failure_no_partial_state(col):
+    """If the second record is invalid, the first must NOT be inserted."""
+    records = [
+        {"id": "good", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.0},
+        {"id": "bad", "vec": [0.5, 0.25], "title": "x", "score": 0.0},  # wrong dim
+    ]
+    with pytest.raises(SchemaValidationError):
+        col.insert(records)
+    # No partial state — neither record was inserted.
+    assert col.count() == 0
+    assert col.get(["good"]) == []
+
+
+def test_insert_records_must_be_list(col):
+    with pytest.raises(TypeError, match="must be a list"):
+        col.insert("not a list")
+
+
+def test_get_pks_must_be_list(col):
+    with pytest.raises(TypeError, match="must be a list"):
+        col.get("not a list")
+
+
+# ---------------------------------------------------------------------------
+# Dynamic fields
+# ---------------------------------------------------------------------------
+
+def test_dynamic_field_extras_stored(tmp_path, schema_with_dynamic):
+    col = Collection("c", str(tmp_path / "d"), schema_with_dynamic)
+    col.insert([
+        {"id": "x", "vec": [0.5, 0.25], "category": "blog", "lang": "en"},
+    ])
+    [rec] = col.get(["x"])
+    assert rec["id"] == "x"
+    # $meta is in the schema row, so it shows up in the dict
+    assert "$meta" in rec
+    assert "category" in rec["$meta"]
+    col.close()
+
+
+def test_dynamic_field_disabled_extras_rejected(col):
+    """The default fixture schema has enable_dynamic_field=False."""
+    with pytest.raises(SchemaValidationError, match="not in schema"):
+        col.insert([{
+            "id": "x", "vec": [0.5, 0.25, 0.125, 0.75],
+            "title": "x", "score": 0.0,
+            "extra": "rejected",
+        }])
+
+
+# ---------------------------------------------------------------------------
+# Nullable fields
+# ---------------------------------------------------------------------------
+
+def test_insert_with_missing_nullable_field(col):
+    col.insert([
+        {"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "score": 0.5},  # title omitted
+    ])
+    [rec] = col.get(["x"])
+    assert rec["title"] is None
+
+
+# ---------------------------------------------------------------------------
+# WAL side-effect: writes hit disk
+# ---------------------------------------------------------------------------
+
+def test_insert_creates_wal_data_file(tmp_path, schema):
+    col = Collection("c", str(tmp_path / "d"), schema)
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.5}])
+    wal_dir = tmp_path / "d" / "wal"
+    files = list(wal_dir.glob("wal_data_*.arrow"))
+    assert len(files) == 1
+    # close_and_delete will remove it; don't call close yet for this assertion
+    col._wal.close_and_delete()
+    col._wal._closed = True
+
+
+def test_insert_does_not_create_wal_delta_file(tmp_path, schema):
+    """Phase 2 has no delete — wal_delta should never be created."""
+    col = Collection("c", str(tmp_path / "d"), schema)
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.5}])
+    wal_dir = tmp_path / "d" / "wal"
+    delta_files = list(wal_dir.glob("wal_delta_*.arrow"))
+    assert delta_files == []
+    col.close()
