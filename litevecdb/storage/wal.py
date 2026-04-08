@@ -151,7 +151,16 @@ class WAL:
     # ── write ───────────────────────────────────────────────────
 
     def write_insert(self, record_batch: pa.RecordBatch) -> None:
-        """Append *record_batch* to the wal_data file (lazy init)."""
+        """Append *record_batch* to the wal_data file (lazy init).
+
+        After every write we flush Python's userspace buffer so that the
+        bytes reach the OS page cache. This is the minimum guarantee
+        needed for "any process death (not just OS crash) preserves the
+        write" — without it, a SIGKILL or finalizer-skipping path could
+        lose data still buffered in the Python file object.
+        ``sync_mode="batch"`` additionally fsyncs to disk for OS-crash
+        durability.
+        """
         assert not self._closed, "WAL already closed"
 
         if self._data_writer is None:
@@ -163,8 +172,10 @@ class WAL:
             self._data_writer = pa.ipc.new_stream(self._data_sink, self._wal_data_schema)
 
         self._data_writer.write_batch(record_batch)
+        # Always flush Python buffer → OS. Cheap (one syscall) and
+        # required for the recovery contract under any crash semantics.
+        self._data_sink.flush()
         if self._sync_mode == "batch":
-            self._data_sink.flush()
             os.fsync(self._data_sink.fileno())
 
     def write_delete(self, record_batch: pa.RecordBatch) -> None:
@@ -180,8 +191,8 @@ class WAL:
             self._delta_writer = pa.ipc.new_stream(self._delta_sink, self._wal_delta_schema)
 
         self._delta_writer.write_batch(record_batch)
+        self._delta_sink.flush()
         if self._sync_mode == "batch":
-            self._delta_sink.flush()
             os.fsync(self._delta_sink.fileno())
 
     # ── lifecycle ───────────────────────────────────────────────

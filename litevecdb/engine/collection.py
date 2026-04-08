@@ -1,17 +1,22 @@
 """Collection — engine entry point.
 
-Phase 2 scope (per roadmap):
+Phase 3 scope:
     - insert(records, partition_name="_default")
     - get(pks, partition_names=None)
-    - _alloc_seq + _apply orchestration
-    - WAL + MemTable + minimal Manifest
+    - Synchronous flush triggered when MemTable.size() >= MEMTABLE_SIZE_LIMIT
+    - Crash recovery on construction (replays WAL, rebuilds delta_index)
+    - WAL + MemTable + Manifest + DeltaIndex
 
 NOT yet:
-    - flush, recovery, search, delete, compaction, partition CRUD
-    - These land in Phase 3-7.
+    - search (Phase 4)
+    - delete (Phase 5) — Collection.delete is not exposed, but the
+      plumbing (DeleteOp dispatch in _apply, MemTable.apply_delete)
+      is in place so Phase 5 just adds the public method.
+    - compaction (Phase 6)
+    - partition CRUD (Phase 7)
 
-Layering: Collection sits at the top of the engine layer. It is the only
-place that knows about Operation dispatch — storage/wal.py and
+Layering: Collection sits at the top of the engine layer. It is the
+only place that knows about Operation dispatch — storage/wal.py and
 storage/memtable.py both still take raw RecordBatches. This keeps the
 storage layer free of engine-layer types.
 """
@@ -23,8 +28,10 @@ from typing import Any, List, Optional
 
 import pyarrow as pa
 
-from litevecdb.constants import DEFAULT_PARTITION
-from litevecdb.engine.operation import InsertOp, Operation
+from litevecdb.constants import DEFAULT_PARTITION, MEMTABLE_SIZE_LIMIT
+from litevecdb.engine.flush import execute_flush
+from litevecdb.engine.operation import DeleteOp, InsertOp, Operation
+from litevecdb.engine.recovery import execute_recovery
 from litevecdb.exceptions import PartitionNotFoundError
 from litevecdb.schema.arrow_builder import (
     build_wal_data_schema,
@@ -44,19 +51,18 @@ from litevecdb.storage.wal import WAL
 
 
 class Collection:
-    """A single Collection — schema + WAL + MemTable + Manifest.
+    """A single Collection — schema + WAL + MemTable + Manifest + DeltaIndex.
 
-    Phase 2 supports insert/get only. Construction is non-destructive:
-    if data_dir already has a manifest, the existing one is loaded; if
-    not, a fresh state with the _default partition is created.
+    Construction is non-destructive and crash-tolerant:
+        1. Load Manifest (with .prev fallback if current is corrupted).
+        2. Run recovery — replay any WAL files, rebuild DeltaIndex,
+           clean orphan Parquet files.
+        3. Allocate a fresh WAL number = max(found WALs + 1, manifest's
+           active_wal_number).
 
-    Phase-2 limitations to know about:
-        - No flush. MemTable grows unbounded; this is intentional for
-          the M2 milestone (we're verifying the write→memory→read path).
-        - No recovery. Restarting the process loses all in-memory state.
-          Phase 3 will add recovery + flush.
-        - Only the _default partition is supported as a write target.
-        - No delete (Phase 5).
+    insert() validates fail-fast (no partial state on failure), allocates
+    one _seq per row, writes to WAL then MemTable, and triggers a
+    synchronous flush if the MemTable hit the size limit.
     """
 
     def __init__(
@@ -78,25 +84,29 @@ class Collection:
 
         os.makedirs(data_dir, exist_ok=True)
 
-        # Manifest: load if present, else fresh.
+        # ── 1. load manifest ────────────────────────────────────
         self._manifest = Manifest.load(data_dir)
 
-        # Seq counter — Phase 2 starts from manifest.current_seq.
-        # Phase 3 recovery will bump this past any seqs found in WAL.
-        self._next_seq = self._manifest.current_seq + 1
+        # ── 2. recovery ─────────────────────────────────────────
+        self._memtable, self._delta_index, next_wal_number = execute_recovery(
+            data_dir=data_dir,
+            schema=schema,
+            manifest=self._manifest,
+        )
 
-        # MemTable.
-        self._memtable = MemTable(schema)
+        # ── 3. fresh WAL ────────────────────────────────────────
+        # next_seq must clear both manifest's recorded seq AND any seq
+        # we just learned from WAL replay.
+        self._next_seq = max(
+            self._manifest.current_seq, self._memtable.max_seq
+        ) + 1
 
-        # WAL: a fresh round per Collection construction. Phase 3 will
-        # tie this to the manifest's active_wal_number.
         wal_dir = os.path.join(data_dir, "wal")
-        wal_number = (self._manifest.active_wal_number or 0) + 1
         self._wal = WAL(
             wal_dir=wal_dir,
             wal_data_schema=self._wal_data_schema,
             wal_delta_schema=self._wal_delta_schema,
-            wal_number=wal_number,
+            wal_number=next_wal_number,
         )
 
     # ── public API ──────────────────────────────────────────────
@@ -108,9 +118,10 @@ class Collection:
     ) -> List[Any]:
         """Insert records into the collection. Returns the list of pks.
 
-        Each record is validated, dynamic fields are separated to $meta
-        (if enabled), and a unique _seq is allocated per record. The
-        whole batch is then flushed through WAL → MemTable.
+        Each record is validated up-front (fail fast — no partial state
+        on validation error). After WAL+MemTable apply, if the MemTable
+        has hit MEMTABLE_SIZE_LIMIT, a synchronous flush runs before
+        returning.
         """
         if not isinstance(records, list):
             raise TypeError(f"records must be a list, got {type(records).__name__}")
@@ -120,7 +131,7 @@ class Collection:
         if not self._manifest.has_partition(partition_name):
             raise PartitionNotFoundError(partition_name)
 
-        # 1. validate every record up-front (fail fast, no partial state)
+        # 1. validate every record up-front
         for r in records:
             validate_record(r, self._schema)
 
@@ -136,7 +147,10 @@ class Collection:
         op = InsertOp(partition=partition_name, batch=batch)
         self._apply(op)
 
-        # 5. return pks (in the same order as input)
+        # 5. trigger flush if we hit the size limit
+        if self._memtable.size() >= MEMTABLE_SIZE_LIMIT:
+            self._trigger_flush()
+
         return [r[self._pk_name] for r in records]
 
     def get(
@@ -144,20 +158,28 @@ class Collection:
         pks: List[Any],
         partition_names: Optional[List[str]] = None,
     ) -> List[dict]:
-        """Point read. Returns records in the same order as ``pks``;
-        missing pks are skipped (NOT padded with None).
+        """Point read.
 
-        Phase 2: only reads MemTable. Phase 4 will also read disk segments.
+        Phase 3 reads only the MemTable. Phase 4 will also read disk
+        segments and merge results.
         """
         if not isinstance(pks, list):
             raise TypeError(f"pks must be a list, got {type(pks).__name__}")
-        # partition_names ignored in Phase 2 — only _default exists for writes.
         out: List[dict] = []
         for pk in pks:
             rec = self._memtable.get(pk)
             if rec is not None:
                 out.append(rec)
         return out
+
+    def flush(self) -> None:
+        """Force a synchronous flush of the current MemTable.
+
+        No-op if the MemTable is empty.
+        """
+        if self._memtable.size() == 0:
+            return
+        self._trigger_flush()
 
     # ── orchestration ───────────────────────────────────────────
 
@@ -175,6 +197,41 @@ class Collection:
             self._wal.write_delete(op.batch)
             self._memtable.apply_delete(op.batch)
 
+    def _trigger_flush(self) -> None:
+        """Step 1 of the flush pipeline + execute_flush for Steps 2-7.
+
+        Step 1 (here): freeze the current (MemTable, WAL), swap in fresh
+        ones on the Collection. Then call execute_flush on the frozen
+        pair, which handles disk writes, manifest commit, WAL cleanup.
+        """
+        # ── Step 1: freeze ──────────────────────────────────────
+        frozen_memtable = self._memtable
+        frozen_wal = self._wal
+        new_wal_number = frozen_wal.number + 1
+
+        # Swap in fresh ones BEFORE running execute_flush so that any
+        # subsequent insert calls (in case of async future) hit the new
+        # MemTable. In sync mode this is order-preserving anyway.
+        self._memtable = MemTable(self._schema)
+        wal_dir = os.path.join(self._data_dir, "wal")
+        self._wal = WAL(
+            wal_dir=wal_dir,
+            wal_data_schema=self._wal_data_schema,
+            wal_delta_schema=self._wal_delta_schema,
+            wal_number=new_wal_number,
+        )
+
+        # ── Steps 2-7: execute_flush ────────────────────────────
+        execute_flush(
+            frozen_memtable=frozen_memtable,
+            frozen_wal=frozen_wal,
+            data_dir=self._data_dir,
+            schema=self._schema,
+            manifest=self._manifest,
+            delta_index=self._delta_index,
+            new_wal_number=new_wal_number,
+        )
+
     # ── batch builders ──────────────────────────────────────────
 
     def _build_wal_data_batch(
@@ -187,7 +244,6 @@ class Collection:
 
         Splits dynamic fields into $meta if enable_dynamic_field is set.
         """
-        # Per-row schema field extraction.
         n = len(records)
         cols: dict[str, list] = {
             "_seq": seqs,
@@ -216,16 +272,17 @@ class Collection:
     # ── lifecycle ───────────────────────────────────────────────
 
     def close(self) -> None:
-        """Close the WAL.
+        """Flush any pending state and shut down the WAL.
 
-        Phase 2 has no flush, so close just shuts down the WAL writer.
-        The MemTable is dropped with the Collection instance.
+        Phase-3 close runs a final flush so the on-disk state is
+        consistent with whatever insert calls returned successfully.
         """
-        # close_and_delete also deletes the WAL files. For Phase 2 with no
-        # recovery, that's fine — restarting will lose memory state anyway,
-        # and there's nothing on disk worth keeping. Phase 3 will replace
-        # this with proper flush + recovery.
-        self._wal.close_and_delete()
+        if self._memtable.size() > 0:
+            self._trigger_flush()
+        else:
+            # Even an empty MemTable needs WAL cleanup so we don't leave
+            # an empty wal file behind.
+            self._wal.close_and_delete()
 
     # ── introspection ───────────────────────────────────────────
 
@@ -246,5 +303,9 @@ class Collection:
         return self._pk_name
 
     def count(self) -> int:
-        """Phase-2 helper: number of live records in the MemTable."""
+        """Number of live records in the MemTable.
+
+        NOTE: this is the in-memory count only. Phase 4 will add a
+        full collection count that includes flushed Parquet files.
+        """
         return self._memtable.size()

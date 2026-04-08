@@ -280,10 +280,124 @@ def test_insert_creates_wal_data_file(tmp_path, schema):
 
 
 def test_insert_does_not_create_wal_delta_file(tmp_path, schema):
-    """Phase 2 has no delete — wal_delta should never be created."""
+    """Collection.insert never writes to wal_delta — wal_delta is for Phase 5 deletes."""
     col = Collection("c", str(tmp_path / "d"), schema)
     col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "x", "score": 0.5}])
     wal_dir = tmp_path / "d" / "wal"
     delta_files = list(wal_dir.glob("wal_delta_*.arrow"))
     assert delta_files == []
     col.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: flush trigger + persistence + recovery
+# ---------------------------------------------------------------------------
+
+def _make_record(i):
+    return {
+        "id": f"doc_{i:04d}",
+        "vec": [0.5, 0.25, 0.125, 0.75],
+        "title": f"t{i}",
+        "score": float(i),
+    }
+
+
+def test_flush_triggers_at_size_limit(tmp_path, schema, monkeypatch):
+    """When MemTable hits MEMTABLE_SIZE_LIMIT, insert should trigger a flush."""
+    # Lower the limit so we don't have to insert 10K rows.
+    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+
+    data_dir = str(tmp_path / "data")
+    col = Collection("c", data_dir, schema)
+    for i in range(10):
+        col.insert([_make_record(i)])
+    # After 10 inserts with limit=5, we should have flushed at least once.
+    # The post-flush MemTable holds the records that came AFTER the flush.
+    assert col.count() < 10
+
+    # The manifest should have at least one data file.
+    files = col._manifest.get_data_files("_default")
+    assert len(files) >= 1
+    col.close()
+
+
+def test_explicit_flush(tmp_path, schema):
+    col = Collection("c", str(tmp_path / "d"), schema)
+    col.insert([_make_record(i) for i in range(3)])
+    col.flush()
+    assert col.count() == 0  # MemTable drained
+    files = col._manifest.get_data_files("_default")
+    assert len(files) == 1
+    col.close()
+
+
+def test_restart_recovers_flushed_state(tmp_path, schema):
+    """Insert some, flush, close, reopen — manifest is loaded and the
+    delta_index is rebuilt. (Inserted records aren't yet readable in
+    Phase 3 because get() only reads MemTable, not segments — that's
+    Phase 4. But the manifest state must be preserved.)"""
+    data_dir = str(tmp_path / "d")
+    col1 = Collection("c", data_dir, schema)
+    col1.insert([_make_record(i) for i in range(3)])
+    col1.flush()
+    files_before = col1._manifest.get_data_files("_default")
+    seq_before = col1._manifest.current_seq
+    col1.close()
+
+    col2 = Collection("c", data_dir, schema)
+    files_after = col2._manifest.get_data_files("_default")
+    assert files_after == files_before
+    assert col2._manifest.current_seq == seq_before
+    # next_seq must be past the recovered max
+    assert col2._next_seq > seq_before
+    col2.close()
+
+
+def test_restart_recovers_unflushed_wal(tmp_path, schema):
+    """Insert some without flushing, kill the process (close uncleanly),
+    reopen — recovery should replay the WAL into a new MemTable."""
+    data_dir = str(tmp_path / "d")
+    col1 = Collection("c", data_dir, schema)
+    col1.insert([_make_record(i) for i in range(3)])
+    # Simulate crash: do NOT call close(); instead, just drop the col.
+    # The WAL files remain on disk.
+    del col1
+
+    col2 = Collection("c", data_dir, schema)
+    # The 3 records should be back in MemTable.
+    assert col2.count() == 3
+    rec = col2.get(["doc_0001"])
+    assert len(rec) == 1
+    assert rec[0]["title"] == "t1"
+    col2.close()
+
+
+def test_restart_after_close_no_pending_data(tmp_path, schema):
+    """close() flushes any pending data — restart should see the
+    flushed files and have an empty MemTable."""
+    data_dir = str(tmp_path / "d")
+    col1 = Collection("c", data_dir, schema)
+    col1.insert([_make_record(i) for i in range(3)])
+    col1.close()
+
+    col2 = Collection("c", data_dir, schema)
+    # MemTable empty (close flushed); manifest has the file
+    assert col2.count() == 0
+    files = col2._manifest.get_data_files("_default")
+    assert len(files) == 1
+    col2.close()
+
+
+def test_seq_monotonic_across_restart(tmp_path, schema):
+    """Seqs allocated after restart must NOT collide with seqs from
+    before restart, even if WAL was flushed."""
+    data_dir = str(tmp_path / "d")
+    col1 = Collection("c", data_dir, schema)
+    col1.insert([_make_record(i) for i in range(3)])  # seqs 1, 2, 3
+    col1.close()
+
+    col2 = Collection("c", data_dir, schema)
+    next_seq_at_open = col2._next_seq
+    assert next_seq_at_open >= 4
+    col2.insert([_make_record(99)])  # seq 4 (or higher)
+    col2.close()

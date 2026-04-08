@@ -375,3 +375,173 @@ def test_apply_delete_bad_schema_raises(mt):
     )
     with pytest.raises(ValueError, match="missing required columns"):
         mt.apply_delete(bad)
+
+
+# ---------------------------------------------------------------------------
+# flush() — Phase 3
+# ---------------------------------------------------------------------------
+
+def test_flush_empty(mt):
+    result = mt.flush()
+    assert result == {}
+
+
+def test_flush_inserts_only_single_partition(mt, wal_data_schema):
+    mt.apply_insert(insert_batch(wal_data_schema, [
+        (1, "_default", "a", [0.5, 0.25], "x"),
+        (2, "_default", "b", [0.75, 0.125], "y"),
+    ]))
+    result = mt.flush()
+    assert set(result.keys()) == {"_default"}
+    data_table, delta_table = result["_default"]
+    assert data_table is not None
+    assert delta_table is None
+    assert data_table.num_rows == 2
+
+    # data_table uses data_schema (no _partition)
+    assert "_partition" not in data_table.schema.names
+    assert "_seq" in data_table.schema.names
+    assert {pk for pk in data_table.column("id").to_pylist()} == {"a", "b"}
+
+
+def test_flush_inserts_multi_partition(mt, wal_data_schema):
+    mt.apply_insert(insert_batch(wal_data_schema, [
+        (1, "p1", "a", [0.5, 0.25], "x"),
+        (2, "p2", "b", [0.75, 0.125], "y"),
+        (3, "p1", "c", [0.0625, 1.5], "z"),
+    ]))
+    result = mt.flush()
+    assert set(result.keys()) == {"p1", "p2"}
+
+    p1_data, p1_delta = result["p1"]
+    assert p1_data is not None
+    assert p1_data.num_rows == 2  # a, c
+    assert {x for x in p1_data.column("id").to_pylist()} == {"a", "c"}
+    assert p1_delta is None
+
+    p2_data, _ = result["p2"]
+    assert p2_data.num_rows == 1
+    assert p2_data.column("id").to_pylist() == ["b"]
+
+
+def test_flush_dedup_via_pk_index(mt, wal_data_schema):
+    """Repeatedly upsert the same pk — flush emits one row, not all 5."""
+    for i in range(5):
+        mt.apply_insert(insert_batch(wal_data_schema, [
+            (i + 1, "_default", "X", [float(i), 0.5], f"v{i}"),
+        ]))
+    result = mt.flush()
+    data_table, _ = result["_default"]
+    assert data_table.num_rows == 1
+    # Latest version (seq=5)
+    [row] = data_table.to_pylist()
+    assert row["title"] == "v4"
+    assert row["_seq"] == 5
+
+
+def test_flush_deletes_only(mt, wal_delta_schema):
+    mt.apply_delete(delete_batch(wal_delta_schema, ["a", "b", "c"], seq=10, partition="p1"))
+    result = mt.flush()
+    assert set(result.keys()) == {"p1"}
+    data_table, delta_table = result["p1"]
+    assert data_table is None
+    assert delta_table is not None
+    assert delta_table.num_rows == 3
+    assert "_partition" not in delta_table.schema.names
+    assert set(delta_table.column("id").to_pylist()) == {"a", "b", "c"}
+    assert set(delta_table.column("_seq").to_pylist()) == {10}
+
+
+def test_flush_inserts_and_deletes_same_partition(mt, wal_data_schema, wal_delta_schema):
+    mt.apply_insert(insert_batch(wal_data_schema, [
+        (1, "_default", "a", [0.5, 0.25], "x"),
+    ]))
+    mt.apply_delete(delete_batch(wal_delta_schema, ["b"], seq=2, partition="_default"))
+
+    result = mt.flush()
+    assert set(result.keys()) == {"_default"}
+    data_table, delta_table = result["_default"]
+    assert data_table is not None and data_table.num_rows == 1
+    assert delta_table is not None and delta_table.num_rows == 1
+
+
+def test_flush_cross_partition_delete_no_known_partitions(mt, wal_delta_schema):
+    """Without known_partitions arg, _all deletes stay under _all bucket."""
+    mt.apply_delete(delete_batch(wal_delta_schema, ["X"], seq=5, partition="_all"))
+    result = mt.flush()
+    assert "_all" in result
+    _, delta = result["_all"]
+    assert delta is not None
+    assert delta.num_rows == 1
+
+
+def test_flush_cross_partition_delete_replicated(mt, wal_delta_schema):
+    """With known_partitions, _all deletes are replicated into each."""
+    mt.apply_delete(delete_batch(wal_delta_schema, ["X"], seq=5, partition="_all"))
+    result = mt.flush(known_partitions=["_default", "p1", "p2"])
+    assert set(result.keys()) == {"_default", "p1", "p2"}
+    for part in ("_default", "p1", "p2"):
+        _, delta = result[part]
+        assert delta is not None
+        assert delta.column("id").to_pylist() == ["X"]
+        assert delta.column("_seq").to_pylist() == [5]
+    assert "_all" not in result
+
+
+def test_flush_does_not_clear_internal_state(mt, wal_data_schema):
+    mt.apply_insert(insert_batch(wal_data_schema, [
+        (1, "_default", "a", [0.5, 0.25], "x"),
+    ]))
+    mt.flush()
+    # Caller is expected to drop the MemTable, but the contract says
+    # internal state is not auto-cleared.
+    assert mt.size() == 1
+    assert mt.get("a") is not None
+
+
+def test_flush_schema_matches_data_schema(mt, wal_data_schema, schema):
+    """The data_table emitted by flush must match build_data_schema(schema)."""
+    from litevecdb.schema.arrow_builder import build_data_schema
+
+    mt.apply_insert(insert_batch(wal_data_schema, [
+        (1, "_default", "a", [0.5, 0.25], "x"),
+    ]))
+    result = mt.flush()
+    data_table, _ = result["_default"]
+    expected = build_data_schema(schema)
+    assert data_table.schema == expected
+
+
+def test_flush_schema_matches_delta_schema(mt, wal_delta_schema, schema):
+    from litevecdb.schema.arrow_builder import build_delta_schema
+
+    mt.apply_delete(delete_batch(wal_delta_schema, ["x"], seq=1, partition="_default"))
+    result = mt.flush()
+    _, delta_table = result["_default"]
+    expected = build_delta_schema(schema)
+    assert delta_table.schema == expected
+
+
+# ---------------------------------------------------------------------------
+# max_seq
+# ---------------------------------------------------------------------------
+
+def test_max_seq_empty(mt):
+    assert mt.max_seq == -1
+
+
+def test_max_seq_inserts(mt, wal_data_schema):
+    mt.apply_insert(insert_batch(wal_data_schema, [
+        (3, "_default", "a", [0.5, 0.25], "x"),
+        (5, "_default", "b", [0.75, 0.125], "y"),
+        (7, "_default", "c", [0.0625, 1.5], "z"),
+    ]))
+    assert mt.max_seq == 7
+
+
+def test_max_seq_mixed_insert_delete(mt, wal_data_schema, wal_delta_schema):
+    mt.apply_insert(insert_batch(wal_data_schema, [
+        (3, "_default", "a", [0.5, 0.25], "x"),
+    ]))
+    mt.apply_delete(delete_batch(wal_delta_schema, ["b"], seq=10))
+    assert mt.max_seq == 10

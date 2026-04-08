@@ -196,6 +196,75 @@ def test_current_seq_same_value_ok(tmp_path):
 # JSON shape sanity check
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# data / delta file CRUD
+# ---------------------------------------------------------------------------
+
+def test_add_data_file(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.add_data_file(DEFAULT_PARTITION, "data/data_000001_000010.parquet")
+    files = m.get_data_files(DEFAULT_PARTITION)
+    assert files == ["data/data_000001_000010.parquet"]
+
+
+def test_add_data_file_unknown_partition_raises(tmp_path):
+    m = Manifest(str(tmp_path))
+    with pytest.raises(PartitionNotFoundError):
+        m.add_data_file("ghost", "data/foo.parquet")
+
+
+def test_remove_data_files(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.add_data_file(DEFAULT_PARTITION, "data/a.parquet")
+    m.add_data_file(DEFAULT_PARTITION, "data/b.parquet")
+    m.add_data_file(DEFAULT_PARTITION, "data/c.parquet")
+    m.remove_data_files(DEFAULT_PARTITION, ["a.parquet", "data/b.parquet"])
+    # "a.parquet" doesn't match exactly — idempotent miss
+    assert m.get_data_files(DEFAULT_PARTITION) == ["data/a.parquet", "data/c.parquet"]
+
+
+def test_get_all_data_files(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.add_partition("p1")
+    m.add_data_file(DEFAULT_PARTITION, "data/x.parquet")
+    m.add_data_file("p1", "data/y.parquet")
+    all_files = m.get_all_data_files()
+    assert all_files == {
+        DEFAULT_PARTITION: ["data/x.parquet"],
+        "p1": ["data/y.parquet"],
+    }
+
+
+def test_add_delta_file(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.add_delta_file(DEFAULT_PARTITION, "delta/delta_000005_000005.parquet")
+    assert m.get_delta_files(DEFAULT_PARTITION) == [
+        "delta/delta_000005_000005.parquet"
+    ]
+
+
+def test_get_all_delta_files_includes_empty_partitions(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.add_partition("p1")
+    m.add_delta_file("p1", "delta/x.parquet")
+    all_delta = m.get_all_delta_files()
+    assert all_delta == {
+        DEFAULT_PARTITION: [],
+        "p1": ["delta/x.parquet"],
+    }
+
+
+def test_data_files_persist_through_save_load(tmp_path):
+    m = Manifest(str(tmp_path))
+    m.add_data_file(DEFAULT_PARTITION, "data/a.parquet")
+    m.add_delta_file(DEFAULT_PARTITION, "delta/b.parquet")
+    m.save()
+
+    m2 = Manifest.load(str(tmp_path))
+    assert m2.get_data_files(DEFAULT_PARTITION) == ["data/a.parquet"]
+    assert m2.get_delta_files(DEFAULT_PARTITION) == ["delta/b.parquet"]
+
+
 def test_saved_json_has_expected_keys(tmp_path):
     m = Manifest(str(tmp_path))
     m.add_partition("p1")

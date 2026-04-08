@@ -218,6 +218,60 @@ class Manifest:
     def list_partitions(self) -> List[str]:
         return sorted(self._partitions.keys())
 
+    # ── data file CRUD ──────────────────────────────────────────
+
+    def add_data_file(self, partition: str, filename: str) -> None:
+        """Register a new data Parquet file for *partition*."""
+        if partition not in self._partitions:
+            raise PartitionNotFoundError(partition)
+        self._partitions[partition]["data_files"].append(filename)
+
+    def remove_data_files(self, partition: str, filenames: List[str]) -> None:
+        """Unregister data files (used by compaction in Phase 6)."""
+        if partition not in self._partitions:
+            raise PartitionNotFoundError(partition)
+        bucket = self._partitions[partition]["data_files"]
+        for fn in filenames:
+            try:
+                bucket.remove(fn)
+            except ValueError:
+                pass  # already absent — idempotent
+
+    def get_data_files(self, partition: str) -> List[str]:
+        """Relative paths of data files in *partition*."""
+        if partition not in self._partitions:
+            raise PartitionNotFoundError(partition)
+        return list(self._partitions[partition]["data_files"])
+
+    def get_all_data_files(self) -> Dict[str, List[str]]:
+        """{partition: [data files]} for all partitions."""
+        return {p: list(c["data_files"]) for p, c in self._partitions.items()}
+
+    # ── delta file CRUD ─────────────────────────────────────────
+
+    def add_delta_file(self, partition: str, filename: str) -> None:
+        if partition not in self._partitions:
+            raise PartitionNotFoundError(partition)
+        self._partitions[partition]["delta_files"].append(filename)
+
+    def remove_delta_files(self, partition: str, filenames: List[str]) -> None:
+        if partition not in self._partitions:
+            raise PartitionNotFoundError(partition)
+        bucket = self._partitions[partition]["delta_files"]
+        for fn in filenames:
+            try:
+                bucket.remove(fn)
+            except ValueError:
+                pass
+
+    def get_delta_files(self, partition: str) -> List[str]:
+        if partition not in self._partitions:
+            raise PartitionNotFoundError(partition)
+        return list(self._partitions[partition]["delta_files"])
+
+    def get_all_delta_files(self) -> Dict[str, List[str]]:
+        return {p: list(c["delta_files"]) for p, c in self._partitions.items()}
+
     # ── counters / properties ───────────────────────────────────
 
     @property
