@@ -182,6 +182,61 @@ class MemTable:
             out.append(self._row_to_dict(batch, row_idx))
         return out
 
+    def to_search_arrays(
+        self,
+        vector_field: str,
+        partition_names: Optional[List[str]] = None,
+    ) -> Tuple[List[Any], "np.ndarray", "np.ndarray", List[dict]]:
+        """Walk _pk_index and emit (pks, seqs, vectors, records) for search.
+
+        Used by search/assembler.py to merge MemTable rows with on-disk
+        Segment data into a single candidate set.
+
+        Returns:
+            pks:     list of pk values (length M)
+            seqs:    np.ndarray[uint64], shape (M,)
+            vectors: np.ndarray[float32], shape (M, dim)
+            records: list of dicts (one per row, with all entity fields,
+                     no _seq, no _partition)
+        """
+        import numpy as np  # local: keep top of file numpy-free for L0 deps
+
+        pks: List[Any] = []
+        seqs: List[int] = []
+        vecs: List[list] = []
+        records: List[dict] = []
+        partition_filter: Optional[set] = None
+        if partition_names is not None:
+            partition_filter = set(partition_names)
+
+        for pk, (batch_idx, row_idx, seq) in self._pk_index.items():
+            batch = self._insert_batches[batch_idx]
+            if partition_filter is not None:
+                partition = batch.column("_partition")[row_idx].as_py()
+                if partition not in partition_filter:
+                    continue
+            pks.append(pk)
+            seqs.append(seq)
+            vecs.append(batch.column(vector_field)[row_idx].as_py())
+            records.append(self._row_to_dict(batch, row_idx))
+
+        seqs_arr = np.asarray(seqs, dtype=np.uint64)
+        if vecs:
+            vectors_arr = np.asarray(vecs, dtype=np.float32)
+        else:
+            vectors_arr = np.zeros((0, 0), dtype=np.float32)
+        return pks, seqs_arr, vectors_arr, records
+
+    def is_locally_deleted(self, pk_value: Any) -> bool:
+        """True iff *pk_value* has a tombstone in this MemTable's local
+        _delete_index — i.e., a delete has been applied here that has not
+        yet been flushed.
+
+        Used by Collection.get to short-circuit a segment scan when the
+        in-memory state already says the pk is deleted.
+        """
+        return pk_value in self._delete_index
+
     def size(self) -> int:
         """Active pk count + tombstone count.
 

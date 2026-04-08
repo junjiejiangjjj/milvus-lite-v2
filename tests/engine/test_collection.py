@@ -401,3 +401,234 @@ def test_seq_monotonic_across_restart(tmp_path, schema):
     assert next_seq_at_open >= 4
     col2.insert([_make_record(99)])  # seq 4 (or higher)
     col2.close()
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: get() reads segments + search()
+# ---------------------------------------------------------------------------
+
+def test_get_reads_segment_after_flush(tmp_path, schema):
+    """After flush, the records are in a Parquet segment. get() should
+    still find them via the segment cache (not just MemTable)."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([_make_record(i) for i in range(3)])
+    col.flush()
+    # MemTable is now empty
+    assert col.count() == 0
+    # But get() reads from the segment
+    [rec] = col.get(["doc_0001"])
+    assert rec["title"] == "t1"
+    col.close()
+
+
+def test_get_after_restart_reads_segment(tmp_path, schema):
+    """The Phase-3 limitation lifted: after restart, flushed records
+    are queryable via get() through the loaded segment cache."""
+    data_dir = str(tmp_path / "d")
+    col1 = Collection("c", data_dir, schema)
+    col1.insert([_make_record(i) for i in range(5)])
+    col1.close()  # flushes everything
+
+    col2 = Collection("c", data_dir, schema)
+    assert col2.count() == 0  # MemTable empty after recovery
+    # All 5 records still readable via segment.
+    for i in range(5):
+        rec = col2.get([f"doc_{i:04d}"])
+        assert len(rec) == 1
+    col2.close()
+
+
+def test_get_partition_filter_segment(tmp_path, schema):
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col._manifest.add_partition("p1")
+    col.insert([_make_record(0)], partition_name="_default")
+    col.insert([_make_record(1)], partition_name="p1")
+    col.flush()
+
+    # Without partition filter — both readable
+    assert len(col.get(["doc_0000", "doc_0001"])) == 2
+    # With filter — only one
+    assert col.get(["doc_0000", "doc_0001"], partition_names=["_default"])[0]["id"] == "doc_0000"
+    assert col.get(["doc_0000", "doc_0001"], partition_names=["p1"])[0]["id"] == "doc_0001"
+    col.close()
+
+
+def test_get_upsert_after_flush(tmp_path, schema):
+    """Insert, flush, insert same pk again (in MemTable). get() should
+    return the new in-memory version, not the old segment one."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "old", "score": 1.0}])
+    col.flush()
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "new", "score": 2.0}])
+    [rec] = col.get(["x"])
+    assert rec["title"] == "new"
+    col.close()
+
+
+def test_get_segment_pk_versions_take_max_seq(tmp_path, schema):
+    """Insert pk, flush. Insert same pk, flush. Two segments with same
+    pk; get() must return the newer (max-seq) one."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "v1", "score": 1.0}])
+    col.flush()
+    col.insert([{"id": "x", "vec": [0.5, 0.25, 0.125, 0.75], "title": "v2", "score": 2.0}])
+    col.flush()
+    [rec] = col.get(["x"])
+    assert rec["title"] == "v2"
+    col.close()
+
+
+# ---------------------------------------------------------------------------
+# search()
+# ---------------------------------------------------------------------------
+
+def test_search_memtable_only(tmp_path, schema):
+    """All data in MemTable, no flush."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([
+        {"id": "near",  "vec": [1.0, 0.0, 0.0, 0.0], "title": "n", "score": 1.0},
+        {"id": "far",   "vec": [0.0, 1.0, 0.0, 0.0], "title": "f", "score": 2.0},
+    ])
+
+    results = col.search([[1.0, 0.0, 0.0, 0.0]], top_k=1, metric_type="COSINE")
+    assert len(results) == 1
+    [hits] = results
+    assert hits[0]["id"] == "near"
+    col.close()
+
+
+def test_search_segment_only(tmp_path, schema):
+    """All data flushed to segment."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([
+        {"id": "near",  "vec": [1.0, 0.0, 0.0, 0.0], "title": "n", "score": 1.0},
+        {"id": "far",   "vec": [0.0, 1.0, 0.0, 0.0], "title": "f", "score": 2.0},
+    ])
+    col.flush()
+    assert col.count() == 0  # MemTable empty
+
+    results = col.search([[1.0, 0.0, 0.0, 0.0]], top_k=1, metric_type="COSINE")
+    assert results[0][0]["id"] == "near"
+    col.close()
+
+
+def test_search_mixed_memtable_and_segment(tmp_path, schema):
+    """Half in segment, half in MemTable."""
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([{"id": "old", "vec": [1.0, 0.0, 0.0, 0.0], "title": "x", "score": 0.0}])
+    col.flush()
+    col.insert([{"id": "new", "vec": [0.0, 1.0, 0.0, 0.0], "title": "y", "score": 0.0}])
+
+    # Query closer to "old"
+    results = col.search([[1.0, 0.0, 0.0, 0.0]], top_k=2, metric_type="COSINE")
+    [hits] = results
+    assert len(hits) == 2
+    assert hits[0]["id"] == "old"
+    assert hits[1]["id"] == "new"
+    col.close()
+
+
+def test_search_top_k_2(tmp_path, schema):
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([_make_record(i) for i in range(20)])
+    results = col.search([[0.5, 0.25, 0.125, 0.75]], top_k=5, metric_type="L2")
+    [hits] = results
+    assert len(hits) == 5
+    # Distances must be ascending
+    for i in range(4):
+        assert hits[i]["distance"] <= hits[i + 1]["distance"]
+    col.close()
+
+
+def test_search_partition_filter(tmp_path, schema):
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col._manifest.add_partition("p1")
+    col.insert([{"id": "a", "vec": [1.0, 0.0, 0.0, 0.0], "title": "x", "score": 0.0}], partition_name="_default")
+    col.insert([{"id": "b", "vec": [1.0, 0.0, 0.0, 0.0], "title": "y", "score": 0.0}], partition_name="p1")
+    results = col.search(
+        [[1.0, 0.0, 0.0, 0.0]],
+        top_k=10,
+        metric_type="COSINE",
+        partition_names=["p1"],
+    )
+    [hits] = results
+    ids = {h["id"] for h in hits}
+    assert ids == {"b"}
+    col.close()
+
+
+def test_search_multi_query(tmp_path, schema):
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    col.insert([
+        {"id": "a", "vec": [1.0, 0.0, 0.0, 0.0], "title": "x", "score": 0.0},
+        {"id": "b", "vec": [0.0, 1.0, 0.0, 0.0], "title": "y", "score": 0.0},
+        {"id": "c", "vec": [0.0, 0.0, 1.0, 0.0], "title": "z", "score": 0.0},
+    ])
+    results = col.search(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ],
+        top_k=1,
+        metric_type="COSINE",
+    )
+    assert len(results) == 3
+    assert results[0][0]["id"] == "a"
+    assert results[1][0]["id"] == "b"
+    assert results[2][0]["id"] == "c"
+    col.close()
+
+
+def test_search_empty_collection(tmp_path, schema):
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+    results = col.search([[1.0, 0.0, 0.0, 0.0]], top_k=10)
+    assert results == [[]]
+    col.close()
+
+
+def test_search_brute_force_match(tmp_path, schema):
+    """Compare search results against direct numpy brute-force on a
+    100-record collection."""
+    import numpy as np
+    rng = np.random.default_rng(7)
+    data_dir = str(tmp_path / "d")
+    col = Collection("c", data_dir, schema)
+
+    n = 100
+    vectors_raw = rng.standard_normal((n, 4)).astype(np.float32)
+    records = [
+        {"id": f"doc_{i:04d}", "vec": vectors_raw[i].tolist(), "title": f"t{i}", "score": float(i)}
+        for i in range(n)
+    ]
+    col.insert(records)
+
+    query = rng.standard_normal((1, 4)).astype(np.float32)
+    results = col.search(query.tolist(), top_k=10, metric_type="L2")
+    [hits] = results
+
+    # Direct numpy
+    dists = np.linalg.norm(vectors_raw - query[0], axis=1)
+    expected_top_idx = np.argsort(dists)[:10]
+    expected_ids = [f"doc_{i:04d}" for i in expected_top_idx]
+    actual_ids = [h["id"] for h in hits]
+    assert actual_ids == expected_ids
+    col.close()
+
+
+def test_search_invalid_argument_types(tmp_path, schema):
+    col = Collection("c", str(tmp_path / "d"), schema)
+    with pytest.raises(TypeError, match="must be a list"):
+        col.search("not a list")
+    col.close()

@@ -1,17 +1,19 @@
 """Collection — engine entry point.
 
-Phase 3 scope:
+Phase 4 scope:
     - insert(records, partition_name="_default")
-    - get(pks, partition_names=None)
+    - get(pks, partition_names=None) — reads MemTable + Segments
+    - search(query_vectors, top_k, metric_type, partition_names=None)
     - Synchronous flush triggered when MemTable.size() >= MEMTABLE_SIZE_LIMIT
-    - Crash recovery on construction (replays WAL, rebuilds delta_index)
-    - WAL + MemTable + Manifest + DeltaIndex
+    - Crash recovery on construction (replays WAL, rebuilds delta_index,
+      loads all manifest segments)
+    - WAL + MemTable + Manifest + DeltaIndex + Segment cache
 
 NOT yet:
-    - search (Phase 4)
     - delete (Phase 5) — Collection.delete is not exposed, but the
-      plumbing (DeleteOp dispatch in _apply, MemTable.apply_delete)
-      is in place so Phase 5 just adds the public method.
+      plumbing (DeleteOp dispatch in _apply, MemTable.apply_delete,
+      delta_index, bitmap pipeline) is all in place. Phase 5 just adds
+      the public method.
     - compaction (Phase 6)
     - partition CRUD (Phase 7)
 
@@ -24,8 +26,9 @@ storage layer free of engine-layer types.
 from __future__ import annotations
 
 import os
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pyarrow as pa
 
 from litevecdb.constants import DEFAULT_PARTITION, MEMTABLE_SIZE_LIMIT
@@ -45,9 +48,17 @@ from litevecdb.schema.validation import (
     validate_record,
     validate_schema,
 )
+from litevecdb.search.assembler import assemble_candidates
+from litevecdb.search.executor import execute_search
 from litevecdb.storage.manifest import Manifest
 from litevecdb.storage.memtable import MemTable
+from litevecdb.storage.segment import Segment
 from litevecdb.storage.wal import WAL
+
+
+# Segment cache key: (partition, relative_path) — relative_path is what
+# the manifest stores so two segments cannot collide on the same name.
+_SegmentKey = Tuple[str, str]
 
 
 class Collection:
@@ -109,6 +120,14 @@ class Collection:
             wal_number=next_wal_number,
         )
 
+        # ── 4. segment cache ────────────────────────────────────
+        # Loaded from every data file referenced by the manifest. The
+        # cache is keyed by (partition, relative_path) and is refreshed
+        # after each flush so the search path always sees the latest
+        # set of immutable segments.
+        self._segment_cache: Dict[_SegmentKey, Segment] = {}
+        self._refresh_segment_cache()
+
     # ── public API ──────────────────────────────────────────────
 
     def insert(
@@ -158,19 +177,112 @@ class Collection:
         pks: List[Any],
         partition_names: Optional[List[str]] = None,
     ) -> List[dict]:
-        """Point read.
+        """Point read across MemTable + segments.
 
-        Phase 3 reads only the MemTable. Phase 4 will also read disk
-        segments and merge results.
+        Lookup order per pk:
+            1. MemTable._pk_index → live insert (newest possible state)
+            2. MemTable._delete_index → live tombstone shadows everything
+            3. Segments → scan for the largest seq across all segments
+               in the requested partitions; check delta_index for an
+               on-disk tombstone with a larger seq.
+
+        Returns records in input pk order; missing pks are skipped
+        (NOT padded with None).
         """
         if not isinstance(pks, list):
             raise TypeError(f"pks must be a list, got {type(pks).__name__}")
+
+        partition_filter = set(partition_names) if partition_names else None
         out: List[dict] = []
+
         for pk in pks:
+            # Step 1: live insert in MemTable.
             rec = self._memtable.get(pk)
             if rec is not None:
                 out.append(rec)
+                continue
+
+            # Step 2: live tombstone in MemTable shadows any segment hit.
+            if self._memtable.is_locally_deleted(pk):
+                continue
+
+            # Step 3: scan segments for the latest version of pk.
+            best_seq = -1
+            best_segment: Optional[Segment] = None
+            best_row_idx: int = -1
+            for segment in self._segment_cache.values():
+                if partition_filter is not None and segment.partition not in partition_filter:
+                    continue
+                row_idx = segment.find_row(pk)
+                if row_idx is None:
+                    continue
+                seq = int(segment.seqs[row_idx])
+                if seq > best_seq:
+                    best_seq = seq
+                    best_segment = segment
+                    best_row_idx = row_idx
+
+            if best_segment is not None:
+                # Tombstone check on the persisted delete watermark.
+                if not self._delta_index.is_deleted(pk, best_seq):
+                    out.append(best_segment.row_to_dict(best_row_idx))
+
         return out
+
+    def search(
+        self,
+        query_vectors: List[list],
+        top_k: int = 10,
+        metric_type: str = "COSINE",
+        partition_names: Optional[List[str]] = None,
+    ) -> List[List[dict]]:
+        """Vector top-k search.
+
+        Args:
+            query_vectors: list of length nq, each item a list of length dim.
+            top_k: requested k.
+            metric_type: "COSINE" / "L2" / "IP".
+            partition_names: optional partition filter.
+
+        Returns:
+            List of length nq. Each inner list has up to top_k dicts of
+            shape ``{"id": pk, "distance": float, "entity": {field: value, ...}}``,
+            sorted by ascending distance.
+        """
+        if not isinstance(query_vectors, list):
+            raise TypeError(
+                f"query_vectors must be a list, got {type(query_vectors).__name__}"
+            )
+        if not query_vectors:
+            return []
+
+        # Convert to numpy (nq, dim).
+        q_arr = np.asarray(query_vectors, dtype=np.float32)
+        if q_arr.ndim != 2:
+            raise ValueError(
+                f"query_vectors must be a 2-D list, got shape {q_arr.shape}"
+            )
+
+        # Assemble candidates from segments + MemTable.
+        all_pks, all_seqs, all_vectors, all_records = assemble_candidates(
+            segments=self._segment_cache.values(),
+            memtable=self._memtable,
+            vector_field=self._vector_name,
+            partition_names=partition_names,
+        )
+
+        return execute_search(
+            query_vectors=q_arr,
+            all_pks=all_pks,
+            all_seqs=all_seqs,
+            all_vectors=all_vectors,
+            all_records=all_records,
+            delta_index=self._delta_index,
+            top_k=top_k,
+            metric_type=metric_type,
+            pk_field=self._pk_name,
+            vector_field=self._vector_name,
+        )
 
     def flush(self) -> None:
         """Force a synchronous flush of the current MemTable.
@@ -231,6 +343,45 @@ class Collection:
             delta_index=self._delta_index,
             new_wal_number=new_wal_number,
         )
+
+        # ── post-flush: refresh segment cache ───────────────────
+        # Newly written Parquet files become immediately visible to
+        # subsequent search/get calls.
+        self._refresh_segment_cache()
+
+    def _refresh_segment_cache(self) -> None:
+        """Reconcile self._segment_cache with the manifest's data files.
+
+        - Adds segments for any newly-written files.
+        - Drops segments for files no longer referenced (e.g. after
+          compaction in Phase 6).
+        - Existing segments stay loaded (the underlying Parquet is
+          immutable, so no need to reload).
+        """
+        current_keys: set = set()
+        for partition, rels in self._manifest.get_all_data_files().items():
+            for rel in rels:
+                key = (partition, rel)
+                current_keys.add(key)
+                if key in self._segment_cache:
+                    continue
+                abs_path = os.path.join(
+                    self._data_dir, "partitions", partition, rel
+                )
+                if not os.path.exists(abs_path):
+                    # Should have been caught by recovery, but be defensive.
+                    continue
+                self._segment_cache[key] = Segment.load(
+                    file_path=abs_path,
+                    partition=partition,
+                    pk_field=self._pk_name,
+                    vector_field=self._vector_name,
+                )
+
+        # Evict segments for files that are no longer in the manifest.
+        for key in list(self._segment_cache.keys()):
+            if key not in current_keys:
+                del self._segment_cache[key]
 
     # ── batch builders ──────────────────────────────────────────
 
