@@ -41,7 +41,16 @@ from litevecdb.engine.compaction import CompactionManager
 from litevecdb.engine.flush import execute_flush
 from litevecdb.engine.operation import DeleteOp, InsertOp, Operation
 from litevecdb.engine.recovery import execute_recovery
-from litevecdb.exceptions import PartitionNotFoundError
+from litevecdb.exceptions import (
+    CollectionNotLoadedError,
+    IndexAlreadyExistsError,
+    IndexNotFoundError,
+    PartitionNotFoundError,
+    SchemaValidationError,
+)
+from litevecdb.index.brute_force import BruteForceIndex
+from litevecdb.index.spec import IndexSpec
+from litevecdb.schema.types import DataType
 from litevecdb.schema.arrow_builder import (
     build_wal_data_schema,
     build_wal_delta_schema,
@@ -162,6 +171,18 @@ class Collection:
         from litevecdb.search.filter.cache import LRUCache
         self._filter_cache: LRUCache = LRUCache(maxsize=FILTER_CACHE_SIZE)
 
+        # ── 7. index state machine (Phase 9.3) ──────────────────
+        # _index_spec is mirrored from manifest so we don't reload on
+        # every access; it's also the canonical "is there an index?" flag.
+        # _load_state mirrors Milvus's loaded/released semantics:
+        #   - Collections WITHOUT an IndexSpec auto-load on construction
+        #     (there is nothing to build, and we don't want to break
+        #      backward compatibility for users who never call create_index)
+        #   - Collections WITH an IndexSpec start as released; the user
+        #     must call load() explicitly, mirroring pymilvus behavior
+        self._index_spec: Optional[IndexSpec] = self._manifest.index_spec
+        self._load_state: str = "loaded" if self._index_spec is None else "released"
+
     # ── public API ──────────────────────────────────────────────
 
     def insert(
@@ -276,6 +297,8 @@ class Collection:
         if not isinstance(pks, list):
             raise TypeError(f"pks must be a list, got {type(pks).__name__}")
 
+        self._require_loaded()
+
         partition_filter = set(partition_names) if partition_names else None
         compiled_filter = self._compile_filter(expr) if expr else None
 
@@ -360,6 +383,8 @@ class Collection:
         if not query_vectors:
             return []
 
+        self._require_loaded()
+
         # Convert to numpy (nq, dim).
         q_arr = np.asarray(query_vectors, dtype=np.float32)
         if q_arr.ndim != 2:
@@ -419,6 +444,8 @@ class Collection:
         if not isinstance(expr, str) or not expr:
             raise TypeError("query() requires a non-empty filter expression")
 
+        self._require_loaded()
+
         compiled_filter = self._compile_filter(expr)
 
         all_pks, all_seqs, _all_vectors, all_records, filter_mask = assemble_candidates(
@@ -447,6 +474,19 @@ class Collection:
             if limit is not None and len(out) >= limit:
                 break
         return out
+
+    def _require_loaded(self) -> None:
+        """Phase 9.3 guard: search/get/query require loaded state.
+
+        Collections without an IndexSpec are auto-loaded on construction
+        (see __init__), so this only fires after explicit create_index +
+        no load(), or after explicit release().
+        """
+        if self._load_state != "loaded":
+            raise CollectionNotLoadedError(
+                f"Collection {self._name!r} is in state {self._load_state!r}; "
+                f"call load() before search/get/query"
+            )
 
     def _compile_filter(self, expr_str: str) -> "CompiledExpr":
         """Parse + compile a filter expression, with LRU caching.
@@ -562,6 +602,171 @@ class Collection:
         """Check whether a partition exists."""
         return self._manifest.has_partition(partition_name)
 
+    # ── index lifecycle (Phase 9.3) ─────────────────────────────
+
+    def create_index(
+        self,
+        field_name: str,
+        index_params: dict,
+    ) -> None:
+        """Persist an IndexSpec on the manifest. Does NOT build any
+        index here — that happens at load() time, mirroring Milvus.
+
+        Args:
+            field_name: must be a vector field declared in the schema.
+            index_params: dict containing at minimum::
+
+                {
+                    "index_type":  "HNSW" | "BRUTE_FORCE" | ...,
+                    "metric_type": "COSINE" | "L2" | "IP",
+                    "params":      {...},   # optional, build_params
+                    "search_params": {...}, # optional, search defaults
+                }
+
+        Raises:
+            IndexAlreadyExistsError: an index already exists
+            SchemaValidationError:   field_name doesn't exist or isn't
+                                     a vector field
+            ValueError:              metric_type / index_type missing or invalid
+
+        Side effect: collection moves to ``released`` state. The user
+        must call ``load()`` to actually build segment indexes and
+        re-enable search.
+        """
+        if self._index_spec is not None:
+            raise IndexAlreadyExistsError(
+                f"index already exists for field {self._index_spec.field_name!r}; "
+                f"call drop_index first"
+            )
+
+        # Validate the field is in the schema and is a vector type.
+        target = next((f for f in self._schema.fields if f.name == field_name), None)
+        if target is None:
+            raise SchemaValidationError(
+                f"unknown field {field_name!r} for create_index"
+            )
+        if target.dtype != DataType.FLOAT_VECTOR:
+            raise SchemaValidationError(
+                f"field {field_name!r} has type {target.dtype.name}; "
+                f"create_index only supports vector fields"
+            )
+
+        spec = IndexSpec(
+            field_name=field_name,
+            index_type=index_params["index_type"],
+            metric_type=index_params["metric_type"],
+            build_params=dict(index_params.get("params") or {}),
+            search_params=dict(index_params.get("search_params") or {}),
+        )
+
+        self._index_spec = spec
+        self._manifest.set_index_spec(spec)
+        self._manifest.save()
+
+        # Phase 9.3 semantics: an index now exists but is not built
+        # → user must explicitly load() before searching.
+        # Drop any in-memory indexes that may have been attached to
+        # segments (e.g. left over from a previous load + drop_index).
+        for seg in self._segment_cache.values():
+            seg.release_index()
+        self._load_state = "released"
+
+    def drop_index(self, field_name: Optional[str] = None) -> None:
+        """Remove the IndexSpec and release any in-memory segment indexes.
+
+        Phase 9.3 only clears the spec + in-memory state. Phase 9.4 will
+        also delete on-disk .idx files.
+
+        Args:
+            field_name: optional; if given, must match the existing
+                spec's field_name. None means "drop whatever index is
+                there" (matches Milvus's drop_index without args).
+
+        Raises:
+            IndexNotFoundError: no index has been created
+        """
+        if self._index_spec is None:
+            raise IndexNotFoundError("no index to drop")
+        if field_name is not None and field_name != self._index_spec.field_name:
+            raise IndexNotFoundError(
+                f"no index on field {field_name!r}; "
+                f"current index is on {self._index_spec.field_name!r}"
+            )
+
+        # Release in-memory indexes.
+        for seg in self._segment_cache.values():
+            seg.release_index()
+
+        self._index_spec = None
+        self._manifest.set_index_spec(None)
+        self._manifest.save()
+
+        # No index → search no longer requires loaded state.
+        self._load_state = "loaded"
+
+    def has_index(self) -> bool:
+        """True iff create_index has been called and not dropped."""
+        return self._index_spec is not None
+
+    def get_index_info(self) -> Optional[dict]:
+        """Return the IndexSpec as a dict, or None if no index exists."""
+        return self._index_spec.to_dict() if self._index_spec is not None else None
+
+    def load(self) -> None:
+        """Move to the loaded state. Build a VectorIndex per segment if
+        an IndexSpec exists; idempotent if already loaded.
+
+        Phase 9.3 always uses BruteForceIndex (Phase 9.5 will route via
+        the factory to FaissHnswIndex when available). Building a
+        BruteForceIndex is essentially free (just stores a reference),
+        so the only observable effect of load() in Phase 9.3 is the
+        state-machine transition + an index attached to every segment.
+
+        Raises any exception encountered during build, with the state
+        machine rolled back to released.
+        """
+        if self._load_state == "loaded":
+            return
+        self._load_state = "loading"
+        try:
+            if self._index_spec is not None:
+                for seg in self._segment_cache.values():
+                    if seg.num_rows == 0:
+                        continue
+                    # Phase 9.3: BruteForceIndex only. Phase 9.5 will
+                    # route through index/factory.py to pick FAISS HNSW
+                    # / IVF / etc based on spec.index_type.
+                    idx = BruteForceIndex.build(
+                        seg.vectors, self._index_spec.metric_type
+                    )
+                    seg.attach_index(idx)
+            self._load_state = "loaded"
+        except Exception:
+            self._load_state = "released"
+            raise
+
+    def release(self) -> None:
+        """Drop all in-memory segment indexes; subsequent search() raises
+        ``CollectionNotLoadedError`` until load() is called again.
+
+        No-op if there's no IndexSpec (such collections never enter
+        the released state — see Collection.__init__ for the rationale).
+        """
+        if self._index_spec is None:
+            return
+        for seg in self._segment_cache.values():
+            seg.release_index()
+        self._load_state = "released"
+
+    @property
+    def load_state(self) -> str:
+        """Current load state: 'released' | 'loading' | 'loaded'.
+
+        Mirrors Milvus's GetLoadState response. The Phase 10 gRPC
+        adapter maps this directly to milvus.LoadState enum.
+        """
+        return self._load_state
+
     # ── statistics & introspection (Phase 9.1) ──────────────────
 
     @property
@@ -619,8 +824,10 @@ class Collection:
 
         Used by pymilvus's describe_collection mapping in Phase 10.
         Mirrors the shape Milvus returns: collection name + schema +
-        partition list + row count. Phase 9.3 will extend this with
-        index info and load state.
+        partition list + row count + index info + load state.
+
+        Phase 9.3 added ``load_state`` and ``index_spec``. The
+        ``index_spec`` field is None when no index has been created.
         """
         return {
             "name": self._name,
@@ -640,6 +847,10 @@ class Collection:
             },
             "partitions": self.list_partitions(),
             "num_entities": self.num_entities,
+            "load_state": self._load_state,
+            "index_spec": (
+                self._index_spec.to_dict() if self._index_spec is not None else None
+            ),
         }
 
     # ── orchestration ───────────────────────────────────────────

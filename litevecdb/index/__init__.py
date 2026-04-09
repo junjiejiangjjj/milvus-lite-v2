@@ -16,5 +16,6 @@ guard so installations without faiss-cpu still get the BruteForce path.
 
 from litevecdb.index.brute_force import BruteForceIndex
 from litevecdb.index.protocol import VectorIndex
+from litevecdb.index.spec import IndexSpec
 
-__all__ = ["VectorIndex", "BruteForceIndex"]
+__all__ = ["VectorIndex", "BruteForceIndex", "IndexSpec"]

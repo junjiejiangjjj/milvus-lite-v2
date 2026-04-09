@@ -31,7 +31,7 @@ import json
 import logging
 import os
 import shutil
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from litevecdb.constants import DEFAULT_PARTITION
 from litevecdb.exceptions import (
@@ -41,6 +41,9 @@ from litevecdb.exceptions import (
     PartitionNotFoundError,
 )
 
+if TYPE_CHECKING:
+    from litevecdb.index.spec import IndexSpec
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,7 +51,10 @@ MANIFEST_FILENAME = "manifest.json"
 MANIFEST_PREV_FILENAME = "manifest.json.prev"
 MANIFEST_TMP_FILENAME = "manifest.json.tmp"
 
-MANIFEST_FORMAT_VERSION = 1
+# v1 → v2 (Phase 9.3): added optional `index_spec` field. v1 manifests
+# load fine — index_spec defaults to None, and the next save() upgrades
+# the on-disk file to v2 transparently.
+MANIFEST_FORMAT_VERSION = 2
 
 
 class Manifest:
@@ -68,6 +74,9 @@ class Manifest:
         self._partitions: Dict[str, Dict[str, List[str]]] = {
             DEFAULT_PARTITION: {"data_files": [], "delta_files": []},
         }
+        # Phase 9.3: optional persisted IndexSpec. None = no create_index
+        # has been called yet for this Collection.
+        self._index_spec: Optional["IndexSpec"] = None
 
     # ── persistence ─────────────────────────────────────────────
 
@@ -184,6 +193,17 @@ class Manifest:
             }
         if DEFAULT_PARTITION not in m._partitions:
             m._partitions[DEFAULT_PARTITION] = {"data_files": [], "delta_files": []}
+
+        # v1 → v2 backward compat: missing index_spec key → None.
+        # v1 manifests load fine and the next save() upgrades them in place.
+        spec_dict = payload.get("index_spec")
+        if spec_dict is not None:
+            # Local import to avoid circular: storage → index → search → ...
+            from litevecdb.index.spec import IndexSpec
+            m._index_spec = IndexSpec.from_dict(spec_dict)
+        else:
+            m._index_spec = None
+
         return m
 
     def _to_payload(self) -> Dict[str, Any]:
@@ -194,6 +214,9 @@ class Manifest:
             "schema_version": self._schema_version,
             "active_wal_number": self._active_wal_number,
             "partitions": self._partitions,
+            "index_spec": (
+                self._index_spec.to_dict() if self._index_spec is not None else None
+            ),
         }
 
     # ── partition CRUD ──────────────────────────────────────────
@@ -309,3 +332,23 @@ class Manifest:
     @property
     def data_dir(self) -> str:
         return self._data_dir
+
+    # ── index spec (Phase 9.3) ──────────────────────────────────
+
+    @property
+    def index_spec(self) -> Optional["IndexSpec"]:
+        """Currently persisted IndexSpec, or None if create_index has
+        never been called."""
+        return self._index_spec
+
+    def set_index_spec(self, spec: Optional["IndexSpec"]) -> None:
+        """Set or clear the IndexSpec. Caller must call save() to
+        persist. Phase 9.3."""
+        self._index_spec = spec
+
+    @property
+    def format_version(self) -> int:
+        """The on-disk manifest format version. Phase 9.3 bumped from 1
+        to 2 to add the index_spec field. v1 manifests load fine and
+        upgrade transparently on the next save."""
+        return MANIFEST_FORMAT_VERSION
