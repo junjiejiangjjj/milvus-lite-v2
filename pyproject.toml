@@ -24,6 +24,20 @@ faiss = [
     # SearchParametersHNSW(sel=...) support.
     "faiss-cpu>=1.7.4",
 ]
+grpc = [
+    # Phase 10: gRPC adapter for pymilvus protocol compatibility.
+    # We import proto stubs from pymilvus.grpc_gen rather than
+    # generating our own — this guarantees wire compatibility with
+    # whichever pymilvus version is installed and tracks pymilvus
+    # protocol updates automatically.
+    "pymilvus>=2.4",
+    "grpcio>=1.50",
+]
+
+[project.scripts]
+# Phase 10: CLI entry for the gRPC server.
+# Enabled when installed with the [grpc] extra.
+litevecdb-grpc = "litevecdb.adapter.grpc.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
