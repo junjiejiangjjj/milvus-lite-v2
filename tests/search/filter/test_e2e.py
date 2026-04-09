@@ -381,7 +381,7 @@ def test_meta_string_eq(meta_table, schema_dynamic):
         schema_dynamic,
         source='$meta["category"] == "tech"',
     )
-    assert compiled.backend == "python"
+    assert compiled.backend == "hybrid"
     from litevecdb.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     assert result.to_pylist() == [True, False, True, False, False]
@@ -475,3 +475,111 @@ def test_arrow_backend_rejects_meta(meta_table, schema_dynamic):
     forced = replace(compiled, backend="arrow")
     with pytest.raises(NotImplementedError, match="\\$meta"):
         evaluate_arrow(forced, meta_table)
+
+
+# ===========================================================================
+# Phase F3+ — hybrid_backend differential parity vs python_backend
+# ===========================================================================
+#
+# Each $meta expression runs through BOTH the hybrid backend (per-batch JSON
+# preprocessing → arrow_backend) and the python backend (row-wise interpreter)
+# and the resulting BooleanArrays must agree on every row. This is the
+# correctness safety net for the Phase F3+ optimization: any divergence means
+# the hybrid path has misimplemented the semantics that the python_backend
+# differential test already validated.
+
+_META_DIFF_EXPRS = [
+    '$meta["category"] == "tech"',
+    '$meta["category"] != "tech"',
+    '$meta["priority"] > 2',
+    '$meta["priority"] >= 3',
+    '$meta["priority"] < 5',
+    '$meta["score"] > 0.5',
+    '$meta["score"] * 2 > 1.0',
+    '$meta["score"] + 0.1 >= 0.6',
+    '$meta["category"] == "tech" or $meta["category"] == "news"',
+    '$meta["category"] == "tech" and $meta["priority"] > 2',
+    'age > 20 and $meta["category"] == "tech"',
+    'age < 50 or $meta["score"] > 0.8',
+    'not ($meta["category"] == "blog")',
+    # NOTE: `$meta[...] in [...]` is rejected by the parser today —
+    # `in` requires a FieldRef on the LHS, not a MetaAccess. When the
+    # parser is extended to allow it (Phase F4+), add it here.
+    '$meta["title"] like "AI%"',
+    '$meta["nonexistent"] == "x"',
+]
+
+
+@pytest.mark.parametrize("source", _META_DIFF_EXPRS)
+def test_meta_hybrid_vs_python_parity(source, meta_table, schema_dynamic):
+    """hybrid backend == python backend on every $meta expression."""
+    compiled = compile_expr(parse_expr(source), schema_dynamic, source=source)
+    # Sanity: dispatcher should have selected hybrid for $meta exprs.
+    assert compiled.backend == "hybrid"
+
+    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    hybrid_result = evaluate_hybrid(compiled, meta_table)
+
+    py_compiled = replace(compiled, backend="python")
+    python_result = evaluate_python(py_compiled, meta_table)
+
+    assert hybrid_result.to_pylist() == python_result.to_pylist(), (
+        f"hybrid/python divergence on: {source}\n"
+        f"  hybrid={hybrid_result.to_pylist()}\n"
+        f"  python={python_result.to_pylist()}"
+    )
+
+
+def test_meta_hybrid_handles_missing_meta_column(schema_dynamic):
+    """If $meta column is absent entirely, hybrid degrades to all-null
+    extracted columns and the result still matches python_backend."""
+    table = pa.table({
+        "id": ["a", "b"],
+        "age": [10, 20],
+    })
+    compiled = compile_expr(
+        parse_expr('$meta["x"] == "y"'),
+        schema_dynamic,
+        source='$meta["x"] == "y"',
+    )
+    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    hybrid_result = evaluate_hybrid(compiled, table)
+    python_result = evaluate_python(replace(compiled, backend="python"), table)
+    assert hybrid_result.to_pylist() == python_result.to_pylist()
+
+
+def test_meta_hybrid_falls_back_on_mixed_types(schema_dynamic):
+    """When a $meta key has heterogeneous types across rows, pa.array
+    raises and hybrid falls back to python_backend transparently."""
+    table = pa.table({
+        "id": ["a", "b", "c"],
+        "age": [10, 20, 30],
+        "$meta": [
+            '{"mixed": 1}',
+            '{"mixed": "two"}',
+            '{"mixed": 3.0}',
+        ],
+    })
+    compiled = compile_expr(
+        parse_expr('$meta["mixed"] == 1'),
+        schema_dynamic,
+        source='$meta["mixed"] == 1',
+    )
+    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    # Should not raise — fallback to python_backend.
+    result = evaluate_hybrid(compiled, table)
+    # Compare with python_backend directly to confirm fallback parity.
+    python_result = evaluate_python(replace(compiled, backend="python"), table)
+    assert result.to_pylist() == python_result.to_pylist()
+
+
+def test_meta_hybrid_record_batch_input(meta_table, schema_dynamic):
+    """RecordBatch (rather than Table) input should still be handled."""
+    batch = meta_table.to_batches()[0]
+    compiled = compile_expr(
+        parse_expr('$meta["category"] == "tech"'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    result = evaluate_hybrid(compiled, batch)
+    assert result.to_pylist() == [True, False, True, False, False]

@@ -230,15 +230,21 @@ left side is int (field 'age'), right side is string
 
 ## 6. Backend 设计
 
-### 6.1 双 backend 决策
+### 6.1 三 backend 决策
 
 | Backend | 用途 | 速度（100K 行）|
 |---|---|---|
-| `arrow_backend` | F1 全部 + 大部分 F2 | ~5ms |
-| `python_backend` | F1 差分测试 + F2b 起的 fallback | ~500ms |
+| `arrow_backend` | 纯 schema 字段表达式（F1+F2a 全部） | ~5ms |
+| `hybrid_backend` | 含 `$meta` 动态字段表达式（F3+） | ~50–100ms |
+| `python_backend` | 差分测试基准 + hybrid fallback + 未来 UDF | ~500ms |
 
 **Backend 在 compile 时静态决定**——不在 evaluate 热路径上 dispatch。
-F1 始终走 arrow_backend；python_backend 此阶段只用作差分测试基准。
+- 纯 schema 字段 → `arrow`
+- 含 `$meta` → `hybrid`（per-batch JSON 预处理后委托 arrow_backend）
+- `python` 不会被 dispatcher 自动选中，仅作为：
+  1. test_e2e 差分测试的基准
+  2. hybrid_backend 在遇到异构 JSON 类型 / 不兼容 arrow kernel 时的运行时 fallback
+  3. 未来 F3 UDF / 真正动态语义的最终落点
 
 ### 6.2 arrow_backend 实现策略
 
@@ -277,7 +283,34 @@ def evaluate_python(compiled, data) -> pa.BooleanArray:
 
 NULL 三值逻辑：用 Kleene 实现 AND/OR/NOT，最终 None → False。
 
-**性能**：100K 行 ~500ms。慢但通用。F1 阶段仅用于差分测试，未来 F2b/F3 处理 $meta 和 UDF。
+**性能**：100K 行 ~500ms。慢但通用。F3+ 阶段不再被 dispatcher 自动选中，仅作为差分基准 + hybrid fallback。
+
+### 6.3a hybrid_backend 实现策略 (F3+)
+
+`$meta["key"]` 在 F2b 最初实现是 `python_backend` 直接 row-wise 解释 — 每行付出
+"AST walk + JSON parse" 的双重开销，100K 行 ~500ms。F3+ 引入 hybrid_backend：
+
+**思路**：把 JSON 解析与列物化提到 per-batch 一次，让比较/算术/布尔仍走 arrow 向量化。
+
+**步骤**：
+1. `collect_meta_keys(ast)` 扫一遍 AST 收集所有 `$meta["key"]` 的 key 集合
+2. `_augment_table(data, keys)`：
+   - 一次 `to_pylist()` 把 `$meta` 列拉出来
+   - 每行 `json.loads` 一次（容错 None / dict / 坏 JSON）
+   - 对每个 key 用 `pa.array([d.get(key) for d in parsed])` 物化成 Arrow 列
+   - append 到原 table，列名约定 `__meta__<key>`（双下划线前缀避免冲突）
+3. `_rewrite_meta_access(ast, keys)`：把 AST 里所有 `MetaAccess(key)` 节点替换为
+   `FieldRef("__meta__<key>")`，得到一份新 AST
+4. 用 `dataclasses.replace` 临时把 backend 改成 `"arrow"`，调 `evaluate_arrow`
+
+**性能**：100K 行 ~50–100ms（瓶颈从 row-wise Python 转为 JSON 解析），约 5–10×。
+
+**Fallback**：整段 try/except 包裹 augment + arrow eval。任意失败（异构类型 / 全 null
+列没有匹配 kernel / arrow 不支持的型变换）→ 落回 `python_backend` 跑这一次 evaluate。
+fallback 是 per-evaluate 而不是 per-row，开销可控。
+
+**正确性**：差分测试 (`test_meta_hybrid_vs_python_parity`) 跑遍 14 个 `$meta` 表达式，
+逐行比对 hybrid 与 python 输出。语义源头是 `python_backend`，hybrid 偏离即测试失败。
 
 ### 6.4 差分测试
 
@@ -436,12 +469,12 @@ query vector，也不计算距离，直接返回所有匹配行（可选 `limit`
 
 | Phase | 目标 grammar | Backend | Status |
 |---|---|---|---|
-| **F1** | Tier 1：比较 + 布尔 + IN + 字面量 + 字段引用 + 括号 | 仅 arrow_backend；python_backend 仅做差分测试 | 待开始 |
-| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend | — |
-| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch | — |
-| **F2c** | filter 缓存 + `query()`（如果 F1 没做） | 与 backend 无关 | — |
+| **F1** | Tier 1：比较 + 布尔 + IN + 字面量 + 字段引用 + 括号 | 仅 arrow_backend；python_backend 仅做差分测试 | ✅ done |
+| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend | ✅ done |
+| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch | ✅ done |
+| **F2c** | filter LRU cache + `query()` 接入 | 与 backend 无关 | ✅ done |
+| **F3+** | 性能优化：per-batch JSON 预处理 → arrow_backend；hybrid 取代 python 作 $meta 默认 dispatch | 引入 hybrid_backend | ✅ done |
 | **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap | — |
-| **F3+** | 性能优化：per-batch JSON 预处理 / DuckDB opt-in | 引入 hybrid_backend | — |
 
 ---
 
@@ -492,6 +525,12 @@ F1 grammar 之外的算子，lex/parse 阶段会 reject 并给 "Phase F2/F3 will
 
 - **F2 done**：
   - `col.search(expr="title like 'AI%' and $meta['priority'] > 5")` 跑通
+  - filter LRU cache + `query()` 接入
+
+- **F3+ done**：
+  - hybrid_backend 取代 python_backend 作 `$meta` 默认 dispatch
+  - 差分测试 hybrid vs python 在所有 `$meta` 表达式上一致
+  - 异构 JSON 类型 / 全 null 列等异常自动 fallback 到 python_backend
 
 - **F3 done**：
   - 跑通 pymilvus 表达式测试套件子集

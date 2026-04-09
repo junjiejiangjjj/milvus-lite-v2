@@ -171,10 +171,13 @@ def compile_expr(
             source, getattr(expr, "pos", 0),
         )
 
-    # Backend selection: any expression containing $meta access must
-    # go through python_backend (pyarrow.compute has no JSON path
-    # kernel). Otherwise stay on the fast arrow path.
-    backend = "python" if ctx.has_meta_access else "arrow"
+    # Backend selection (Phase F3+):
+    #   - "arrow"  for pure schema field expressions (fast path)
+    #   - "hybrid" for $meta expressions (per-batch JSON preprocessing
+    #     then arrow path; ~10x faster than pure row-wise python)
+    #   - "python" reserved for future UDF / truly dynamic things that
+    #     hybrid can't handle. Not selected automatically in F3+.
+    backend = "hybrid" if ctx.has_meta_access else "arrow"
 
     return CompiledExpr(
         ast=expr,

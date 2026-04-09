@@ -284,14 +284,14 @@ litevecdb/search/filter/
 
 ### 子阶段拆分
 
-| 子阶段 | grammar 增量 | Backend |
-|---|---|---|
-| **F1** | Tier 1：`==/!=/<.../in/and/or/not` + 字面量 + 字段引用 + 括号 | 仅 arrow_backend；python_backend 仅做差分测试基准 |
-| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend |
-| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch |
-| **F2c** | filter 缓存 + `query()`（如果 F1 没做） | 与 backend 无关 |
-| **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap |
-| **F3+** | 性能优化：per-batch JSON 预处理 / DuckDB opt-in | 引入 hybrid_backend |
+| 子阶段 | grammar 增量 | Backend | Status |
+|---|---|---|---|
+| **F1** | Tier 1：`==/!=/<.../in/and/or/not` + 字面量 + 字段引用 + 括号 | 仅 arrow_backend；python_backend 仅做差分测试基准 | ✅ done |
+| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend | ✅ done |
+| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch | ✅ done |
+| **F2c** | filter LRU cache + `query()` 公开方法 | 与 backend 无关 | ✅ done |
+| **F3+** | 性能优化：per-batch JSON 预处理 → arrow path；hybrid 取代 python 作 $meta 默认 dispatch | 引入 hybrid_backend；python_backend 仍作 fallback 与差分基准 | ✅ done |
+| **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap | — |
 
 ### Phase F1 任务清单
 

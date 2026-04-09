@@ -1863,7 +1863,7 @@ class CompiledExpr:
     """Type-checked, schema-bound expression ready for evaluation."""
     ast: Expr
     fields: Dict[str, FieldInfo]   # all field names referenced
-    backend: str                    # "arrow" | "python"
+    backend: str                    # "arrow" | "hybrid" | "python"
 
 def compile_expr(expr: Expr, schema: CollectionSchema) -> CompiledExpr:
     """Bind field references, check types, choose backend.
@@ -1875,9 +1875,12 @@ def compile_expr(expr: Expr, schema: CollectionSchema) -> CompiledExpr:
         3. Walk again, infer + check types (cmp operands compat,
            list elements homogeneous, bool combinators bool operands)
         4. Choose backend:
-           - F1: always "arrow"
-           - F2b+: "python" if expression contains $meta access
-           - F3+: "python" if expression contains UDF call
+           - "arrow"  for pure schema field expressions (fast path)
+           - "hybrid" for $meta expressions (F3+: per-batch JSON
+             preprocessing then arrow path)
+           - "python" reserved for future UDF / truly dynamic things;
+             not selected automatically in F3+ — only used as differential
+             baseline and as hybrid_backend's runtime fallback target
         5. Wrap in CompiledExpr
 
     Raises:
@@ -1953,9 +1956,12 @@ def evaluate_python(
 ) -> pa.BooleanArray:
     """Row-wise interpreter. Slow but flexible.
 
-    F1 用途：差分测试基准（arrow_backend 的输出必须与之相等）。
-    F2b+ 用途：评估含 $meta 的表达式。
-    F3+ 用途：评估含 UDF 的表达式。
+    用途：
+        - 差分测试基准（arrow_backend / hybrid_backend 的输出必须与之相等）
+        - hybrid_backend 在异构 JSON 类型 / arrow kernel 不兼容时的运行时 fallback
+        - 未来 F3 UDF / 真正动态语义的最终落点
+
+    F3+ 后不再被 dispatcher 自动选中（含 $meta 的表达式默认走 hybrid_backend）。
 
     NULL 语义：用 Kleene 三值逻辑实现 AND/OR/NOT，最终结果 None → False。
     """
@@ -1972,6 +1978,35 @@ def evaluate_python(
 | `And/Or` | Kleene 三值短路 |
 | `Not` | None 传染 |
 
+### 9.25a search/filter/eval/hybrid_backend.py (F3+)
+
+```python
+def evaluate_hybrid(
+    compiled: "CompiledExpr",
+    data: Union[pa.Table, pa.RecordBatch],
+) -> pa.BooleanArray:
+    """Per-batch JSON preprocessing + arrow_backend delegation.
+
+    Strategy:
+        1. collect_meta_keys(ast) — gather all $meta["key"] references
+        2. _augment_table(data, keys) — pull $meta column once, json.loads
+           each row, materialize one Arrow column per key under synthetic
+           name __meta__<key>
+        3. _rewrite_meta_access(ast, keys) — replace MetaAccess(key) with
+           FieldRef("__meta__<key>") in a new AST tree
+        4. dataclasses.replace the CompiledExpr with arrow backend tag
+        5. Delegate to evaluate_arrow on the augmented table
+
+    Performance: 100K rows + simple expression goes from ~500ms (python_backend
+    row-wise) to ~50–100ms. Bottleneck shifts from per-row Python to JSON parse.
+
+    Fallback: the entire augment + arrow eval is wrapped in try/except. Any
+    failure (heterogeneous JSON types, null-typed synthetic column with no
+    arrow kernel match, type promotion failures) falls back to evaluate_python
+    for this single call. Per-evaluate fallback, not per-row.
+    """
+```
+
 ### 9.26 search/filter/eval/__init__.py
 
 ```python
@@ -1981,13 +2016,14 @@ def evaluate(
 ) -> pa.BooleanArray:
     """Backend dispatcher.
 
-    F1 始终走 arrow_backend；F2b+ 根据 compiled.backend 字段 dispatch。
-    在 evaluate 热路径上**不做**重复 backend 决策——决策已在 compile_expr
-    完成、固化在 CompiledExpr.backend 字段。
+    Backend 决策已在 compile_expr 完成、固化在 CompiledExpr.backend 字段；
+    evaluate 热路径上不做重复决策。
     """
     if compiled.backend == "arrow":
         return evaluate_arrow(compiled, data)
-    elif compiled.backend == "python":
+    if compiled.backend == "hybrid":
+        return evaluate_hybrid(compiled, data)
+    if compiled.backend == "python":
         return evaluate_python(compiled, data)
     raise ValueError(f"unknown filter backend: {compiled.backend!r}")
 ```
@@ -1996,12 +2032,12 @@ def evaluate(
 
 | Phase | 目标 grammar | Backend |
 |---|---|---|
-| **F1** | Tier 1：`==/!=/<.../in/and/or/not` + 字面量 + 字段引用 + 括号 | 仅 arrow_backend（python_backend 用作差分测试基准） |
-| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend |
-| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch（含 $meta 的表达式自动降级） |
-| **F2c** | + filter 缓存 + `query()` 公开方法（如果 F1 没做） | 与 backend 无关 |
+| **F1** ✅ | Tier 1：`==/!=/<.../in/and/or/not` + 字面量 + 字段引用 + 括号 | 仅 arrow_backend（python_backend 用作差分测试基准） |
+| **F2a** ✅ | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend |
+| **F2b** ✅ | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch（含 $meta 的表达式自动降级） |
+| **F2c** ✅ | + filter LRU cache + `query()` 公开方法 | 与 backend 无关 |
+| **F3+** ✅ | 性能优化：per-batch JSON 预处理 → arrow path；hybrid 取代 python 作 $meta 默认 dispatch | 引入 hybrid_backend |
 | **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap |
-| **F3+** | 性能优化：per-batch JSON 预处理 / DuckDB opt-in | 引入 hybrid_backend |
 
 ### 9.28 Phase 8 设计参考
 

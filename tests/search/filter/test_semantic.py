@@ -367,8 +367,8 @@ def schema_dynamic():
 
 def test_meta_access_with_dynamic_field(schema_dynamic):
     c = compile_str('$meta["category"] == "tech"', schema_dynamic)
-    # Backend should be python because of $meta access
-    assert c.backend == "python"
+    # Backend should be hybrid because of $meta access (Phase F3+)
+    assert c.backend == "hybrid"
 
 
 def test_meta_without_dynamic_field_rejected(schema):
@@ -380,23 +380,23 @@ def test_meta_without_dynamic_field_rejected(schema):
 def test_meta_compared_with_int(schema_dynamic):
     """$meta has dynamic type, can be compared with int (runtime decides)."""
     c = compile_str('$meta["priority"] > 5', schema_dynamic)
-    assert c.backend == "python"
+    assert c.backend == "hybrid"
 
 
 def test_meta_compared_with_float(schema_dynamic):
     c = compile_str('$meta["score"] > 0.5', schema_dynamic)
-    assert c.backend == "python"
+    assert c.backend == "hybrid"
 
 
 def test_meta_compared_with_string(schema_dynamic):
     c = compile_str('$meta["category"] == "tech"', schema_dynamic)
-    assert c.backend == "python"
+    assert c.backend == "hybrid"
 
 
 def test_meta_in_arithmetic(schema_dynamic):
     """$meta in arithmetic — type is dynamic, allowed."""
     c = compile_str('$meta["score"] * 2 > 1.0', schema_dynamic)
-    assert c.backend == "python"
+    assert c.backend == "hybrid"
 
 
 def test_meta_in_complex_expression(schema_dynamic):
@@ -404,8 +404,8 @@ def test_meta_in_complex_expression(schema_dynamic):
         'age > 18 and $meta["category"] == "tech"',
         schema_dynamic,
     )
-    # Mixed: age is regular field, $meta is dynamic — backend goes python
-    assert c.backend == "python"
+    # Mixed: age is regular field, $meta is dynamic — backend goes hybrid
+    assert c.backend == "hybrid"
     assert "age" in c.fields  # regular field still recorded
 
 
@@ -417,4 +417,4 @@ def test_normal_expression_still_arrow(schema_dynamic):
 
 def test_meta_with_like(schema_dynamic):
     c = compile_str('$meta["title"] like "AI%"', schema_dynamic)
-    assert c.backend == "python"
+    assert c.backend == "hybrid"
