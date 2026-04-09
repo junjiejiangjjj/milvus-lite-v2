@@ -1,0 +1,346 @@
+"""Pratt parser for filter expressions.
+
+Hand-written recursive descent with precedence climbing. Grammar
+matches the F1 subset documented in plan/filter-design.md §3:
+
+    Prec  Operator        Assoc
+    1     or / OR / ||    left
+    2     and / AND / &&  left
+    3     not / NOT / !   right (prefix)
+    4     == != < <= > >= left
+    4     in [...]        non-assoc
+    5     - (unary minus) right (prefix)
+    6     literal | ident | ( expr )
+
+Comparison chaining (`a == b == c`) is accepted at parse time and
+rejected at semantic time with a type error pointing to the bool/int
+mismatch — this matches Milvus's Plan.g4 (Equality is left-assoc).
+
+For F1 we deliberately reject features that exist in Milvus but
+require Tier 2/3 work. The reject is in parse_primary, with a
+"will be supported in Phase F2/F3" hint.
+"""
+
+from __future__ import annotations
+
+from typing import List, Optional
+
+from litevecdb.search.filter.ast import (
+    And,
+    BoolLit,
+    CmpOp,
+    Expr,
+    FieldRef,
+    FloatLit,
+    InOp,
+    IntLit,
+    ListLit,
+    Literal,
+    Not,
+    Or,
+    StringLit,
+)
+from litevecdb.search.filter.exceptions import FilterParseError
+from litevecdb.search.filter.tokens import Token, TokenKind, tokenize
+
+
+_CMP_KINDS = (
+    TokenKind.EQ, TokenKind.NE,
+    TokenKind.LT, TokenKind.LE,
+    TokenKind.GT, TokenKind.GE,
+)
+_CMP_TEXT = {
+    TokenKind.EQ: "==", TokenKind.NE: "!=",
+    TokenKind.LT: "<",  TokenKind.LE: "<=",
+    TokenKind.GT: ">",  TokenKind.GE: ">=",
+}
+
+
+class Parser:
+    """Recursive-descent parser; instances are single-use (one parse call)."""
+
+    def __init__(self, tokens: List[Token], source: str) -> None:
+        self.tokens = tokens
+        self.source = source
+        self.pos = 0
+
+    # ── public entry ────────────────────────────────────────────
+
+    def parse(self) -> Expr:
+        expr = self.parse_or()
+        if self._peek().kind != TokenKind.EOF:
+            tok = self._peek()
+            raise FilterParseError(
+                f"unexpected token {tok.text!r}",
+                self.source, tok.pos, span=max(1, len(tok.text)),
+                hint="expected end of expression",
+            )
+        return expr
+
+    # ── precedence levels (low → high) ──────────────────────────
+
+    def parse_or(self) -> Expr:
+        """prec 1: a or b or c (left-assoc, flattened)."""
+        left = self.parse_and()
+        operands: list[Expr] = []
+        while self._peek().kind == TokenKind.OR:
+            self._consume()
+            operands.append(self.parse_and())
+        if not operands:
+            return left
+        return Or(operands=tuple([left, *operands]), pos=left_pos_of(left))
+
+    def parse_and(self) -> Expr:
+        """prec 2: a and b and c (left-assoc, flattened)."""
+        left = self.parse_not()
+        operands: list[Expr] = []
+        while self._peek().kind == TokenKind.AND:
+            self._consume()
+            operands.append(self.parse_not())
+        if not operands:
+            return left
+        return And(operands=tuple([left, *operands]), pos=left_pos_of(left))
+
+    def parse_not(self) -> Expr:
+        """prec 3: not a (prefix, right-assoc)."""
+        if self._peek().kind == TokenKind.NOT:
+            tok = self._consume()
+            # Special case: `field not in [...]` is handled in parse_in_or_cmp
+            # by looking at the next token. But the parser at this level
+            # expects `not <factor>`, so we need to be careful — `not in`
+            # is only valid AFTER an identifier. Here we always treat
+            # standalone `not` as a logical-not prefix.
+            operand = self.parse_not()
+            return Not(operand=operand, pos=tok.pos)
+        return self.parse_cmp()
+
+    def parse_cmp(self) -> Expr:
+        """prec 4: comparisons + IN.
+
+        After parsing the LHS primary/unary, loop on comparison ops to
+        produce left-associative chaining (`a == b == c` becomes
+        `(a == b) == c`). Chained comparisons are parse-accepted; the
+        semantic checker rejects them with a precise type error
+        ("left side is bool, right side is int").
+
+        After zero-or-more cmp ops, also check for IN / NOT IN.
+        """
+        left = self.parse_unary()
+
+        while True:
+            peek = self._peek()
+            if peek.kind in _CMP_KINDS:
+                op_tok = self._consume()
+                right = self.parse_unary()
+                left = CmpOp(
+                    op=_CMP_TEXT[op_tok.kind],
+                    left=left,
+                    right=right,
+                    pos=op_tok.pos,
+                )
+                continue
+            if peek.kind == TokenKind.IN:
+                return self._parse_in_tail(left, negate=False)
+            if peek.kind == TokenKind.NOT:
+                # `not in` after a comparable LHS — the `not` here is
+                # the negation marker on `in`, not a logical-not prefix.
+                if self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1].kind == TokenKind.IN:
+                    self._consume()  # NOT
+                    return self._parse_in_tail(left, negate=True)
+            break
+
+        return left
+
+    def _parse_in_tail(self, left: Expr, negate: bool) -> Expr:
+        """Parse the `in [...]` tail. *left* must be a FieldRef."""
+        in_tok = self._consume()  # IN
+        if not isinstance(left, FieldRef):
+            raise FilterParseError(
+                "left side of 'in' must be a field reference",
+                self.source, in_tok.pos,
+                hint="example: field in [1, 2, 3]",
+            )
+        if self._peek().kind != TokenKind.LBRACKET:
+            tok = self._peek()
+            raise FilterParseError(
+                f"expected '[' after 'in', got {tok.text!r}",
+                self.source, tok.pos,
+                hint="'in' must be followed by a literal list, e.g. [1, 2, 3]",
+            )
+        list_lit = self.parse_list_literal()
+        return InOp(field=left, values=list_lit, negate=negate, pos=in_tok.pos)
+
+    def parse_unary(self) -> Expr:
+        """prec 5: unary minus (prefix)."""
+        if self._peek().kind == TokenKind.SUB:
+            sub_tok = self._consume()
+            operand = self.parse_unary()
+            # Constant-fold unary minus on int/float literals to avoid
+            # creating an extra wrapper node — also keeps the AST
+            # comparable to a literal-only AST.
+            if isinstance(operand, IntLit):
+                return IntLit(value=-operand.value, pos=sub_tok.pos)
+            if isinstance(operand, FloatLit):
+                return FloatLit(value=-operand.value, pos=sub_tok.pos)
+            # No general arithmetic in F1, so a unary minus on a
+            # non-literal is meaningless.
+            raise FilterParseError(
+                "unary '-' is only allowed on numeric literals in Phase F1",
+                self.source, sub_tok.pos,
+                hint="arithmetic expressions will be supported in Phase F2",
+            )
+        return self.parse_primary()
+
+    def parse_primary(self) -> Expr:
+        """prec 6: literal | ident | (expr)."""
+        tok = self._peek()
+
+        if tok.kind == TokenKind.INT:
+            self._consume()
+            return IntLit(value=tok.value, pos=tok.pos)
+
+        if tok.kind == TokenKind.FLOAT:
+            self._consume()
+            return FloatLit(value=tok.value, pos=tok.pos)
+
+        if tok.kind == TokenKind.STRING:
+            self._consume()
+            return StringLit(value=tok.value, pos=tok.pos)
+
+        if tok.kind == TokenKind.BOOL:
+            self._consume()
+            return BoolLit(value=tok.value, pos=tok.pos)
+
+        if tok.kind == TokenKind.IDENT:
+            self._consume()
+            # Reject function-call syntax — F3 will support it.
+            if self._peek().kind == TokenKind.LPAREN:
+                raise FilterParseError(
+                    f"function calls not supported in Phase F1 (saw {tok.text!r}'(')",
+                    self.source, tok.pos, span=len(tok.text),
+                    hint="json_contains / array_length / etc. land in Phase F3",
+                )
+            return FieldRef(name=tok.text, pos=tok.pos)
+
+        if tok.kind == TokenKind.LPAREN:
+            self._consume()
+            inner = self.parse_or()
+            if self._peek().kind != TokenKind.RPAREN:
+                close = self._peek()
+                raise FilterParseError(
+                    f"expected ')' got {close.text!r}",
+                    self.source, close.pos,
+                )
+            self._consume()
+            return inner
+
+        if tok.kind == TokenKind.EOF:
+            raise FilterParseError(
+                "unexpected end of expression",
+                self.source, tok.pos,
+                hint="expression cannot be empty",
+            )
+
+        raise FilterParseError(
+            f"unexpected token {tok.text!r}",
+            self.source, tok.pos, span=max(1, len(tok.text)),
+            hint="expected literal, identifier, or '('",
+        )
+
+    def parse_list_literal(self) -> ListLit:
+        """Parse `[ literal (',' literal)* (',')? ]`. Caller has not
+        yet consumed the '['."""
+        lbracket = self._consume()  # [
+        elements: list[Literal] = []
+
+        # Empty list: []
+        if self._peek().kind == TokenKind.RBRACKET:
+            self._consume()
+            return ListLit(elements=tuple(), pos=lbracket.pos)
+
+        elements.append(self._parse_list_element())
+
+        while self._peek().kind == TokenKind.COMMA:
+            self._consume()  # ,
+            # Trailing comma allowed: ',' followed by ']'
+            if self._peek().kind == TokenKind.RBRACKET:
+                break
+            elements.append(self._parse_list_element())
+
+        if self._peek().kind != TokenKind.RBRACKET:
+            tok = self._peek()
+            raise FilterParseError(
+                f"expected ']' or ',' got {tok.text!r}",
+                self.source, tok.pos,
+            )
+        self._consume()  # ]
+        return ListLit(elements=tuple(elements), pos=lbracket.pos)
+
+    def _parse_list_element(self) -> Literal:
+        """List elements are literals only (no field refs, no nested
+        expressions). Negative numeric literals are folded here too."""
+        tok = self._peek()
+        if tok.kind == TokenKind.SUB:
+            sub_tok = self._consume()
+            inner = self._peek()
+            if inner.kind not in (TokenKind.INT, TokenKind.FLOAT):
+                raise FilterParseError(
+                    "unary '-' in list must be followed by a numeric literal",
+                    self.source, sub_tok.pos,
+                )
+            self._consume()
+            if inner.kind == TokenKind.INT:
+                return IntLit(value=-inner.value, pos=sub_tok.pos)
+            return FloatLit(value=-inner.value, pos=sub_tok.pos)
+
+        if tok.kind == TokenKind.INT:
+            self._consume()
+            return IntLit(value=tok.value, pos=tok.pos)
+        if tok.kind == TokenKind.FLOAT:
+            self._consume()
+            return FloatLit(value=tok.value, pos=tok.pos)
+        if tok.kind == TokenKind.STRING:
+            self._consume()
+            return StringLit(value=tok.value, pos=tok.pos)
+        if tok.kind == TokenKind.BOOL:
+            self._consume()
+            return BoolLit(value=tok.value, pos=tok.pos)
+
+        raise FilterParseError(
+            f"list elements must be literals, got {tok.text!r}",
+            self.source, tok.pos, span=max(1, len(tok.text)),
+        )
+
+    # ── token utilities ─────────────────────────────────────────
+
+    def _peek(self) -> Token:
+        return self.tokens[self.pos]
+
+    def _consume(self) -> Token:
+        tok = self.tokens[self.pos]
+        self.pos += 1
+        return tok
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def left_pos_of(node: Expr) -> int:
+    """Best-effort source position for the leftmost child of *node*.
+
+    Used to anchor And/Or nodes at their leftmost operand's position
+    rather than at the operator (which would point to the rightmost
+    `and`/`or` in a chain).
+    """
+    return getattr(node, "pos", 0)
+
+
+def parse_expr(source: str) -> Expr:
+    """Public entry point: lex + parse a single expression.
+
+    Raises:
+        FilterParseError: on lex or parse errors. Always carries source + pos.
+    """
+    tokens = tokenize(source)
+    return Parser(tokens, source).parse()

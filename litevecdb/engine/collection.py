@@ -56,10 +56,27 @@ from litevecdb.storage.memtable import MemTable
 from litevecdb.storage.segment import Segment
 from litevecdb.storage.wal import WAL
 
+if False:  # TYPE_CHECKING
+    from litevecdb.search.filter.semantic import CompiledExpr  # noqa: F401
+
 
 # Segment cache key: (partition, relative_path) — relative_path is what
 # the manifest stores so two segments cannot collide on the same name.
 _SegmentKey = Tuple[str, str]
+
+
+def _row_matches_filter(record: dict, compiled_filter) -> bool:
+    """Evaluate a CompiledExpr against a single dict row.
+
+    Used by Collection.get() after a successful pk lookup, when we need
+    to filter the single hit row by the user's expression. Builds a
+    1-row pa.Table on the fly so we can reuse the existing evaluator.
+    For Phase F1 we always go through the python_backend (cheaper than
+    constructing an Arrow table for one row).
+    """
+    from litevecdb.search.filter.eval.python_backend import _eval_row
+    result = _eval_row(compiled_filter.ast, record)
+    return bool(result) if result is not None else False
 
 
 class Collection:
@@ -226,6 +243,7 @@ class Collection:
         self,
         pks: List[Any],
         partition_names: Optional[List[str]] = None,
+        expr: Optional[str] = None,
     ) -> List[dict]:
         """Point read across MemTable + segments.
 
@@ -236,6 +254,9 @@ class Collection:
                in the requested partitions; check delta_index for an
                on-disk tombstone with a larger seq.
 
+        If ``expr`` is provided, hit records are additionally filtered
+        by the compiled scalar expression.
+
         Returns records in input pk order; missing pks are skipped
         (NOT padded with None).
         """
@@ -243,39 +264,49 @@ class Collection:
             raise TypeError(f"pks must be a list, got {type(pks).__name__}")
 
         partition_filter = set(partition_names) if partition_names else None
+        compiled_filter = self._compile_filter(expr) if expr else None
+
         out: List[dict] = []
 
         for pk in pks:
+            rec: Optional[dict] = None
+
             # Step 1: live insert in MemTable.
-            rec = self._memtable.get(pk)
-            if rec is not None:
-                out.append(rec)
+            mt_rec = self._memtable.get(pk)
+            if mt_rec is not None:
+                rec = mt_rec
+            elif self._memtable.is_locally_deleted(pk):
+                # Step 2: live tombstone shadows any segment hit.
+                continue
+            else:
+                # Step 3: scan segments for the latest version of pk.
+                best_seq = -1
+                best_segment: Optional[Segment] = None
+                best_row_idx: int = -1
+                for segment in self._segment_cache.values():
+                    if partition_filter is not None and segment.partition not in partition_filter:
+                        continue
+                    row_idx = segment.find_row(pk)
+                    if row_idx is None:
+                        continue
+                    seq = int(segment.seqs[row_idx])
+                    if seq > best_seq:
+                        best_seq = seq
+                        best_segment = segment
+                        best_row_idx = row_idx
+
+                if best_segment is not None:
+                    if not self._delta_index.is_deleted(pk, best_seq):
+                        rec = best_segment.row_to_dict(best_row_idx)
+
+            if rec is None:
                 continue
 
-            # Step 2: live tombstone in MemTable shadows any segment hit.
-            if self._memtable.is_locally_deleted(pk):
+            # Apply optional scalar filter to the single hit row.
+            if compiled_filter is not None and not _row_matches_filter(rec, compiled_filter):
                 continue
 
-            # Step 3: scan segments for the latest version of pk.
-            best_seq = -1
-            best_segment: Optional[Segment] = None
-            best_row_idx: int = -1
-            for segment in self._segment_cache.values():
-                if partition_filter is not None and segment.partition not in partition_filter:
-                    continue
-                row_idx = segment.find_row(pk)
-                if row_idx is None:
-                    continue
-                seq = int(segment.seqs[row_idx])
-                if seq > best_seq:
-                    best_seq = seq
-                    best_segment = segment
-                    best_row_idx = row_idx
-
-            if best_segment is not None:
-                # Tombstone check on the persisted delete watermark.
-                if not self._delta_index.is_deleted(pk, best_seq):
-                    out.append(best_segment.row_to_dict(best_row_idx))
+            out.append(rec)
 
         return out
 
@@ -285,6 +316,7 @@ class Collection:
         top_k: int = 10,
         metric_type: str = "COSINE",
         partition_names: Optional[List[str]] = None,
+        expr: Optional[str] = None,
     ) -> List[List[dict]]:
         """Vector top-k search.
 
@@ -293,6 +325,8 @@ class Collection:
             top_k: requested k.
             metric_type: "COSINE" / "L2" / "IP".
             partition_names: optional partition filter.
+            expr: optional Milvus-style scalar filter expression. Hits
+                that don't match are excluded before top-k selection.
 
         Returns:
             List of length nq. Each inner list has up to top_k dicts of
@@ -313,12 +347,15 @@ class Collection:
                 f"query_vectors must be a 2-D list, got shape {q_arr.shape}"
             )
 
+        compiled_filter = self._compile_filter(expr) if expr else None
+
         # Assemble candidates from segments + MemTable.
-        all_pks, all_seqs, all_vectors, all_records = assemble_candidates(
+        all_pks, all_seqs, all_vectors, all_records, filter_mask = assemble_candidates(
             segments=self._segment_cache.values(),
             memtable=self._memtable,
             vector_field=self._vector_name,
             partition_names=partition_names,
+            filter_compiled=compiled_filter,
         )
 
         return execute_search(
@@ -332,7 +369,92 @@ class Collection:
             metric_type=metric_type,
             pk_field=self._pk_name,
             vector_field=self._vector_name,
+            filter_mask=filter_mask,
         )
+
+    def query(
+        self,
+        expr: str,
+        output_fields: Optional[List[str]] = None,
+        partition_names: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[dict]:
+        """Pure scalar query — no vector, no distance.
+
+        Returns all records matching the filter expression. Used for
+        Milvus-style query() workflows where you just want to find rows
+        by their scalar attributes.
+
+        Args:
+            expr: required Milvus-style filter expression
+            output_fields: subset of fields to include in returned dicts.
+                None means all schema fields (with _seq / _partition stripped).
+                The pk field is always included.
+            partition_names: optional partition filter
+            limit: max number of rows to return; None = unbounded
+
+        Returns:
+            List of dicts (each a record matching the filter). Order is
+            "segments first, then MemTable" — within each source, the
+            order is the underlying iteration order. No top-k sort.
+        """
+        if not isinstance(expr, str) or not expr:
+            raise TypeError("query() requires a non-empty filter expression")
+
+        compiled_filter = self._compile_filter(expr)
+
+        all_pks, all_seqs, _all_vectors, all_records, filter_mask = assemble_candidates(
+            segments=self._segment_cache.values(),
+            memtable=self._memtable,
+            vector_field=self._vector_name,
+            partition_names=partition_names,
+            filter_compiled=compiled_filter,
+        )
+
+        if not all_pks:
+            return []
+
+        # Combine bitmap (dedup + tombstone) with filter_mask via build_valid_mask.
+        from litevecdb.search.bitmap import build_valid_mask
+        mask = build_valid_mask(
+            all_pks, all_seqs, self._delta_index, filter_mask=filter_mask,
+        )
+
+        # Project + limit.
+        live_indices = np.flatnonzero(mask)
+        out: List[dict] = []
+        for i in live_indices:
+            rec = all_records[int(i)]
+            out.append(self._project_record(rec, output_fields))
+            if limit is not None and len(out) >= limit:
+                break
+        return out
+
+    def _compile_filter(self, expr_str: str) -> "CompiledExpr":
+        """Parse + compile a filter expression against this Collection's schema.
+
+        Phase F1: no caching. F2c will add an LRU cache keyed on
+        (schema_version, expr_str).
+        """
+        from litevecdb.search.filter import compile_filter
+        return compile_filter(expr_str, self._schema)
+
+    def _project_record(
+        self,
+        record: dict,
+        output_fields: Optional[List[str]],
+    ) -> dict:
+        """Apply output_fields projection to a record dict.
+
+        - None → return the record as-is (with internal fields stripped
+          by the upstream code path)
+        - list → keep only the named fields, plus the pk field
+        """
+        if output_fields is None:
+            return record
+        keep = set(output_fields)
+        keep.add(self._pk_name)
+        return {k: v for k, v in record.items() if k in keep}
 
     def flush(self) -> None:
         """Force a synchronous flush of the current MemTable.

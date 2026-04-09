@@ -237,6 +237,51 @@ class MemTable:
         """
         return pk_value in self._delete_index
 
+    def to_arrow_table(
+        self,
+        partition_names: Optional[List[str]] = None,
+    ) -> pa.Table:
+        """Materialize the active live rows as a read-only pa.Table.
+
+        Used by search/filter to evaluate scalar predicates against the
+        in-memory data. The row order matches that of to_search_arrays
+        (both iterate _pk_index in insertion order), so a filter mask
+        produced by evaluating against the returned Table aligns with
+        the candidate arrays from to_search_arrays.
+
+        Returns an empty Table (with the data_schema layout) if there
+        are no live rows in scope.
+        """
+        if not self._insert_batches:
+            return self._data_schema.empty_table()
+
+        # Concatenate all stored batches into one full Table.
+        full = pa.Table.from_batches(self._insert_batches)
+
+        # Compute global row offsets so we can convert (batch_idx, row_idx)
+        # → flat index for pa.Table.take.
+        offsets = [0]
+        for b in self._insert_batches:
+            offsets.append(offsets[-1] + b.num_rows)
+
+        partition_filter: Optional[set] = None
+        if partition_names is not None:
+            partition_filter = set(partition_names)
+
+        indices: list[int] = []
+        for pk, (batch_idx, row_idx, _seq) in self._pk_index.items():
+            if partition_filter is not None:
+                batch = self._insert_batches[batch_idx]
+                partition = batch.column("_partition")[row_idx].as_py()
+                if partition not in partition_filter:
+                    continue
+            indices.append(offsets[batch_idx] + row_idx)
+
+        if not indices:
+            return full.slice(0, 0)
+
+        return full.take(pa.array(indices, type=pa.int64()))
+
     def size(self) -> int:
         """Active pk count + tombstone count.
 

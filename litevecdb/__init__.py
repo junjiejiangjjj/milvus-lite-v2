@@ -30,6 +30,12 @@ from litevecdb.exceptions import (
     WALCorruptedError,
 )
 from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from litevecdb.search.filter import (
+    FilterError,
+    FilterFieldError,
+    FilterParseError,
+    FilterTypeError,
+)
 
 __all__ = [
     # Top-level entry point
@@ -51,4 +57,9 @@ __all__ = [
     "WALCorruptedError",
     "ManifestCorruptedError",
     "DataDirLockedError",
+    # Filter expression errors (Phase 8)
+    "FilterError",
+    "FilterParseError",
+    "FilterFieldError",
+    "FilterTypeError",
 ]

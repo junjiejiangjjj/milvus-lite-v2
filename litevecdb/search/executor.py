@@ -14,7 +14,7 @@ typically not echoed back to the caller in vector search).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, List
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import numpy as np
 
@@ -36,6 +36,7 @@ def execute_search(
     metric_type: str,
     pk_field: str,
     vector_field: str,
+    filter_mask: Optional[np.ndarray] = None,
 ) -> List[List[dict]]:
     """Run search and return ``nq`` lists of top-k result dicts.
 
@@ -51,6 +52,8 @@ def execute_search(
         pk_field: name of the primary-key column (used to extract "id"
             from each record)
         vector_field: name of the vector column (stripped from "entity")
+        filter_mask: optional Phase-8 scalar filter result, length N.
+            AND'd into the bitmap mask before top-k selection.
 
     Returns:
         List of length nq. Each inner list has up to top_k dicts, sorted
@@ -67,7 +70,7 @@ def execute_search(
         return [[] for _ in range(nq)]
 
     # ── 1. bitmap ───────────────────────────────────────────────
-    mask = build_valid_mask(all_pks, all_seqs, delta_index)
+    mask = build_valid_mask(all_pks, all_seqs, delta_index, filter_mask=filter_mask)
     valid_indices = np.flatnonzero(mask)
 
     if valid_indices.size == 0:
