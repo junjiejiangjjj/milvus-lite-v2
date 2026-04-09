@@ -8,6 +8,8 @@ litevecdb/
 ├── storage/         # 存储层：持久化 + 内存缓冲
 ├── engine/          # 引擎层：核心逻辑编排
 ├── search/          # 搜索层：向量检索
+├── index/           # 索引层 (Phase 9)：VectorIndex 抽象 + BruteForce / FAISS
+├── adapter/         # 适配层 (Phase 10)：gRPC → engine 协议翻译
 ├── db.py            # DB 层：多 Collection 生命周期管理
 ├── constants.py     # 全局常量
 ├── exceptions.py    # 异常层级
@@ -63,16 +65,47 @@ lite-v2/
 │   │       ├── __init__.py         #   导出: parse_expr, compile_expr, evaluate, FilterError
 │   │       ├── exceptions.py       #   FilterError / FilterParseError / FilterFieldError / FilterTypeError
 │   │       ├── tokens.py           #   TokenKind enum + Token + tokenize()
-│   │       ├── ast.py              #   11 个 frozen AST 节点 + Expr Union
+│   │       ├── ast.py              #   14 个 frozen AST 节点 + Expr Union
 │   │       ├── parser.py           #   Pratt parser (借鉴 Milvus Plan.g4)
 │   │       ├── semantic.py         #   compile_expr + 类型推断 + 字段绑定 + backend 选择
+│   │       ├── cache.py            #   LRUCache (Phase F2c)
 │   │       └── eval/
-│   │           ├── __init__.py     #   evaluate() backend dispatcher
+│   │           ├── __init__.py     #   evaluate() backend dispatcher (arrow / hybrid / python)
 │   │           ├── arrow_backend.py #   pyarrow.compute 后端 (主)
-│   │           └── python_backend.py#   row-wise Python 后端 (兜底 + 差分测试基准)
+│   │           ├── hybrid_backend.py#   per-batch JSON 预处理 → arrow (Phase F3+)
+│   │           └── python_backend.py#   row-wise Python 后端 (差分基准 + hybrid fallback)
+│   │
+│   ├── index/                      # ══ 索引层 (Phase 9) ══
+│   │   ├── __init__.py             #   导出: VectorIndex, BruteForceIndex, FaissHnswIndex, IndexSpec, build_index_from_spec
+│   │   ├── protocol.py             #   VectorIndex ABC: build / search / save / load
+│   │   ├── spec.py                 #   IndexSpec frozen dataclass
+│   │   ├── brute_force.py          #   BruteForceIndex (NumPy, 差分基准 + fallback)
+│   │   ├── faiss_hnsw.py           #   FaissHnswIndex (FAISS HNSW + IDSelectorBitmap)
+│   │   └── factory.py              #   build_index_from_spec / load_index + try-import faiss 降级
+│   │
+│   ├── adapter/                    # ══ 适配层 (Phase 10) ══
+│   │   └── grpc/                   # ── gRPC → engine 协议翻译 ──
+│   │       ├── __init__.py
+│   │       ├── server.py           #   run_server(data_dir, host, port)
+│   │       ├── servicer.py         #   MilvusServicer — 所有 RPC 实现
+│   │       ├── cli.py              #   python -m litevecdb.adapter.grpc 入口
+│   │       ├── errors.py           #   LiteVecDBError → grpc Status 映射
+│   │       ├── translators/
+│   │       │   ├── schema.py       #   Milvus FieldSchema ↔ LiteVecDB FieldSchema
+│   │       │   ├── records.py      #   FieldData (列式) ↔ list[dict] (行式) 转置
+│   │       │   ├── search.py       #   SearchRequest 解析
+│   │       │   ├── result.py       #   engine 结果 → SearchResults proto
+│   │       │   ├── expr.py         #   Milvus filter 透传 + 不支持函数检测
+│   │       │   └── index.py        #   IndexParams ↔ IndexSpec
+│   │       └── proto/              #   生成的 stub (commit 到 repo)
+│   │           ├── milvus_pb2.py
+│   │           ├── milvus_pb2_grpc.py
+│   │           ├── schema_pb2.py
+│   │           ├── common_pb2.py
+│   │           └── README.md       #   source commit reference
 │   │
 │   └── db.py                       # ══ DB 层 ══
-│                                    #   LiteVecDB 类 (create/get/drop/list_collection, close)
+│                                    #   LiteVecDB 类 (create/get/drop/list_collection, get_collection_stats, close)
 │
 ├── tests/
 │   ├── conftest.py                 # 共享 fixtures: 临时目录, 示例 Schema, 随机向量生成器
@@ -108,7 +141,28 @@ lite-v2/
 │   │       ├── test_semantic.py    #   字段不存在 / 类型不匹配 / did-you-mean
 │   │       ├── test_arrow_backend.py    #   每个 AST 节点 → 正确 BooleanArray
 │   │       ├── test_python_backend.py   #   同上, 行级实现对照
-│   │       └── test_e2e.py         #   差分测试: arrow == python
+│   │       └── test_e2e.py         #   差分测试: arrow == python; hybrid == python
+│   │
+│   ├── index/                      #   ── Phase 9 索引子系统单元测试 ──
+│   │   ├── test_brute_force_index.py    #   BruteForceIndex 自身正确性
+│   │   ├── test_faiss_hnsw.py           #   FaissHnswIndex (skipif faiss 不可用)
+│   │   ├── test_faiss_id_selector.py    #   IDSelectorBitmap packbits 顺序 + 边界
+│   │   ├── test_index_differential.py   #   recall@10 ≥ 0.95, distance value parity
+│   │   └── test_index_persistence.py    #   .idx 文件 save/load 往返
+│   │
+│   ├── adapter/                    #   ── Phase 10 gRPC 适配层测试 ──
+│   │   ├── test_grpc_server_startup.py  #   server 启动 / shutdown / pymilvus.connect
+│   │   ├── test_grpc_translators_schema.py
+│   │   ├── test_grpc_translators_records.py  #   FieldData ↔ records 双向 round-trip
+│   │   ├── test_grpc_translators_expr.py
+│   │   ├── test_grpc_translators_index.py
+│   │   ├── test_grpc_collection_lifecycle.py
+│   │   ├── test_grpc_crud.py            #   insert / upsert / delete / query / get
+│   │   ├── test_grpc_search.py
+│   │   ├── test_grpc_index.py           #   create_index / load / release
+│   │   ├── test_grpc_partition.py
+│   │   ├── test_grpc_error_mapping.py
+│   │   └── test_grpc_quickstart.py      #   L3 冒烟: pymilvus quickstart 全流程
 │   │
 │   ├── test_db.py                  #   多 Collection 生命周期, close/cleanup
 │   └── test_smoke_e2e.py           #   走公开 API 的端到端冒烟
@@ -144,9 +198,21 @@ lite-v2/
 
 10. **WAL 默认 `sync_mode="close"`**：在 `close_and_delete` 前对 sink 做一次 `os.fsync`。覆盖容器 OOM-kill 后立即接管的崩溃场景。详见 wal-design.md §8。
 
+**Index / 检索（Phase 9）：**
+
+11. **Index 与 data 文件 1:1 绑定，生命周期严格对齐**。一个 segment 的 .idx 文件名由 segment 文件名 + IndexSpec.index_type 唯一确定。compaction 删 segment 时同步删 .idx；写新 segment 时同步写新 .idx。recovery 启动时 cleanup_orphan_index_files。详见 §10 / index-design.md。
+12. **Index 不可变**：与 data 文件不可变同源。VectorIndex protocol 没有 add / remove 接口，任何"修改 index"通过"丢弃旧 segment + 建新 segment + 建新 index"完成。
+13. **Search 路径默认禁止访问未 loaded 的 Collection**：`Collection.search / get / query` 在 `_load_state != "loaded"` 时抛 `CollectionNotLoadedError`。`insert / delete` 不受此约束。Collection 重启后默认 `released` 态。详见 index-design.md §2.4。
+14. **distance 归一化在 VectorIndex 内部完成**：FAISS L2 / IP / cosine 的内部约定与上层 `compute_distances` 的约定不同（FAISS L2 是 squared、IP 是越大越相似），归一化在 `FaissHnswIndex.search` 完成，确保上层看到的 distance 与 BruteForceIndex 完全一致。差分测试是这条不变量的强制检查。
+
+**协议层（Phase 10）：**
+
+15. **gRPC 适配层只翻译，不增加能力**。`adapter/grpc/servicer.py` 的所有方法都是 engine API 的薄包装；任何"engine 不支持但 servicer 假装支持"的实现都禁止。不支持的 RPC 返回 `UNIMPLEMENTED` + 友好消息，**不 silent fail**。详见 §11 / grpc-adapter-design.md。
+16. **proto stub commit 到 repo**，不 runtime 生成。`proto/README.md` 记录 source commit。
+
 ---
 
-## 3. 四大 Package 详解
+## 3. 六大 Package 详解
 
 ### 3.1 schema/ — 数据模型与类型系统
 
@@ -242,6 +308,81 @@ from litevecdb.search.filter import (
 - filter 子包是相对独立的"小型 DSL"，单独成 package 便于测试和未来切换 parser 实现
 - 与 engine 解耦：engine.collection 调用 `search.execute_search()`，传入收集好的数据
 
+### 3.5 index/ — 索引层（Phase 9）
+
+**职责边界**：定义"向量索引"的抽象，提供 BruteForce 和 FAISS HNSW 实现。
+和 segment 1:1 绑定（每个 data parquet 一个 .idx 文件），不持有任何业务状态。
+可被 search/executor 直接使用。详见 `plan/index-design.md`。
+
+| 子模块 | 职责 | 核心类/函数 |
+|--------|------|------------|
+| `protocol.py` | VectorIndex 抽象 | `VectorIndex` ABC — `build(vectors, metric, params) → VectorIndex`, `search(queries, top_k, valid_mask, params) → (local_ids, distances)`, `save(path)`, `load(path, metric, dim) → VectorIndex`, `index_type` property |
+| `spec.py` | 索引参数 | `IndexSpec` frozen dataclass — `field_name / index_type / metric_type / build_params / search_params`，`to_dict / from_dict` 支持 manifest 序列化 |
+| `brute_force.py` | NumPy 兜底 | `BruteForceIndex(VectorIndex)` — 直接复用 `search/distance.py` 的距离函数；零外部依赖；保留为差分测试基准 + 无 faiss 时 fallback |
+| `faiss_hnsw.py` | FAISS HNSW | `FaissHnswIndex(VectorIndex)` — `IndexHNSWFlat`，`IDSelectorBitmap` 接受 bitmap 管线产物，metric 符号在内部归一化，`faiss.write_index / read_index` 持久化 |
+| `factory.py` | 工厂 + 路由 | `build_index_from_spec(spec, vectors) → VectorIndex`，`load_index(path, spec, dim) → VectorIndex`；`try: import faiss` 失败时对 `index_type ∈ {HNSW, IVF_*}` 抛 `IndexBackendUnavailableError` |
+
+```python
+# index/__init__.py
+from litevecdb.index.protocol import VectorIndex
+from litevecdb.index.spec import IndexSpec
+from litevecdb.index.brute_force import BruteForceIndex
+from litevecdb.index.factory import build_index_from_spec, load_index
+try:
+    from litevecdb.index.faiss_hnsw import FaissHnswIndex
+    __all__ = ["VectorIndex", "IndexSpec", "BruteForceIndex", "FaissHnswIndex",
+               "build_index_from_spec", "load_index"]
+except ImportError:
+    __all__ = ["VectorIndex", "IndexSpec", "BruteForceIndex",
+               "build_index_from_spec", "load_index"]
+```
+
+**与其他模块的关系**：
+- `storage/segment.py` 持有 `index: Optional[VectorIndex]`，由 `Segment.build_or_load_index(spec, dir)` 注入
+- `engine/collection.py` 通过 `_index_spec` + `_load_state` 状态机管理 Collection 级别的索引生命周期
+- `engine/flush.py` / `compaction.py` 钩子在写新 segment 后立即触发 build_or_load_index（loaded 态时）
+- `search/executor.py` 的 `execute_search_with_index` 路径在 segment.index 存在时调用 `index.search(query, top_k, valid_mask)`
+
+**为什么 index 独立为 package（不放在 search/ 下）**：
+- 职责对称于 search 而非 search 的子模块 —— search 是"在已有候选上跑距离 + top-k"的逻辑，index 是"用空间数据结构加速找最近邻"的逻辑
+- index 实现可能依赖外部库（FAISS / hnswlib / USearch），单独 package 便于 optional extras 隔离
+- 未来可能引入 Sparse / Binary / 多向量等扩展类型，独立 package 便于演进
+
+### 3.6 adapter/ — 适配层（Phase 10）
+
+**职责边界**：把外部协议（gRPC / HTTP / ...）翻译成 engine API 调用。
+**只做翻译，不增加能力**。每个 RPC 都映射到一个 engine 方法；不支持的 RPC 返回 UNIMPLEMENTED。详见 `plan/grpc-adapter-design.md`。
+
+| 子模块 | 职责 | 核心内容 |
+|--------|------|---------|
+| `grpc/server.py` | gRPC server 生命周期 | `run_server(data_dir, host, port, max_workers)` |
+| `grpc/servicer.py` | RPC dispatcher | `MilvusServicer(MilvusServiceServicer)` — 实现 quickstart 子集 RPC，未实现的返回 UNIMPLEMENTED |
+| `grpc/cli.py` | CLI 入口 | `python -m litevecdb.adapter.grpc --data-dir ./data --port 19530` |
+| `grpc/errors.py` | 错误码翻译 | `to_grpc_status(LiteVecDBError) → grpc Status code + reason` |
+| `grpc/translators/schema.py` | schema 翻译 | `milvus_to_litevecdb_schema(milvus.CollectionSchema) → CollectionSchema`，反向同 |
+| `grpc/translators/records.py` | 列行转置 | `fields_data_to_records(fields_data, num_rows) → List[dict]`，反向 `records_to_fields_data(records, schema, output_fields)` |
+| `grpc/translators/search.py` | 搜索请求解析 | `parse_search_params(search_params_kv)`，`decode_search_query(request)` |
+| `grpc/translators/result.py` | 搜索结果生成 | engine `List[List[dict]]` → milvus `SearchResults` proto |
+| `grpc/translators/expr.py` | filter 翻译 | 大部分透传 + UNIMPLEMENTED 函数检测（json_contains 等） |
+| `grpc/translators/index.py` | 索引参数翻译 | `IndexParams (KeyValuePair list) ↔ IndexSpec` |
+| `grpc/proto/` | 生成的 stub | 从 milvus-io/milvus-proto 生成；commit 到 repo |
+
+```python
+# adapter/grpc/__init__.py
+from litevecdb.adapter.grpc.server import run_server
+from litevecdb.adapter.grpc.servicer import MilvusServicer
+```
+
+**与其他模块的关系**：
+- `servicer.py` 持有 `LiteVecDB` 实例，所有 RPC 通过 `self._db.get_collection(name)` 拿到 `Collection` 对象后调用 engine 方法
+- 不直接依赖 `storage/` / `search/` / `index/`（这些是 engine 内部实现细节）
+- `errors.py` 依赖 `litevecdb.exceptions`
+
+**为什么 adapter 独立为顶层 package**：
+- 概念上是协议层，与 engine / storage / search / index 是垂直关系
+- 未来可能引入 HTTP 适配层 / OpenAPI 适配层 / Python 直接 API 等不同的 adapter，每个一个子目录
+- 所有外部依赖（grpcio / protobuf）通过 adapter 隔离，engine 核心保持纯净
+
 ## 4. 依赖图
 
 ```
@@ -278,11 +419,18 @@ Level 0:  constants.py, exceptions.py           ← 无内部依赖
 Level 1:  schema/*                              ← 依赖 L0
 Level 2:  storage/*                             ← 依赖 L0, L1
 Level 3:  search/bitmap.py, search/distance.py  ← 依赖 L0, L2(delta_log)
-Level 4:  search/executor.py                    ← 依赖 L3
-Level 5:  engine/flush.py, recovery.py, compaction.py ← 依赖 L0-L4
+          search/filter/*                       ← 依赖 L0, L1
+          index/*                               ← 依赖 L0, L1, search/distance (BruteForce)
+Level 4:  search/executor.py, search/assembler.py ← 依赖 L3
+Level 5:  engine/flush.py, recovery.py, compaction.py ← 依赖 L0-L4 + index (Phase 9)
 Level 6:  engine/collection.py                  ← 依赖 L0-L5
 Level 7:  db.py                                 ← 依赖 L6
+Level 8:  adapter/grpc/*                        ← 依赖 L7 (db.py) — Phase 10
 ```
+
+**说明**：
+- `index/` 是新增的 L3，与 search/filter 并列，被 storage/segment 持有 + search/executor 调用
+- `adapter/` 是新增的 L8，是项目最外层，所有外部协议依赖（grpcio / protobuf）都在此隔离
 
 ## 5. 公共 API 导出
 
@@ -968,7 +1116,31 @@ class Manifest:
 
     @active_wal_number.setter
     def active_wal_number(self, value: int) -> None: ...
+
+    # ── Phase 9.3 — Index spec 持久化 ──
+
+    @property
+    def index_spec(self) -> Optional["IndexSpec"]:
+        """当前 Collection 的索引规格（无 → None）。"""
+
+    def set_index_spec(self, spec: Optional["IndexSpec"]) -> None:
+        """设置或清空 IndexSpec；调用后必须再 save() 持久化。
+        Phase 9.3 引入。"""
+
+    @property
+    def format_version(self) -> int:
+        """Manifest schema 版本号。Phase 9.3 起 = 2（v1 旧 manifest 加载时
+        index_spec 默认 None，下一次 save 自动升级）。"""
 ```
+
+**Manifest v1 → v2 兼容**：
+
+| 字段 | v1 | v2 |
+|---|---|---|
+| `format_version` | 1（或缺失） | 2 |
+| `index_spec` | 无 | dict 或 null |
+
+加载时缺失字段按默认值处理；保存时一律写 v2。无需迁移工具。
 
 ---
 
@@ -1114,8 +1286,9 @@ def execute_flush(
     manifest: "Manifest",
     delta_index: "DeltaIndex",
     compaction_mgr: "CompactionManager",
+    collection: Optional["Collection"] = None,    # Phase 9.4: 用于 index hook
 ) -> None:
-    """执行 Flush 管线（7 步，**同步阻塞**——架构不变量 §6）。
+    """执行 Flush 管线（7+1 步，**同步阻塞**——架构不变量 §6）。
 
     前置条件：调用方已完成 Step 1（冻结旧 MemTable/WAL，创建新的）。
 
@@ -1126,10 +1299,17 @@ def execute_flush(
     Step 6: 删除旧 WAL（frozen_wal.close_and_delete，含 fsync）
     Step 7: 按 Partition 触发 compaction_mgr.maybe_compact()（其中含 tombstone GC）
 
+    Step 8 (Phase 9.4): 对 Step 3 新建的每个 Segment：
+        - 加载 Segment 进 _segment_cache
+        - 如果 collection._load_state == "loaded" 且 collection._index_spec is not None:
+            seg.build_or_load_index(spec, index_dir)
+        - flush 完成后新数据立即可被 search 使用
+
     崩溃安全：
     - Step 3 崩溃 → Manifest 未更新，Parquet 成为孤儿文件，recovery 清理
     - Step 5 前崩溃 → WAL 完整，重放恢复
     - Step 5 后崩溃 → Manifest 已更新，WAL 重放产生重复但 _seq 去重保证正确
+    - Step 8 崩溃 → .idx 文件可能不完整，下次 load() 时检测到失败会重新 build
     """
 ```
 
@@ -1141,7 +1321,7 @@ def execute_recovery(
     schema: "CollectionSchema",
     manifest: "Manifest",
 ) -> Tuple["MemTable", "DeltaIndex", int]:
-    """执行崩溃恢复（5 步）。
+    """执行崩溃恢复（5+1 步）。
 
     前置条件：调用方已加载 Manifest（Step 1）。
 
@@ -1150,6 +1330,14 @@ def execute_recovery(
     Step 3: 校验 Manifest 中的文件是否实际存在（处理 Compaction 中途崩溃）
     Step 4: 清理孤儿文件（在磁盘但不在 Manifest 中的 Parquet）
     Step 5: DeltaIndex.rebuild_from(所有 Partition 的 delta_files)
+    Step 6 (Phase 9.4): _cleanup_orphan_index_files(data_dir, manifest)
+            - 扫描每个 partition 的 indexes/ 目录
+            - 对每个 .idx 文件，从文件名解析回对应的 data 文件 stem
+            - 如果对应 data 文件不在 manifest 中，删除该 .idx 文件
+            - 如果 manifest 中的 data 文件没有对应 .idx，无操作（load() 时会建）
+
+    Phase 9.3 后：调用方拿到这些返回值后必须把 Collection._load_state 强制设为 "released"。
+    重启不自动 load index，与 Milvus 行为对齐。
 
     Returns:
         (memtable, delta_index, next_wal_number)
@@ -1177,6 +1365,7 @@ class CompactionManager:
         partition: str,
         manifest: "Manifest",
         delta_index: "DeltaIndex",
+        collection: Optional["Collection"] = None,    # Phase 9.4: 用于 index hook
     ) -> None:
         """检查指定 Partition 是否需要 Compaction，满足条件则执行。
 
@@ -1195,6 +1384,9 @@ class CompactionManager:
         8. 删除旧文件和已消费的 delta 文件
         9. **Tombstone GC**: 调用 delta_index.gc_below(min_active_data_seq)
            其中 min_active_data_seq 来自 Manifest 中所有 partition 的 data 文件 seq_min 的全局最小值
+        10. (Phase 9.4) 删除被淘汰 segment 对应的 .idx 文件
+        11. (Phase 9.4) 如果 collection._load_state == "loaded" 且 _index_spec is not None:
+            对新 merged segment 调 build_or_load_index(spec, index_dir)
         """
 
     def _global_min_active_data_seq(self, manifest: "Manifest") -> int:
@@ -1485,12 +1677,18 @@ class Collection:
         metric_type: str = "COSINE",
         partition_names: Optional[List[str]] = None,
         expr: Optional[str] = None,                  # Phase 8
+        output_fields: Optional[List[str]] = None,   # Phase 9.1
     ) -> List[List[dict]]:
         """向量检索。
 
         流程：(若 expr 给出) parse_expr → compile_expr →
               assemble_candidates(filter_compiled=...) →
-              execute_search(filter_mask=...)
+              execute_search_with_index(filter_mask=...)
+
+        Phase 9 起：
+        - 调用前 Collection 必须处于 loaded 态，否则抛 CollectionNotLoadedError
+        - 每个 segment 如果有 .index 则走 index.search，否则走 brute force
+        - memtable 永远走 brute force（最新写入未建索引）
 
         Args:
             query_vectors: 查询向量列表，每个元素是 list[float]
@@ -1498,6 +1696,7 @@ class Collection:
             metric_type: "COSINE" | "L2" | "IP"
             partition_names: 搜索范围，None 则搜索所有 Partition
             expr: 可选 Milvus-style 过滤表达式（详见 §9.19-9.25）
+            output_fields: 返回 entity 中要保留的字段列表；None 表示全部
 
         Returns:
             外层 List = 每个查询向量
@@ -1540,6 +1739,62 @@ class Collection:
 
     def list_partitions(self) -> List[str]:
         """返回所有 Partition 名称列表。"""
+
+    def has_partition(self, partition_name: str) -> bool:
+        """Phase 9.1: 检查 Partition 是否存在。"""
+
+    # ─── 统计与描述（Phase 9.1） ───
+
+    @property
+    def num_entities(self) -> int:
+        """Phase 9.1: Collection 总行数（memtable 活跃行 + 所有 segment 行 - 已删除）。"""
+
+    def describe(self) -> dict:
+        """Phase 9.1: 返回 dict，包含 name / schema / num_entities /
+        load_state / index_spec / partitions。"""
+
+    # ─── 索引生命周期（Phase 9.3） ───
+
+    def create_index(self, field_name: str, index_params: dict) -> None:
+        """Phase 9.3: persist IndexSpec 到 manifest。**不立即构建** —
+        实际构建发生在 load() 时。
+
+        Args:
+            field_name: 必须是 schema 中的 vector field
+            index_params: dict 含 "index_type" / "metric_type" / "params" /
+                "search_params"
+
+        Raises:
+            IndexAlreadyExistsError: 已经 create_index 过
+            FilterFieldError: field_name 不是 vector field
+        """
+
+    def drop_index(self, field_name: str) -> None:
+        """Phase 9.3: 释放 in-memory 索引 + 删除磁盘上的所有 .idx 文件 +
+        清空 manifest 中的 IndexSpec。drop 后 _load_state 强制变为 released。"""
+
+    def has_index(self) -> bool:
+        """Phase 9.3: Collection 是否已 create_index。"""
+
+    def get_index_info(self) -> Optional[dict]:
+        """Phase 9.3: 返回 IndexSpec.to_dict() 或 None。"""
+
+    def load(self) -> None:
+        """Phase 9.3: 状态机 released → loading → loaded。
+
+        对每个 segment 调 build_or_load_index：先尝试 load .idx 文件，
+        失败则 build + save。无 IndexSpec 的 Collection 也允许 load
+        （直接进入 loaded 态，search 走 brute force）。
+
+        Raises 任何异常时回滚到 released 态。
+        """
+
+    def release(self) -> None:
+        """Phase 9.3: 释放所有 segment 的 in-memory 索引；状态机 → released。"""
+
+    @property
+    def load_state(self) -> str:
+        """Phase 9.3: "released" | "loading" | "loaded"."""
 
     # ─── Schema 变更 ───
 
@@ -1593,6 +1848,13 @@ class LiteVecDB:
 
     def list_collections(self) -> List[str]:
         """返回所有 Collection 名称列表。"""
+
+    def has_collection(self, collection_name: str) -> bool:
+        """Phase 9.1: 检查 Collection 是否存在。"""
+
+    def get_collection_stats(self, collection_name: str) -> dict:
+        """Phase 9.1: 返回 dict，至少包含 row_count 字段；
+        gRPC 适配层 GetCollectionStatistics 直接消费。"""
 
     def close(self) -> None:
         """关闭所有已加载的 Collection。"""
@@ -2046,3 +2308,295 @@ def evaluate(
 - **AST 节点形态借鉴 Milvus PlanNode 概念**，但简化（`CmpOp` 替代 `Equality`/`Relational`）
 - **F1 不追 binary 兼容**——文档化我们的子集，未来 F3 才考虑
 - **F1 选手写 Pratt parser** 而非 ANTLR：F1 grammar 小、错误信息更友好、零依赖。AST 是稳定接口，F3 切 ANTLR 不影响 type checker / backends
+
+---
+
+## 10. Phase 9 索引子系统接口详解
+
+**目标**：让 `Collection.search` 的检索路径从 NumPy 暴力扫描升级为 ANN，默认 FAISS HNSW。深度设计见 `plan/index-design.md`。
+
+### 10.1 index/protocol.py
+
+```python
+from abc import ABC, abstractmethod
+from typing import Optional, Tuple
+import numpy as np
+
+class VectorIndex(ABC):
+    """Abstract per-segment vector index.
+
+    Implementations: BruteForceIndex, FaissHnswIndex, future FaissIvf*Index.
+    Lifetime: build → save → load → search → close. Indexes are immutable —
+    no add/remove after build.
+    """
+
+    metric: str       # "COSINE" | "L2" | "IP"
+    num_vectors: int
+    dim: int
+
+    @classmethod
+    @abstractmethod
+    def build(cls, vectors: np.ndarray, metric: str, params: dict) -> "VectorIndex": ...
+
+    @abstractmethod
+    def search(
+        self,
+        queries: np.ndarray,
+        top_k: int,
+        valid_mask: Optional[np.ndarray] = None,
+        params: Optional[dict] = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Returns (local_ids, distances), each (nq, top_k).
+        Distance convention: smaller = more similar (regardless of metric).
+        valid_mask is the bitmap pipeline output AFTER dedup + tombstone +
+        scalar filter, used as IDSelectorBitmap (or numpy slice for brute-force)."""
+
+    @abstractmethod
+    def save(self, path: str) -> None: ...
+
+    @classmethod
+    @abstractmethod
+    def load(cls, path: str, metric: str, dim: int) -> "VectorIndex": ...
+
+    @property
+    @abstractmethod
+    def index_type(self) -> str:
+        """'BRUTE_FORCE' | 'HNSW' | 'IVF_FLAT' | ..."""
+```
+
+### 10.2 index/spec.py
+
+```python
+from dataclasses import dataclass, field
+from typing import Dict
+
+@dataclass(frozen=True)
+class IndexSpec:
+    field_name: str          # which vector field this index covers
+    index_type: str          # "BRUTE_FORCE" | "HNSW" | ...
+    metric_type: str         # "COSINE" | "L2" | "IP"
+    build_params: Dict       # {"M": 16, "efConstruction": 200}
+    search_params: Dict = field(default_factory=dict)  # {"ef": 64}
+
+    def to_dict(self) -> dict: ...
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "IndexSpec": ...
+```
+
+### 10.3 index/brute_force.py
+
+```python
+class BruteForceIndex(VectorIndex):
+    """NumPy 实现，零外部依赖。差分测试 baseline + faiss 不可用时 fallback。
+
+    内部存全量 vectors，search 时直接调用 search/distance.compute_distances。
+    valid_mask 通过 vectors[mask] 实现。
+    """
+
+    @classmethod
+    def build(cls, vectors, metric, params): ...
+    def search(self, queries, top_k, valid_mask=None, params=None): ...
+    def save(self, path): ...    # numpy .npy
+    @classmethod
+    def load(cls, path, metric, dim): ...
+
+    index_type = "BRUTE_FORCE"
+```
+
+### 10.4 index/faiss_hnsw.py
+
+```python
+import faiss
+import numpy as np
+
+class FaissHnswIndex(VectorIndex):
+    """FAISS HNSW 实现。
+
+    关键细节：
+    - metric 符号在内部归一化（FAISS L2 是 squared，IP 越大越相似 → 上层
+      统一为"越小越相似"）
+    - cosine：vectors 和 query 都做 L2 normalize，然后调 IndexFlatIP
+    - IDSelectorBitmap 接受 numpy bool mask（packbits little-endian）
+    - faiss.write_index / read_index 持久化
+    """
+
+    @classmethod
+    def build(cls, vectors, metric, params): ...
+    def search(self, queries, top_k, valid_mask=None, params=None): ...
+    def save(self, path): ...    # faiss.write_index
+    @classmethod
+    def load(cls, path, metric, dim): ...
+
+    index_type = "HNSW"
+```
+
+### 10.5 index/factory.py
+
+```python
+try:
+    import faiss
+    _FAISS_AVAILABLE = True
+except ImportError:
+    _FAISS_AVAILABLE = False
+
+def build_index_from_spec(spec: IndexSpec, vectors: np.ndarray) -> VectorIndex:
+    """根据 IndexSpec.index_type 选择实现。
+
+    Raises:
+        IndexBackendUnavailableError: 请求 HNSW/IVF 但 faiss 不可用
+        ValueError: index_type 不识别
+    """
+
+def load_index(path: str, spec: IndexSpec, dim: int) -> VectorIndex:
+    """根据 IndexSpec.index_type 反序列化磁盘文件。"""
+```
+
+### 10.6 storage/segment.py 的 Phase 9 扩展
+
+```python
+class Segment:
+    __slots__ = (..., "index")    # 新增
+
+    index: Optional[VectorIndex]
+
+    def attach_index(self, index: VectorIndex) -> None:
+        """注入索引，幂等。"""
+
+    def release_index(self) -> None:
+        """释放索引引用。"""
+
+    def build_or_load_index(self, spec: IndexSpec, index_dir: str) -> None:
+        """先尝试 load .idx 文件，失败则 build + save。
+        路径约定：indexes/<data_filename_stem>.<index_type_lowercase>.idx"""
+```
+
+### 10.7 索引文件命名与路径约定
+
+```
+data_dir/collections/<col>/partitions/<partition>/
+├── data/
+│   └── data_000001_000500.parquet
+└── indexes/
+    └── data_000001_000500.hnsw.idx        # stem + index_type.lower()
+```
+
+**严格不变量**（架构不变量 §11）：一个 segment 的 .idx 文件名由 segment 文件名 + IndexSpec.index_type 唯一确定，删 segment 必须同时删 .idx。
+
+### 10.8 Phase 9 实施分阶段
+
+| Phase | 内容 | 工作量 |
+|---|---|---|
+| **9.1** | 补齐 pymilvus quickstart 前置 API（Collection 5 个新方法 + db.get_collection_stats） | S |
+| **9.2** | VectorIndex protocol + BruteForceIndex + Segment.index + execute_search_with_index 路径 | M |
+| **9.3** | IndexSpec + Manifest v2 + Collection.create_index/drop_index/load/release/has_index/get_index_info + _load_state 状态机 | M |
+| **9.4** | Index 文件持久化 + flush/compaction/recovery 钩子 + 孤儿清理 | M |
+| **9.5** | FaissHnswIndex + factory + [faiss] extras + metric 对齐 + 差分测试 | L |
+| **9.6** | m9 demo + 长跑测试 | S |
+
+---
+
+## 11. Phase 10 gRPC 适配层接口详解
+
+**目标**：让 pymilvus 客户端无需修改代码连接 LiteVecDB。深度设计见 `plan/grpc-adapter-design.md`。
+
+### 11.1 adapter/grpc/server.py
+
+```python
+def run_server(
+    data_dir: str,
+    host: str = "0.0.0.0",
+    port: int = 19530,
+    max_workers: int = 10,
+) -> None:
+    """启动 gRPC server，阻塞直到 KeyboardInterrupt。"""
+```
+
+### 11.2 adapter/grpc/servicer.py — RPC 映射表
+
+| RPC | engine API | 备注 |
+|---|---|---|
+| `CreateCollection` | `db.create_collection(name, schema)` | translator: schema.py |
+| `DropCollection` | `db.drop_collection(name)` | |
+| `HasCollection` | `db.has_collection(name)` | |
+| `DescribeCollection` | `db.get_collection(name).describe()` + schema 序列化 | |
+| `ShowCollections` | `db.list_collections()` | |
+| `GetCollectionStatistics` | `col.num_entities` | row_count 字段 |
+| `CreatePartition` | `col.create_partition(name)` | |
+| `DropPartition` | `col.drop_partition(name)` | |
+| `HasPartition` | `col.has_partition(name)` | |
+| `ShowPartitions` | `col.list_partitions()` | |
+| `Insert` / `Upsert` | `col.insert(records, partition)` | translator: records.py — FieldData 列行转置 |
+| `Delete(ids=)` | `col.delete(pks, partition)` | |
+| `Delete(filter=)` | `col.query(filter) → 提取 pk → col.delete` | |
+| `Query` | `col.query(expr, output_fields, partition_names, limit)` 或 `col.get(pks, ...)` | id 表达式走 get |
+| `Search` | `col.search(query_vectors, top_k, metric_type, partition_names, expr, output_fields)` | translator: search.py + result.py |
+| `CreateIndex` | `col.create_index(field, params)` | translator: index.py |
+| `DropIndex` | `col.drop_index(field)` | |
+| `DescribeIndex` | `col.get_index_info()` | |
+| `LoadCollection` | `col.load()` | |
+| `ReleaseCollection` | `col.release()` | |
+| `GetLoadState` | `col.load_state` 枚举映射 | |
+| `Flush` | `col.flush()` | |
+| `ListDatabases` | stub returns `["default"]` | |
+| Aliases / RBAC / Backup / Replica / ResourceGroup / etc | — | UNIMPLEMENTED + 友好消息 |
+
+### 11.3 adapter/grpc/translators/records.py
+
+```python
+def fields_data_to_records(
+    fields_data: List["FieldData"],
+    num_rows: int,
+) -> List[Dict[str, Any]]:
+    """Milvus 列式 → engine 行式。
+
+    支持类型：INT64 / INT32 / VARCHAR / BOOL / FLOAT / DOUBLE / FLOAT_VECTOR / JSON
+    不支持：BinaryVector / SparseFloatVector / Float16/BFloat16 → UnsupportedFieldTypeError
+    """
+
+def records_to_fields_data(
+    records: List[Dict[str, Any]],
+    schema: "CollectionSchema",
+    output_fields: Optional[List[str]] = None,
+) -> List["FieldData"]:
+    """engine 行式 → Milvus 列式（用于 Query/Get/Search 返回）。"""
+```
+
+### 11.4 adapter/grpc/errors.py
+
+```python
+_EXCEPTION_TO_CODE = {
+    CollectionNotFoundError:       (4,   "CollectionNotExists"),
+    CollectionAlreadyExistsError:  (1,   "CollectionAlreadyExists"),
+    PartitionNotFoundError:        (200, "PartitionNotExists"),
+    SchemaValidationError:         (6,   "IllegalArgument"),
+    FilterParseError:              (6,   "IllegalArgument"),
+    FilterTypeError:               (6,   "IllegalArgument"),
+    FilterFieldError:              (6,   "IllegalArgument"),
+    CollectionNotLoadedError:      (101, "CollectionNotLoaded"),
+    IndexAlreadyExistsError:       (35,  "IndexAlreadyExists"),
+    IndexNotFoundError:            (11,  "IndexNotExist"),
+    IndexBackendUnavailableError:  (26,  "IndexBuildFailed"),
+}
+
+def to_grpc_status(exc: LiteVecDBError) -> dict:
+    """异常 → grpc Status code/reason，对齐 Milvus 2.3 numeric code。"""
+```
+
+### 11.5 Phase 10 实施分阶段
+
+| Phase | 内容 | 工作量 |
+|---|---|---|
+| **10.1** | proto 拉取 + stub 生成 + 空 servicer + run_server + CLI | M |
+| **10.2** | Collection 生命周期 RPC + translators/schema.py | M |
+| **10.3** | insert/get/delete/query RPC + translators/records.py 双向转置 | L |
+| **10.4** | search + create_index + load + release RPC + translators/{search,result,expr,index}.py | L |
+| **10.5** | Partition + flush + stats + m10 demo + pymilvus quickstart 冒烟 | M |
+| **10.6** | 错误码映射 + UNIMPLEMENTED 友好消息 | S |
+
+### 11.6 Phase 10 完成标志
+
+- pymilvus quickstart 全流程跑通（create → insert → create_index → load → search → query → delete → release → drop）
+- recall parity：grpc search 与 engine 直接 search top-k 一致
+- 不支持的 RPC 返回 `UNIMPLEMENTED` + 友好消息（不 silent fail）
+- m10 demo 通过

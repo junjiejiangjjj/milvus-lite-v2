@@ -8,12 +8,14 @@ LiteVecDB — a local embedded vector database, designed as a **local version of
 
 ## Repository Layout
 
-- **Design docs** (root-level, written in Chinese): `MVP.md`, `write-pipeline.md`, `research.md`, `modules.md`, `wal-design.md`, `filter-design.md`, `roadmap.md`
+- **Design docs** (root-level, written in Chinese): `MVP.md`, `write-pipeline.md`, `research.md`, `modules.md`, `wal-design.md`, `filter-design.md`, `index-design.md`, `grpc-adapter-design.md`, `roadmap.md`
 - **Code repo**: `milvus-lite-v2/` (git root) — design docs are also copied into `milvus-lite-v2/plan/`
-- **`modules.md`**: Authoritative module design — file-by-file breakdown with per-class/function signatures. Consult before implementing any module. §9.19-9.28 cover the Phase 8 filter subsystem.
+- **`modules.md`**: Authoritative module design — file-by-file breakdown with per-class/function signatures. Consult before implementing any module. §9.19-9.28 cover Phase 8 filter, §10 covers Phase 9 index, §11 covers Phase 10 gRPC adapter.
 - **`wal-design.md`**: Deep-dive on WAL (Arrow IPC Streaming), segment architecture, and search pipeline.
-- **`filter-design.md`**: Deep-dive on the Phase 8 scalar filter subsystem (grammar, AST, three-stage compilation, dual backend).
-- **`roadmap.md`**: Phased implementation plan from current state through MVP. Phases 0-7 are landed; Phase 8 (filter) has subphases F1/F2/F3.
+- **`filter-design.md`**: Deep-dive on the Phase 8 scalar filter subsystem (grammar, AST, three-stage compilation, three backends arrow/hybrid/python).
+- **`index-design.md`**: Deep-dive on the Phase 9 vector index subsystem (FAISS HNSW, segment-level binding, load/release state machine, recall validation).
+- **`grpc-adapter-design.md`**: Deep-dive on the Phase 10 gRPC adapter (proto cropping, RPC mapping, FieldData transposition, error code translation).
+- **`roadmap.md`**: Phased implementation plan. Phases 0-8 are landed (Phase 8 has F1/F2a/F2b/F2c/F3+ done); Phase 9 (vector index) and Phase 10 (gRPC adapter) are next.
 
 ## Development Commands
 
@@ -40,17 +42,19 @@ Build system: Hatchling. Dependencies: `pyarrow>=15.0`, `numpy>=1.24`. Dev: `pyt
 
 ## Architecture (Two-Layer)
 
-- **Internal Engine**: LSM-Tree style storage with PyArrow in-memory and Parquet on disk. This is the current design focus.
-- **gRPC Adapter Layer** (future): Sits on top of the engine to provide Milvus protocol compatibility, allowing pymilvus to connect directly.
+- **Internal Engine**: LSM-Tree style storage with PyArrow in-memory and Parquet on disk. Phase 9 adds per-segment vector indexes (FAISS HNSW).
+- **gRPC Adapter Layer** (Phase 10): Sits on top of the engine to provide Milvus protocol compatibility, allowing pymilvus to connect directly without code changes.
 
 ## Code Structure (`litevecdb/`)
 
-Four packages, layered bottom-up:
+Six packages, layered bottom-up:
 
 1. **`schema/`** — Data model & type system. `DataType` enum, `FieldSchema`, `CollectionSchema`, record validation, Arrow schema builders (4 variants: data/delta/wal_data/wal_delta), schema.json persistence.
-2. **`storage/`** — Persistence layer. WAL (Arrow IPC Streaming, dual-file), MemTable (RecordBatch list + pk_index + delete_index, seq-aware), DataFile / DeltaFile (Parquet IO), DeltaIndex (in-memory tombstone map + gc_below), Segment (immutable Parquet cache), Manifest (JSON + .prev backup, atomic via tmp+rename).
-3. **`engine/`** — Core logic orchestration. `Collection` class (entry point, `_seq` allocation, insert/delete/get/search/query, _apply orchestration), Operation abstraction (InsertOp/DeleteOp), Flush pipeline (7 steps, sync), Recovery (5 steps), Compaction (Size-Tiered + tombstone GC).
-4. **`search/`** — Vector retrieval. Bitmap pipeline (dedup + delete + scalar filter), distance functions (cosine/L2/IP via NumPy), assembler (segments + memtable → numpy + filter mask), executor (top-k). **`search/filter/`** subpackage (Phase 8): tokenizer + Pratt parser + semantic check + dual backend (pyarrow.compute primary, Python row-wise fallback) for Milvus-style scalar expressions.
+2. **`storage/`** — Persistence layer. WAL (Arrow IPC Streaming, dual-file), MemTable (RecordBatch list + pk_index + delete_index, seq-aware), DataFile / DeltaFile (Parquet IO), DeltaIndex (in-memory tombstone map + gc_below), Segment (immutable Parquet cache + optional VectorIndex), Manifest (JSON + .prev backup, atomic via tmp+rename, Phase 9.3 adds index_spec field).
+3. **`engine/`** — Core logic orchestration. `Collection` class (entry point, `_seq` allocation, insert/delete/get/search/query, _apply orchestration, Phase 9.3 adds create_index/drop_index/load/release + load_state machine), Operation abstraction, Flush pipeline (7+1 steps, sync, Phase 9.4 adds index hook), Recovery (5+1 steps, Phase 9.4 adds orphan .idx cleanup), Compaction (Size-Tiered + tombstone GC + Phase 9.4 index lifecycle).
+4. **`search/`** — Vector retrieval. Bitmap pipeline (dedup + delete + scalar filter), distance functions (cosine/L2/IP via NumPy), assembler (segments + memtable → numpy + filter mask), executor (top-k; Phase 9.2 adds `execute_search_with_index` path). **`search/filter/`** subpackage (Phase 8): tokenizer + Pratt parser + semantic check + three backends (arrow/hybrid/python) for Milvus-style scalar expressions.
+5. **`index/`** (Phase 9) — Vector index abstraction. `VectorIndex` ABC, `IndexSpec`, `BruteForceIndex` (NumPy, fallback + differential baseline), `FaissHnswIndex` (FAISS HNSW + IDSelectorBitmap), factory with try-import faiss degradation. Bound to segments 1:1 via `.idx` files.
+6. **`adapter/`** (Phase 10) — Protocol translation. `adapter/grpc/` provides `MilvusServicer` mapping pymilvus RPCs to engine API. Translators handle Milvus FieldData ↔ records transposition, schema, search, results, expressions, index params. proto stubs generated from milvus-io/milvus-proto and committed to repo.
 
 Top-level: `db.py` (`LiteVecDB` — multi-collection lifecycle), `constants.py`, `exceptions.py`.
 
@@ -65,8 +69,21 @@ All inputs are Lists — no single-value normalization:
 - `insert(records: List[dict], partition_name="_default") → List[pk]` — upsert semantics
 - `delete(pks: List, partition_name=None) → int` — None means cross-all-partitions
 - `get(pks: List, partition_names=None, expr=None) → List[dict]`
-- `search(query_vectors: List[list], top_k=10, metric_type="COSINE", partition_names=None, expr=None) → List[List[dict]]`
+- `search(query_vectors: List[list], top_k=10, metric_type="COSINE", partition_names=None, expr=None, output_fields=None) → List[List[dict]]`
 - `query(expr: str, output_fields=None, partition_names=None, limit=None) → List[dict]` — Phase 8, pure scalar query
+
+Phase 9 adds index lifecycle:
+- `create_index(field_name: str, index_params: dict) → None`
+- `drop_index(field_name: str) → None`
+- `has_index() → bool`
+- `get_index_info() → Optional[dict]`
+- `load() → None` — required before `search/get/query` (raises CollectionNotLoadedError otherwise)
+- `release() → None`
+- `load_state` property — `"released" | "loading" | "loaded"`
+
+Phase 9.1 also adds:
+- `Collection.create_partition / drop_partition / list_partitions / has_partition / num_entities / describe`
+- `LiteVecDB.has_collection / get_collection_stats`
 
 Write ops take `partition_name` (singular str). Read ops take `partition_names` (plural List[str]).
 The optional `expr` parameter on read ops is a Milvus-style scalar filter expression (Phase 8).
@@ -85,4 +102,22 @@ The optional `expr` parameter on read ops is a Milvus-style scalar filter expres
 - Schema is immutable (no alter table in MVP)
 - WAL default `sync_mode="close"` for OOM-restart safety
 - Phase 8 filter: parser and evaluator are decoupled via the AST — parser implementation can be swapped (hand-written → ANTLR) without touching type checker / backends
+- **Phase 9: Vector index is segment-level** (1:1 with data parquet files), matching the LSM immutable architecture. Compaction creates new merged segments + new indexes; old indexes are dropped. Avoids the FAISS HNSW "no real delete" trap.
+- **Phase 9: FAISS-cpu is the default index** because `IDSelectorBitmap` aligns natively with the Phase 8 bitmap pipeline, enabling pre-filter (not post-filter) for combined scalar+vector search
+- **Phase 9: BruteForceIndex is a long-lived first-class implementation**, not a placeholder — it's the differential test baseline for FAISS, the fallback when faiss is not installed, and the implementation for small segments below `INDEX_BUILD_THRESHOLD`
+- **Phase 9: Load/release state machine** (`released → loading → loaded`) mirrors Milvus behavior. `search/get/query` require `loaded` state (raise `CollectionNotLoadedError` otherwise). Restart defaults to `released` — caller must explicitly `load()`
+- **Phase 9: Distance normalization happens inside VectorIndex.search**. FAISS L2/IP/cosine internal conventions don't match the engine's "smaller = more similar" convention; normalization in `FaissHnswIndex.search` keeps the upper-layer behavior identical to `BruteForceIndex` (enforced by differential tests)
+- **Phase 10: gRPC adapter only translates, never adds capability**. Unsupported RPCs return `UNIMPLEMENTED` with friendly messages — never silent fail. proto stubs from milvus-io/milvus-proto are committed to repo, not generated at runtime
 - Design documents are written in Chinese
+
+## Optional Dependencies (Phase 9 / 10)
+
+```bash
+pip install -e ".[dev]"               # base + test deps
+pip install -e ".[dev,faiss]"         # add FAISS HNSW (Phase 9)
+pip install -e ".[dev,grpc]"          # add gRPC adapter (Phase 10)
+pip install -e ".[dev,faiss,grpc]"    # everything
+
+# Run gRPC server (Phase 10)
+python -m litevecdb.adapter.grpc --data-dir ./data --port 19530
+```

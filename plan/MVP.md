@@ -729,18 +729,26 @@ def search(self, vectors: List[list], top_k: int = 10,
     return results  # List[List[{"id": pk, "distance": float, "entity": {...}}]]
 ```
 
-#### 将来扩展到 FAISS
+#### Phase 9：FAISS HNSW 已接入（per-segment 索引）
 
-同一套 bitmap，传给 FAISS 的 `IDSelectorBitmap`：
+Phase 9 把检索路径从"NumPy 暴力扫描"升级为"FAISS HNSW per-segment"。同一套 bitmap pipeline 被复用——`valid_mask` 直接喂给 FAISS 的 `IDSelectorBitmap` 做 pre-filter：
 
 ```python
-# 将来：FAISS 索引搜索
-sel = faiss.IDSelectorBitmap(valid_mask)
-params = faiss.SearchParametersIVF(sel=sel)
-distances, indices = index.search(query_vector, top_k, params=params)
+# Phase 9 实际实现（litevecdb/index/faiss_hnsw.py）
+import faiss, numpy as np
+mask_packed = np.packbits(valid_mask, bitorder='little')
+sel = faiss.IDSelectorBitmap(num_vectors, faiss.swig_ptr(mask_packed))
+params = faiss.SearchParametersHNSW(sel=sel, efSearch=ef)
+distances, ids = index.search(query, top_k, params=params)
 ```
 
-无需改动存储层和 bitmap 构建逻辑，只替换检索引擎。
+**架构决策**（详见 `plan/index-design.md`）：
+- 索引绑定 **segment-level**（每个 data parquet 一个 .idx 文件，1:1 绑定）
+- 索引库选 **FAISS-cpu**（IDSelectorBitmap 与 bitmap pipeline 同构；索引家族对齐 Milvus）
+- **BruteForceIndex 长期保留** 作为差分基准 + 无 faiss 时的 fallback
+- **load/release 状态机** 与 Milvus 行为对齐——重启后默认 released，必须显式 load
+
+存储层无任何改动——这正是 LSM 不可变架构 + bitmap pipeline 在 Phase 0 就预留的红利。
 
 - 支持的距离度量：`cosine`（默认）、`l2`、`ip`（内积）
 
@@ -1037,23 +1045,32 @@ db.close()
 | **写操作** (insert/delete) | `partition_name` | `Optional[str]` | 目标 Partition（单数，写入一个 Partition） |
 | **读操作** (get/search) | `partition_names` | `Optional[List[str]]` | 搜索范围（复数，可跨多个 Partition） |
 
-### 9.4 gRPC 适配层（后续实现，不在 MVP 范围）
+### 9.4 gRPC 适配层（Phase 10 已落地）
 
-后续会在内部引擎之上加 gRPC 层，使 pymilvus 可直接连接 LiteVecDB：
+Phase 10 在内部引擎之上构造 gRPC 服务层，让 pymilvus 客户端无需修改代码即可连接：
 
 ```
-pymilvus ──gRPC──→ [ gRPC 适配层 ] ──→ [ 内部引擎 ]
+pymilvus ──gRPC──→ [ litevecdb/adapter/grpc/ ] ──→ [ 内部引擎 ]
 
-适配层职责：
+适配层职责（详见 plan/grpc-adapter-design.md）：
 ├─ Milvus Insert/Upsert RPC  →  engine.insert(records, partition_name)
 ├─ Milvus Delete(ids=) RPC   →  engine.delete(pks, partition_name)
-├─ Milvus Delete(filter=) RPC→  解析 filter → 提取 PK 列表 → engine.delete(pks, ...)
+├─ Milvus Delete(filter=) RPC→  query(filter) → 提取 PK → engine.delete(pks)
 ├─ Milvus Get RPC            →  engine.get(pks, ...)
-├─ Milvus Query(filter=) RPC →  后续实现（标量过滤查询）
-├─ Milvus Search RPC         →  解析 search_params → engine.search(vectors, top_k, ...)
-├─ 参数规范化                 →  单值→列表、dict→list 等
-└─ 返回值包装                 →  内部返回值 → Milvus 协议响应格式
+├─ Milvus Query RPC          →  engine.query(filter, output_fields, limit)
+├─ Milvus Search RPC         →  解析 search_params → engine.search(vectors, top_k, expr, output_fields)
+├─ Milvus CreateIndex RPC    →  engine.create_index(field, params)
+├─ Milvus LoadCollection RPC →  engine.load()
+├─ Milvus ReleaseCollection  →  engine.release()
+├─ FieldData ↔ records 列行转置（translators/records.py）
+├─ 错误码翻译（LiteVecDBError → grpc Status code）
+└─ 不支持的 RPC 返回 UNIMPLEMENTED + 友好消息（不 silent fail）
+
+启动方式：
+$ python -m litevecdb.adapter.grpc --data-dir ./data --port 19530
 ```
+
+**架构原则**：适配层只做协议翻译，不增加 engine 能力。pymilvus 兼容性边界见 §10。
 
 ## 10. MVP 边界与限制
 
@@ -1073,33 +1090,68 @@ pymilvus ──gRPC──→ [ gRPC 适配层 ] ──→ [ 内部引擎 ]
 - 插入数据与删除记录分离（数据文件 + Delta Log）
 - 扁平文件组织 + Size-Tiered Compaction（按 Partition 独立执行）
 - Bitmap 管线（去重 + 删除过滤 → 向量检索）
-- 暴力向量检索 (Brute-Force, NumPy)
 - Cosine / L2 / Inner-Product 距离
+- ✅ **标量过滤**（Phase 8）—— Milvus-style 表达式（比较 / IN / AND / OR / NOT / LIKE / 算术 / IS NULL / `$meta` 动态字段）+ filter LRU cache + `query()` 公开方法 + hybrid backend 优化
+- ✅ **FAISS HNSW 向量索引**（Phase 9）—— per-segment 索引 + IDSelectorBitmap pre-filter + load/release 状态机 + index 持久化；fallback 到 BruteForceIndex
+- ✅ **gRPC 适配层**（Phase 10）—— pymilvus 客户端无需改代码即可连接 LiteVecDB
 
 **不包含（后续迭代）：**
-- **gRPC 适配层**（pymilvus 兼容、参数规范化、表达式解析、Milvus 协议返回值包装）
 - Auto ID（自动生成主键）
-- 表达式过滤删除 / 标量过滤查询 `query(filter="...")`
+- 表达式过滤删除（pymilvus `delete(filter=)` MVP 走 query→delete 间接路径）
 - Partition Key（自动哈希分区，当前只支持手动指定 Partition）
-- FAISS 向量索引（bitmap 管线已预留接口，替换检索引擎即可）
-- 标量过滤（bitmap 管线已预留接口，增加 filter 条件即可）
+- IVF / IVF-PQ / OPQ 等量化向量索引（Phase 9 只做 HNSW）
+- Sparse / Binary / Float16 / BFloat16 向量类型
+- 多向量字段（一个 Collection 多个 vector 列）
+- Hybrid Search（多向量召回）
 - Snapshot 快照（见下方迭代规划）
 - Bloom Filter 加速点查定位
 - 多线程后台 Compaction
+- 异步 index build（Phase 9 是 flush 同步内联）
 - 多进程并发访问
 - 分布式支持
+- 认证 / RBAC（嵌入式默认无）
+- Backup / Restore RPC
 
 ### 存储层为后续特性预留的基础
 
 当前存储设计已为以下特性提供底层支撑，无需改动文件格式：
 
-| 后续特性 | 依赖的存储层基础 |
-|---------|----------------|
-| FAISS 索引 | 数据文件不含删除标记，可直接对文件建索引 |
-| 标量过滤 | 类型化字段 + bitmap 管线预留了 filter 扩展点，Parquet 可做谓词下推 |
-| Snapshot | `_seq` 提供时间锚点，Manifest 提供状态快照，文件不可变可被多快照共享 |
-| Schema 变更 | Parquet schema evolution，旧文件缺失列自动填 null |
-| Partition Key | Manifest 已按 Partition 组织文件，只需加哈希路由逻辑 |
+| 特性 | 依赖的存储层基础 | 状态 |
+|---------|----------------|---|
+| FAISS 索引 | 数据文件不含删除标记，可直接对文件建索引；segment-level 索引与 immutable 架构天然匹配 | ✅ Phase 9 |
+| 标量过滤 | 类型化字段 + bitmap 管线 filter_mask 扩展点，Parquet 可做谓词下推 | ✅ Phase 8 |
+| gRPC 适配层 | engine API 输入已规范化（List[dict] / List[pk]），翻译层只做协议包装 | ✅ Phase 10 |
+| Snapshot | `_seq` 提供时间锚点，Manifest 提供状态快照，文件不可变可被多快照共享 | TODO |
+| Schema 变更 | Parquet schema evolution，旧文件缺失列自动填 null | TODO |
+| Partition Key | Manifest 已按 Partition 组织文件，只需加哈希路由逻辑 | TODO |
+| IVF / IVF-PQ 量化索引 | Phase 9 的 VectorIndex protocol 已为多种 FAISS index_type 留好接口 | TODO |
+| 多向量字段 | Schema 改造 + 多 .idx 文件命名约定 | TODO |
+
+### pymilvus 兼容性边界（Phase 10）
+
+| pymilvus 调用 | 状态 | 备注 |
+|---|---|---|
+| `connect / disconnect` | ✅ | gRPC server 模式 |
+| `create_collection / drop_collection / has_collection / describe_collection / list_collections` | ✅ | 直接映射 |
+| `create_partition / drop_partition / has_partition / list_partitions` | ✅ | 直接映射 |
+| `insert / upsert` | ✅ | engine insert 已是 upsert 语义，两个 RPC 共享同一实现 |
+| `delete(ids=...)` | ✅ | 直接映射 |
+| `delete(filter=...)` | ⚠️ | servicer 内部 query → delete 间接实现 |
+| `get / query` | ✅ | 直接映射 |
+| `search(filter, output_fields, top_k)` | ✅ | output_fields 完整支持；filter 透传到 Phase 8 |
+| `create_index / drop_index / describe_index` | ✅ | HNSW + BruteForce |
+| `load_collection / release_collection / get_load_state` | ✅ | 完整状态机 |
+| `flush / compact` | ✅ | 直接映射 |
+| `get_collection_stats` | ✅ | row_count |
+| `hybrid_search`（多向量） | ❌ UNIMPLEMENTED | engine 不支持多向量字段 |
+| `search_iterator / pagination` | ❌ UNIMPLEMENTED | engine 暂无 offset 支持 |
+| Aliases (`create_alias` 等) | ❌ UNIMPLEMENTED | |
+| Backup / Restore | ❌ UNIMPLEMENTED | |
+| RBAC / User / Role / Privilege | ⚠️ stub OK | 嵌入式默认单用户，stub 返回成功避免 pymilvus crash |
+| Resource Group / Replica | ❌ UNIMPLEMENTED | 单进程不需要 |
+| `list_databases / using_database` | ⚠️ stub | 永远是 `default` |
+| Sparse / Binary / Float16 / BFloat16 vector | ❌ | engine 只支持 FLOAT_VECTOR |
+| `json_contains / array_contains / text_match` | ❌ FilterUnsupportedError | Phase F3 todo |
 
 ## 11. 后续迭代规划：Snapshot
 
