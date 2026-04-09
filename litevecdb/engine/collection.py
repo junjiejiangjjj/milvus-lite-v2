@@ -329,6 +329,7 @@ class Collection:
         metric_type: str = "COSINE",
         partition_names: Optional[List[str]] = None,
         expr: Optional[str] = None,
+        output_fields: Optional[List[str]] = None,
     ) -> List[List[dict]]:
         """Vector top-k search.
 
@@ -339,6 +340,12 @@ class Collection:
             partition_names: optional partition filter.
             expr: optional Milvus-style scalar filter expression. Hits
                 that don't match are excluded before top-k selection.
+            output_fields: optional whitelist of fields to include in
+                result ``entity``. Phase 9.1 semantics:
+                  - None  → all fields except pk and vector (legacy default)
+                  - []    → empty entity (only id + distance)
+                  - list  → exactly those fields (pk always surfaced as
+                            "id"; vector included only if listed)
 
         Returns:
             List of length nq. Each inner list has up to top_k dicts of
@@ -382,6 +389,7 @@ class Collection:
             pk_field=self._pk_name,
             vector_field=self._vector_name,
             filter_mask=filter_mask,
+            output_fields=output_fields,
         )
 
     def query(
@@ -482,6 +490,159 @@ class Collection:
         if self._memtable.size() == 0:
             return
         self._trigger_flush()
+
+    # ── partition CRUD (Phase 9.1) ──────────────────────────────
+
+    def create_partition(self, partition_name: str) -> None:
+        """Create a new partition.
+
+        - Registers the partition on the manifest (raises
+          PartitionAlreadyExistsError if already there).
+        - Persists the manifest atomically.
+        - Creates the on-disk partition directory so flush can write
+          into it later. The dir is empty at this point.
+        """
+        self._manifest.add_partition(partition_name)
+        self._manifest.save()
+        partition_dir = os.path.join(
+            self._data_dir, "partitions", partition_name
+        )
+        os.makedirs(partition_dir, exist_ok=True)
+
+    def drop_partition(self, partition_name: str) -> None:
+        """Drop a partition and remove all its on-disk files.
+
+        - Forbidden for the default partition (raises
+          DefaultPartitionError via manifest).
+        - Raises PartitionNotFoundError if the partition doesn't exist.
+        - Auto-flushes any pending MemTable rows first so we don't
+          lose live writes that target this partition.
+        - Removes the partition from the manifest, then deletes the
+          on-disk partition directory (which contains data + delta +
+          future indexes/).
+        - Drops any cached Segments belonging to this partition.
+
+        Tombstones in delta_index for the dropped partition's pks are
+        left intact — they will be GC'd by the regular tombstone GC
+        once min_active_data_seq advances past them. This is safe
+        because dropping a partition means there is no longer any
+        live data row those tombstones could shadow.
+        """
+        # Validate first so we don't trigger an unnecessary flush.
+        if not self._manifest.has_partition(partition_name):
+            raise PartitionNotFoundError(partition_name)
+
+        # Flush any pending writes so we don't drop in-flight rows
+        # silently (the user's "insert then drop" should not lose
+        # the inserts).
+        if self._memtable.size() > 0:
+            self._trigger_flush()
+
+        # remove_partition raises DefaultPartitionError or
+        # PartitionNotFoundError as appropriate.
+        self._manifest.remove_partition(partition_name)
+        self._manifest.save()
+
+        # Drop in-memory segment cache entries for this partition.
+        for key in list(self._segment_cache.keys()):
+            if key[0] == partition_name:
+                del self._segment_cache[key]
+
+        # Remove on-disk partition directory.
+        partition_dir = os.path.join(
+            self._data_dir, "partitions", partition_name
+        )
+        if os.path.exists(partition_dir):
+            import shutil
+            shutil.rmtree(partition_dir, ignore_errors=False)
+
+    def list_partitions(self) -> List[str]:
+        """Return all partition names, sorted."""
+        return self._manifest.list_partitions()
+
+    def has_partition(self, partition_name: str) -> bool:
+        """Check whether a partition exists."""
+        return self._manifest.has_partition(partition_name)
+
+    # ── statistics & introspection (Phase 9.1) ──────────────────
+
+    @property
+    def name(self) -> str:
+        """Collection name (read-only)."""
+        return self._name
+
+    @property
+    def schema(self) -> CollectionSchema:
+        """Collection schema (read-only)."""
+        return self._schema
+
+    @property
+    def num_entities(self) -> int:
+        """Approximate live row count across MemTable + segments.
+
+        Walks pks + seqs only (no record materialization), then runs
+        the same bitmap pipeline as search to dedup upserts and apply
+        tombstones. O(N) where N is the total candidate row count.
+
+        This is the value pymilvus's get_collection_stats reports as
+        ``row_count``.
+        """
+        pk_chunks: List[List[Any]] = []
+        seq_chunks: List[np.ndarray] = []
+
+        for seg in self._segment_cache.values():
+            if seg.num_rows == 0:
+                continue
+            pk_chunks.append(list(seg.pks))
+            seq_chunks.append(seg.seqs)
+
+        mt_pks, mt_seqs, _vecs, _records = self._memtable.to_search_arrays(
+            vector_field=self._vector_name,
+            partition_names=None,
+        )
+        if mt_pks:
+            pk_chunks.append(mt_pks)
+            seq_chunks.append(mt_seqs)
+
+        if not pk_chunks:
+            return 0
+
+        all_pks: List[Any] = []
+        for c in pk_chunks:
+            all_pks.extend(c)
+        all_seqs = np.concatenate(seq_chunks)
+
+        from litevecdb.search.bitmap import build_valid_mask
+        mask = build_valid_mask(all_pks, all_seqs, self._delta_index)
+        return int(mask.sum())
+
+    def describe(self) -> dict:
+        """Return a dict summarizing the Collection.
+
+        Used by pymilvus's describe_collection mapping in Phase 10.
+        Mirrors the shape Milvus returns: collection name + schema +
+        partition list + row count. Phase 9.3 will extend this with
+        index info and load state.
+        """
+        return {
+            "name": self._name,
+            "schema": {
+                "fields": [
+                    {
+                        "name": f.name,
+                        "dtype": f.dtype.name,
+                        "is_primary": f.is_primary,
+                        "nullable": f.nullable,
+                        "dim": f.dim,
+                        "max_length": f.max_length,
+                    }
+                    for f in self._schema.fields
+                ],
+                "enable_dynamic_field": self._schema.enable_dynamic_field,
+            },
+            "partitions": self.list_partitions(),
+            "num_entities": self.num_entities,
+        }
 
     # ── orchestration ───────────────────────────────────────────
 

@@ -37,6 +37,7 @@ def execute_search(
     pk_field: str,
     vector_field: str,
     filter_mask: Optional[np.ndarray] = None,
+    output_fields: Optional[List[str]] = None,
 ) -> List[List[dict]]:
     """Run search and return ``nq`` lists of top-k result dicts.
 
@@ -51,14 +52,35 @@ def execute_search(
         metric_type: "COSINE" / "L2" / "IP"
         pk_field: name of the primary-key column (used to extract "id"
             from each record)
-        vector_field: name of the vector column (stripped from "entity")
+        vector_field: name of the vector column (stripped from "entity"
+            unless explicitly listed in output_fields)
         filter_mask: optional Phase-8 scalar filter result, length N.
             AND'd into the bitmap mask before top-k selection.
+        output_fields: optional whitelist of fields to include in
+            ``entity``. Phase 9.1 semantics:
+              - None  → all fields except pk and vector (legacy default)
+              - []    → empty entity (only id + distance)
+              - list  → exactly those fields (vector included if listed,
+                        pk excluded since it's already in "id")
 
     Returns:
         List of length nq. Each inner list has up to top_k dicts, sorted
         by ascending distance.
     """
+    # Pre-compute the entity-projection function once per call. The two
+    # branches let us keep the legacy "strip pk + vector" path zero-cost.
+    if output_fields is None:
+        def project_entity(record: dict) -> dict:
+            return {
+                k: v for k, v in record.items()
+                if k != pk_field and k != vector_field
+            }
+    else:
+        keep = set(output_fields)
+        keep.discard(pk_field)  # pk is always surfaced as "id"
+
+        def project_entity(record: dict) -> dict:
+            return {k: record[k] for k in keep if k in record}
     if query_vectors.ndim == 1:
         query_vectors = query_vectors.reshape(1, -1)
     nq = query_vectors.shape[0]
@@ -102,10 +124,7 @@ def execute_search(
             global_idx = int(valid_indices[local_idx])
             record = all_records[global_idx]
             pk = record.get(pk_field)
-            entity = {
-                k: v for k, v in record.items()
-                if k != pk_field and k != vector_field
-            }
+            entity = project_entity(record)
             per_query.append({
                 "id": pk,
                 "distance": float(dists[local_idx]),

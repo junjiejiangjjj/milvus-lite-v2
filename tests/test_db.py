@@ -141,6 +141,38 @@ def test_list_collections_empty(db):
 
 
 # ---------------------------------------------------------------------------
+# get_collection_stats (Phase 9.1.4)
+# ---------------------------------------------------------------------------
+
+def test_get_collection_stats_empty(db, schema):
+    db.create_collection("docs", schema)
+    stats = db.get_collection_stats("docs")
+    assert stats == {"row_count": 0}
+
+
+def test_get_collection_stats_with_data(db, schema):
+    col = db.create_collection("docs", schema)
+    col.insert([_make_record(i) for i in range(7)])
+    stats = db.get_collection_stats("docs")
+    assert stats["row_count"] == 7
+
+
+def test_get_collection_stats_after_flush_and_delete(db, schema):
+    col = db.create_collection("docs", schema)
+    col.insert([_make_record(i) for i in range(5)])
+    col.flush()
+    col.delete(pks=[_make_record(0)["id"], _make_record(1)["id"]])
+    col.flush()
+    stats = db.get_collection_stats("docs")
+    assert stats["row_count"] == 3
+
+
+def test_get_collection_stats_unknown_raises(db):
+    with pytest.raises(CollectionNotFoundError):
+        db.get_collection_stats("ghost")
+
+
+# ---------------------------------------------------------------------------
 # Name validation
 # ---------------------------------------------------------------------------
 

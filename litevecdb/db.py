@@ -161,6 +161,20 @@ class LiteVecDB:
                 names.append(entry)
         return sorted(names)
 
+    def get_collection_stats(self, name: str) -> Dict[str, Any]:
+        """Phase 9.1: Return basic stats for a collection.
+
+        Currently returns ``{"row_count": int}``. The Phase 10 gRPC
+        adapter maps this directly into Milvus's
+        ``GetCollectionStatistics`` response (a list of KeyValuePair
+        with the single ``row_count`` entry).
+
+        Loads the Collection if not already cached. Raises
+        ``CollectionNotFoundError`` if it doesn't exist.
+        """
+        col = self.get_collection(name)
+        return {"row_count": col.num_entities}
+
     def close(self) -> None:
         """Close every cached Collection and release the LOCK.
 
