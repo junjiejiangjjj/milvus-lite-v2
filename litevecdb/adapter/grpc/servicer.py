@@ -33,14 +33,20 @@ from litevecdb.adapter.grpc.errors import (
     success_status_kwargs,
     to_status_kwargs,
 )
+from litevecdb.adapter.grpc.translators.index import (
+    index_spec_to_kv_pairs,
+    kv_pairs_to_index_params_dict,
+)
 from litevecdb.adapter.grpc.translators.records import (
     fields_data_to_records,
     records_to_fields_data,
 )
+from litevecdb.adapter.grpc.translators.result import build_search_result_data
 from litevecdb.adapter.grpc.translators.schema import (
     litevecdb_to_milvus_schema,
     milvus_to_litevecdb_schema,
 )
+from litevecdb.adapter.grpc.translators.search import parse_search_request
 from litevecdb.exceptions import LiteVecDBError
 from litevecdb.schema.types import DataType
 
@@ -320,6 +326,228 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         except Exception as e:
             logger.exception("Query failed: %s", e)
             return milvus_pb2.QueryResults(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    # ── Vector search (Phase 10.4) ──────────────────────────────
+
+    def Search(self, request, context):
+        """Decode the search request, dispatch to ``Collection.search``,
+        flatten the result back into a SearchResultData proto.
+
+        The hard part is the request decoding (placeholder_group bytes
+        → list of query vectors via PlaceholderGroup proto + struct
+        unpack), centralized in translators/search.py.
+
+        Metric resolution: pymilvus's MilvusClient.search doesn't
+        include metric_type in search_params by default. We fall back
+        to the collection's IndexSpec.metric_type so the engine uses
+        the same metric the index was built with.
+        """
+        try:
+            col = self._db.get_collection(request.collection_name)
+            # Pull the canonical metric from the IndexSpec if any.
+            spec = col._index_spec  # noqa: SLF001
+            default_metric = spec.metric_type if spec else "COSINE"
+            parsed = parse_search_request(request, default_metric_type=default_metric)
+
+            results = col.search(
+                query_vectors=parsed["query_vectors"],
+                top_k=parsed["top_k"],
+                metric_type=parsed["metric_type"],
+                partition_names=parsed["partition_names"],
+                expr=parsed["expr"],
+                output_fields=parsed["output_fields"],
+            )
+
+            result_data = build_search_result_data(
+                results=results,
+                schema=col.schema,
+                top_k=parsed["top_k"],
+                pk_name=col._pk_name,  # noqa: SLF001
+                output_fields=parsed["output_fields"],
+            )
+
+            return milvus_pb2.SearchResults(
+                status=common_pb2.Status(**success_status_kwargs()),
+                results=result_data,
+                collection_name=col.name,
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.SearchResults(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("Search failed: %s", e)
+            return milvus_pb2.SearchResults(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    # ── Index lifecycle (Phase 10.4) ────────────────────────────
+
+    def CreateIndex(self, request, context):
+        """Decode IndexParams and call ``Collection.create_index``.
+
+        pymilvus's MilvusClient.create_index packs ``index_type``,
+        ``metric_type``, ``params``, and (optionally) ``search_params``
+        into the ``extra_params`` KeyValuePair list. The translator
+        unpacks these into the dict shape Collection.create_index
+        consumes.
+        """
+        try:
+            col = self._db.get_collection(request.collection_name)
+            params = kv_pairs_to_index_params_dict(
+                request.extra_params, field_name=request.field_name
+            )
+            col.create_index(request.field_name, params)
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("CreateIndex failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def DropIndex(self, request, context):
+        try:
+            col = self._db.get_collection(request.collection_name)
+            col.drop_index(request.field_name or None)
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("DropIndex failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def DescribeIndex(self, request, context):
+        """Return the IndexSpec wrapped in a DescribeIndexResponse.
+
+        Returns an INDEX_NOT_FOUND status when there's no matching
+        index (pymilvus's describe_index parses this as None rather
+        than raising AmbiguousIndexName, which is what would happen
+        if we returned SUCCESS + empty list).
+
+        IndexState is always ``Finished`` because Phase 9 builds
+        indexes synchronously inside ``load()``.
+        """
+        try:
+            from litevecdb.exceptions import IndexNotFoundError as _INFE
+
+            col = self._db.get_collection(request.collection_name)
+            spec = col._index_spec  # noqa: SLF001
+
+            if spec is None:
+                # No index at all → INDEX_NOT_FOUND so pymilvus returns None
+                raise _INFE(
+                    f"no index on collection {request.collection_name!r}"
+                )
+
+            # If a specific field_name was requested, it must match.
+            if request.field_name and request.field_name != spec.field_name:
+                raise _INFE(
+                    f"no index on field {request.field_name!r} of "
+                    f"collection {request.collection_name!r}"
+                )
+
+            desc = milvus_pb2.IndexDescription(
+                index_name="_default_idx",
+                field_name=spec.field_name,
+                params=index_spec_to_kv_pairs(spec),
+                state=common_pb2.IndexState.Finished,
+                indexed_rows=col.num_entities,
+                total_rows=col.num_entities,
+            )
+            return milvus_pb2.DescribeIndexResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                index_descriptions=[desc],
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.DescribeIndexResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("DescribeIndex failed: %s", e)
+            return milvus_pb2.DescribeIndexResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    # ── Load / release (Phase 10.4) ─────────────────────────────
+
+    def LoadCollection(self, request, context):
+        try:
+            col = self._db.get_collection(request.collection_name)
+            col.load()
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("LoadCollection failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def ReleaseCollection(self, request, context):
+        try:
+            col = self._db.get_collection(request.collection_name)
+            col.release()
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("ReleaseCollection failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def GetLoadingProgress(self, request, context):
+        """Polled by pymilvus's load_collection wrapper.
+
+        Our load is synchronous (Phase 9), so once it returns the
+        collection is fully loaded → progress 100. If the collection
+        is in 'loading' state we still report 0; if released, 0.
+        """
+        try:
+            col = self._db.get_collection(request.collection_name)
+            progress = 100 if col.load_state == "loaded" else 0
+            return milvus_pb2.GetLoadingProgressResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                progress=progress,
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.GetLoadingProgressResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("GetLoadingProgress failed: %s", e)
+            return milvus_pb2.GetLoadingProgressResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    def GetLoadState(self, request, context):
+        """Map Collection._load_state to Milvus's LoadState enum.
+
+            released → LoadStateNotLoad   (1)
+            loading  → LoadStateLoading   (2)
+            loaded   → LoadStateLoaded    (3)
+        """
+        try:
+            if not self._db.has_collection(request.collection_name):
+                return milvus_pb2.GetLoadStateResponse(
+                    status=common_pb2.Status(**success_status_kwargs()),
+                    state=common_pb2.LoadState.LoadStateNotExist,
+                )
+            col = self._db.get_collection(request.collection_name)
+            mapping = {
+                "released": common_pb2.LoadState.LoadStateNotLoad,
+                "loading":  common_pb2.LoadState.LoadStateLoading,
+                "loaded":   common_pb2.LoadState.LoadStateLoaded,
+            }
+            return milvus_pb2.GetLoadStateResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                state=mapping.get(col.load_state, common_pb2.LoadState.LoadStateNotLoad),
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.GetLoadStateResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("GetLoadState failed: %s", e)
+            return milvus_pb2.GetLoadStateResponse(
                 status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
             )
 
