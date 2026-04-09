@@ -1,0 +1,126 @@
+"""Index factory — single dispatch point for build / load.
+
+Routes IndexSpec.index_type to the right VectorIndex implementation
+and handles the optional faiss-cpu dependency gracefully.
+
+Routing rules:
+    BRUTE_FORCE → BruteForceIndex (no extra dependency)
+    HNSW        → FaissHnswIndex (requires faiss-cpu)
+    IVF_*       → reserved for future phases (NotImplementedError)
+
+When faiss-cpu is not installed, requesting an HNSW index raises
+``IndexBackendUnavailableError`` with a clear "install with [faiss]
+extra" hint. The user can fall back to BRUTE_FORCE in their
+create_index call to keep going without faiss.
+
+Why a separate factory module:
+    - Keeps Segment / Collection free of conditional faiss imports
+    - Centralizes the version compatibility surface
+    - Phase 9.6+ can add new index_type cases without touching
+      anything below the factory layer
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+from litevecdb.exceptions import IndexBackendUnavailableError
+from litevecdb.index.brute_force import BruteForceIndex
+
+if TYPE_CHECKING:
+    from litevecdb.index.protocol import VectorIndex
+    from litevecdb.index.spec import IndexSpec
+
+
+# ── Optional FAISS detection ────────────────────────────────────────
+
+try:
+    import faiss as _faiss  # noqa: F401
+    _FAISS_AVAILABLE = True
+except ImportError:
+    _FAISS_AVAILABLE = False
+
+
+# Index types that REQUIRE faiss-cpu. BRUTE_FORCE is intentionally NOT
+# in this set — it always works.
+_FAISS_INDEX_TYPES = frozenset({"HNSW", "IVF_FLAT", "IVF_SQ8", "IVF_PQ"})
+
+
+def is_faiss_available() -> bool:
+    """Whether faiss-cpu is importable in this process.
+
+    Phase 10 gRPC adapter (or any caller wanting to know "can I
+    actually create an HNSW?") can use this for capability discovery.
+    """
+    return _FAISS_AVAILABLE
+
+
+# ── Public dispatch ─────────────────────────────────────────────────
+
+def build_index_from_spec(
+    spec: "IndexSpec",
+    vectors: np.ndarray,
+) -> "VectorIndex":
+    """Build a fresh VectorIndex from raw vectors.
+
+    Args:
+        spec: IndexSpec with index_type, metric_type, build_params
+        vectors: (N, dim) float32 vector matrix
+
+    Raises:
+        IndexBackendUnavailableError: requested index_type needs faiss
+            but faiss-cpu isn't installed
+        NotImplementedError: index_type is reserved for a future phase
+        ValueError: index_type is unrecognized
+    """
+    index_type = spec.index_type
+    if index_type == "BRUTE_FORCE":
+        return BruteForceIndex.build(vectors, spec.metric_type, spec.build_params)
+    if index_type in _FAISS_INDEX_TYPES:
+        _require_faiss(index_type)
+        if index_type == "HNSW":
+            from litevecdb.index.faiss_hnsw import FaissHnswIndex
+            return FaissHnswIndex.build(vectors, spec.metric_type, spec.build_params)
+        raise NotImplementedError(
+            f"index_type={index_type!r} is reserved for a future phase; "
+            f"only HNSW and BRUTE_FORCE are supported in Phase 9.5"
+        )
+    raise ValueError(f"unknown index_type: {index_type!r}")
+
+
+def load_index_from_spec(
+    spec: "IndexSpec",
+    path: str,
+    dim: int,
+) -> "VectorIndex":
+    """Reload a VectorIndex from disk based on spec.index_type.
+
+    Same routing rules as build_index_from_spec; see there for the
+    error semantics.
+    """
+    index_type = spec.index_type
+    if index_type == "BRUTE_FORCE":
+        return BruteForceIndex.load(path, spec.metric_type, dim)
+    if index_type in _FAISS_INDEX_TYPES:
+        _require_faiss(index_type)
+        if index_type == "HNSW":
+            from litevecdb.index.faiss_hnsw import FaissHnswIndex
+            return FaissHnswIndex.load(path, spec.metric_type, dim)
+        raise NotImplementedError(
+            f"index_type={index_type!r} is reserved for a future phase"
+        )
+    raise ValueError(f"unknown index_type: {index_type!r}")
+
+
+# ── Internals ───────────────────────────────────────────────────────
+
+def _require_faiss(index_type: str) -> None:
+    if not _FAISS_AVAILABLE:
+        raise IndexBackendUnavailableError(
+            f"index_type={index_type!r} requires faiss-cpu, which is not "
+            f"installed. Install the [faiss] extra: "
+            f"`pip install litevecdb[faiss]` (or use "
+            f"index_type='BRUTE_FORCE' to fall back without faiss)."
+        )

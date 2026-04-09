@@ -6,16 +6,36 @@ segment + a new index, dropping the old ones.
 
 Public exports:
     VectorIndex     — abstract protocol (index/protocol.py)
-    BruteForceIndex — NumPy implementation (Phase 9.2)
-                      Long-lived: differential test baseline + faiss
+    IndexSpec       — frozen dataclass that travels through Manifest
+    BruteForceIndex — NumPy implementation. Long-lived first-class:
+                      differential test baseline + faiss-not-installed
                       fallback + small-segment chosen impl.
-
-Phase 9.5 will add ``FaissHnswIndex`` here behind a ``try: import faiss``
-guard so installations without faiss-cpu still get the BruteForce path.
+    FaissHnswIndex  — FAISS HNSW (Phase 9.5). Only exported if
+                      faiss-cpu is installed; otherwise it's omitted
+                      from __all__ but the factory still routes
+                      requests through it (raising
+                      IndexBackendUnavailableError if missing).
+    build_index_from_spec / load_index_from_spec — factory dispatch
 """
 
 from litevecdb.index.brute_force import BruteForceIndex
+from litevecdb.index.factory import (
+    build_index_from_spec,
+    is_faiss_available,
+    load_index_from_spec,
+)
 from litevecdb.index.protocol import VectorIndex
 from litevecdb.index.spec import IndexSpec
 
-__all__ = ["VectorIndex", "BruteForceIndex", "IndexSpec"]
+__all__ = [
+    "VectorIndex",
+    "BruteForceIndex",
+    "IndexSpec",
+    "build_index_from_spec",
+    "load_index_from_spec",
+    "is_faiss_available",
+]
+
+if is_faiss_available():
+    from litevecdb.index.faiss_hnsw import FaissHnswIndex  # noqa: F401
+    __all__.append("FaissHnswIndex")

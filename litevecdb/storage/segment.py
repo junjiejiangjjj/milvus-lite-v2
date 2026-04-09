@@ -175,15 +175,15 @@ class Segment:
         spec: "IndexSpec",  # type: ignore[name-defined]  # forward
         index_dir: str,
     ) -> None:
-        """Phase 9.4: ensure this segment has an attached index.
+        """Phase 9.4 / 9.5: ensure this segment has an attached index.
 
         - If a matching .idx file exists in *index_dir*, load it.
         - Else, build a fresh VectorIndex from the segment's vectors
           and persist it for next time.
 
-        Phase 9.4 only routes to BruteForceIndex (no factory yet —
-        that comes in 9.5 with FAISS). The path uses local imports to
-        avoid pulling the index package up to the storage layer.
+        Phase 9.5: routes via the factory so HNSW specs go through
+        FaissHnswIndex when faiss-cpu is installed (or raise
+        IndexBackendUnavailableError if not). BRUTE_FORCE always works.
 
         Idempotent: if the segment already has an index attached, this
         is a no-op (the on-disk file is assumed to be in sync).
@@ -194,14 +194,17 @@ class Segment:
             return
 
         import os
-        from litevecdb.index.brute_force import BruteForceIndex
+        from litevecdb.index.factory import (
+            build_index_from_spec,
+            load_index_from_spec,
+        )
 
         path = self.index_file_path(index_dir, spec.index_type)
 
         if os.path.exists(path):
-            idx = BruteForceIndex.load(path, spec.metric_type, self.vector_dim)
+            idx = load_index_from_spec(spec, path, self.vector_dim)
         else:
-            idx = BruteForceIndex.build(self.vectors, spec.metric_type)
+            idx = build_index_from_spec(spec, self.vectors)
             os.makedirs(index_dir, exist_ok=True)
             idx.save(path)
 
