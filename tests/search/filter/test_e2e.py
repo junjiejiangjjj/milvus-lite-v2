@@ -125,6 +125,38 @@ DIFFERENTIAL_EXPRESSIONS = [
     # ── Edge: matches everything ────────────────────────────────
     "age >= 0",
     "age >= 0 or age < 0",
+    # ── Phase F2a: arithmetic ───────────────────────────────────
+    "age + 1 > 25",
+    "age - 5 > 20",
+    "age * 2 >= 50",
+    "age / 2 < 30",
+    "score * 2 > 1.0",
+    "score + 0.1 < 0.6",
+    "age + score > 25.5",     # int + float promotion
+    "age * 2 + 1 > 50",       # nested arithmetic
+    "(age + 5) * 2 > 60",     # parens
+    "-age + 100 > 50",        # unary minus
+    "age + 1 > age",          # field on both sides
+    "age - 1 == 24",
+    # ── Phase F2a: LIKE ─────────────────────────────────────────
+    "title like 'a%'",
+    "title like '%i%'",
+    "title like 'ai'",        # exact match
+    "title like '_i'",        # single-char wildcard
+    "category like 'tech'",
+    "category like 'te%'",
+    "title like 'AI%'",       # case-sensitive
+    # ── Phase F2a: IS NULL / IS NOT NULL ────────────────────────
+    "title is null",
+    "title is not null",
+    "age is null",            # always False (non-nullable)
+    "age is not null",        # always True (non-nullable)
+    "title is null and age > 18",
+    "title is not null or category == 'tech'",
+    # ── Phase F2a: combined ─────────────────────────────────────
+    "age + 1 > 20 and title like '%i%'",
+    "title is not null and age * 2 > 30",
+    "(age - 10) * 2 < 50 or score / 2 > 0.4",
 ]
 
 

@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Union
 from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
 from litevecdb.search.filter.ast import (
     And,
+    ArithOp,
     BoolLit,
     CmpOp,
     Expr,
@@ -26,6 +27,8 @@ from litevecdb.search.filter.ast import (
     FloatLit,
     InOp,
     IntLit,
+    IsNullOp,
+    LikeOp,
     ListLit,
     Literal,
     Not,
@@ -279,6 +282,52 @@ def _check_node(
                 f"operand of 'not' must be boolean, got {t}",
                 source, node.pos,
             )
+        return SEM_BOOL
+
+    # ── ArithOp (Phase F2a) ─────────────────────────────────────
+    if isinstance(node, ArithOp):
+        left_type = _check_node(node.left, schema_fields, field_names, fields_used, source)
+        right_type = _check_node(node.right, schema_fields, field_names, fields_used, source)
+        if left_type not in (SEM_INT, SEM_FLOAT):
+            raise FilterTypeError(
+                f"arithmetic '{node.op}' requires numeric operands, "
+                f"left side is {_describe_operand(node.left, left_type)}",
+                source, node.pos, span=len(node.op),
+                left_desc=_describe_operand(node.left, left_type),
+            )
+        if right_type not in (SEM_INT, SEM_FLOAT):
+            raise FilterTypeError(
+                f"arithmetic '{node.op}' requires numeric operands, "
+                f"right side is {_describe_operand(node.right, right_type)}",
+                source, node.pos, span=len(node.op),
+                right_desc=_describe_operand(node.right, right_type),
+            )
+        # Result type: float if either operand is float, else int.
+        # Division always promotes to float (matches Python semantics).
+        if node.op == "/" or left_type == SEM_FLOAT or right_type == SEM_FLOAT:
+            return SEM_FLOAT
+        return SEM_INT
+
+    # ── LikeOp (Phase F2a) ──────────────────────────────────────
+    if isinstance(node, LikeOp):
+        value_type = _check_node(node.value, schema_fields, field_names, fields_used, source)
+        if value_type != SEM_STRING:
+            raise FilterTypeError(
+                f"LIKE requires a string operand, got "
+                f"{_describe_operand(node.value, value_type)}",
+                source, node.pos,
+                left_desc=_describe_operand(node.value, value_type),
+            )
+        # The pattern is always a StringLit (parser enforces this), no
+        # need to type-check it again.
+        return SEM_BOOL
+
+    # ── IsNullOp (Phase F2a) ────────────────────────────────────
+    if isinstance(node, IsNullOp):
+        # The parser enforces that the operand is a FieldRef, so calling
+        # _check_node on it just resolves the field. We don't restrict
+        # the field's type — IS NULL is meaningful for any field.
+        _check_node(node.field, schema_fields, field_names, fields_used, source)
         return SEM_BOOL
 
     raise TypeError(f"unknown AST node type: {type(node).__name__}")

@@ -12,18 +12,22 @@ BooleanArray with no null entries.
 from __future__ import annotations
 
 import operator
+import re
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import pyarrow as pa
 
 from litevecdb.search.filter.ast import (
     And,
+    ArithOp,
     BoolLit,
     CmpOp,
     FieldRef,
     FloatLit,
     InOp,
     IntLit,
+    IsNullOp,
+    LikeOp,
     ListLit,
     Not,
     Or,
@@ -42,6 +46,47 @@ _CMP_OPS = {
     ">":  operator.gt,
     ">=": operator.ge,
 }
+
+# Phase F2a — arithmetic
+_ARITH_OPS = {
+    "+": operator.add,
+    "-": operator.sub,
+    "*": operator.mul,
+    "/": operator.truediv,
+}
+
+
+def _like_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Translate a SQL LIKE pattern to a Python regex (anchored).
+
+    Wildcards:
+        '%' → '.*'
+        '_' → '.'
+    All other characters are regex-escaped. Escape character support
+    (e.g. `\\%` for a literal %) is deferred to F3.
+    """
+    out: list[str] = []
+    for ch in pattern:
+        if ch == "%":
+            out.append(".*")
+        elif ch == "_":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+    return re.compile("^" + "".join(out) + "$", re.DOTALL)
+
+
+# Cache compiled LIKE patterns to avoid recompiling per row.
+_LIKE_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _get_like_regex(pattern: str) -> "re.Pattern[str]":
+    cached = _LIKE_CACHE.get(pattern)
+    if cached is not None:
+        return cached
+    compiled = _like_to_regex(pattern)
+    _LIKE_CACHE[pattern] = compiled
+    return compiled
 
 
 def evaluate_python(
@@ -139,5 +184,29 @@ def _eval_row(node, row: dict) -> Any:
         if r is None:
             return None
         return not r
+
+    # ── Phase F2a ───────────────────────────────────────────────
+    if isinstance(node, ArithOp):
+        left = _eval_row(node.left, row)
+        right = _eval_row(node.right, row)
+        if left is None or right is None:
+            return None
+        try:
+            return _ARITH_OPS[node.op](left, right)
+        except (TypeError, ZeroDivisionError):
+            return None
+
+    if isinstance(node, LikeOp):
+        value = _eval_row(node.value, row)
+        if value is None or not isinstance(value, str):
+            return False
+        regex = _get_like_regex(node.pattern.value)
+        return regex.match(value) is not None
+
+    if isinstance(node, IsNullOp):
+        # IS NULL on a missing key in row dict counts as null too.
+        val = row.get(node.field.name)
+        is_null = val is None
+        return (not is_null) if node.negate else is_null
 
     raise TypeError(f"unknown AST node: {type(node).__name__}")

@@ -4,12 +4,15 @@ import pytest
 
 from litevecdb.search.filter.ast import (
     And,
+    ArithOp,
     BoolLit,
     CmpOp,
     FieldRef,
     FloatLit,
     InOp,
     IntLit,
+    IsNullOp,
+    LikeOp,
     ListLit,
     Not,
     Or,
@@ -295,10 +298,15 @@ def test_function_call_rejected():
         parse_expr("json_contains(meta, 'x')")
 
 
-def test_unary_minus_on_field_rejected():
-    """Phase F1 doesn't have arithmetic, so -age is meaningless."""
-    with pytest.raises(FilterParseError, match="numeric literals"):
-        parse_expr("-age > 0")
+def test_unary_minus_on_field_now_works():
+    """Phase F2a: unary minus on field becomes ArithOp(-, 0, field)."""
+    e = parse_expr("-age > 0")
+    assert isinstance(e, CmpOp)
+    assert isinstance(e.left, ArithOp)
+    assert e.left.op == "-"
+    # left side is the synthetic 0
+    assert isinstance(e.left.left, IntLit) and e.left.left.value == 0
+    assert isinstance(e.left.right, FieldRef) and e.left.right.name == "age"
 
 
 def test_extra_token_after_expression():
@@ -322,3 +330,145 @@ def test_error_pos_in_message():
     # Caret should land on the second '>'
     msg = str(exc.value)
     assert "column 7" in msg
+
+
+# ---------------------------------------------------------------------------
+# Phase F2a — arithmetic
+# ---------------------------------------------------------------------------
+
+def test_arith_simple_add():
+    e = parse_expr("age + 1 > 20")
+    assert isinstance(e, CmpOp)
+    assert isinstance(e.left, ArithOp)
+    assert e.left.op == "+"
+
+
+def test_arith_left_assoc():
+    """`a + b + c` parses as `(a + b) + c`."""
+    e = parse_expr("a + b + c > 0")
+    assert isinstance(e, CmpOp)
+    add = e.left
+    assert isinstance(add, ArithOp) and add.op == "+"
+    assert isinstance(add.left, ArithOp) and add.left.op == "+"
+
+
+def test_mul_binds_tighter_than_add():
+    """`a + b * c` parses as `a + (b * c)`."""
+    e = parse_expr("a + b * c > 0")
+    add = e.left
+    assert isinstance(add, ArithOp) and add.op == "+"
+    assert isinstance(add.right, ArithOp) and add.right.op == "*"
+
+
+def test_arith_parens_override():
+    """`(a + b) * c` — parens force add to be deeper."""
+    e = parse_expr("(a + b) * c > 0")
+    mul = e.left
+    assert isinstance(mul, ArithOp) and mul.op == "*"
+    assert isinstance(mul.left, ArithOp) and mul.left.op == "+"
+
+
+def test_arith_in_both_sides():
+    e = parse_expr("a + 1 > b * 2")
+    assert isinstance(e, CmpOp)
+    assert isinstance(e.left, ArithOp)
+    assert isinstance(e.right, ArithOp)
+
+
+def test_arith_unary_minus_field():
+    """`-age` is now ArithOp(-, 0, age) instead of an error."""
+    e = parse_expr("-age + 5 > 0")
+    add = e.left
+    assert isinstance(add, ArithOp) and add.op == "+"
+    assert isinstance(add.left, ArithOp) and add.left.op == "-"
+
+
+def test_arith_div():
+    e = parse_expr("score / 2 > 0.5")
+    arith = e.left
+    assert isinstance(arith, ArithOp) and arith.op == "/"
+
+
+# ---------------------------------------------------------------------------
+# Phase F2a — LIKE
+# ---------------------------------------------------------------------------
+
+def test_like_simple():
+    e = parse_expr("title like 'AI%'")
+    assert isinstance(e, LikeOp)
+    assert isinstance(e.value, FieldRef)
+    assert e.value.name == "title"
+    assert e.pattern.value == "AI%"
+
+
+def test_like_uppercase():
+    e = parse_expr("title LIKE 'AI%'")
+    assert isinstance(e, LikeOp)
+
+
+def test_like_in_and():
+    e = parse_expr("title like 'AI%' and age > 18")
+    assert isinstance(e, And)
+    assert isinstance(e.operands[0], LikeOp)
+    assert isinstance(e.operands[1], CmpOp)
+
+
+def test_like_pattern_must_be_string():
+    with pytest.raises(FilterParseError, match="string literal"):
+        parse_expr("title like 42")
+
+
+def test_like_pattern_must_be_string_not_field():
+    with pytest.raises(FilterParseError, match="string literal"):
+        parse_expr("title like other_field")
+
+
+# ---------------------------------------------------------------------------
+# Phase F2a — IS NULL / IS NOT NULL
+# ---------------------------------------------------------------------------
+
+def test_is_null():
+    e = parse_expr("title is null")
+    assert isinstance(e, IsNullOp)
+    assert e.field.name == "title"
+    assert e.negate is False
+
+
+def test_is_not_null():
+    e = parse_expr("title is not null")
+    assert isinstance(e, IsNullOp)
+    assert e.negate is True
+
+
+def test_is_null_uppercase():
+    e = parse_expr("title IS NULL")
+    assert isinstance(e, IsNullOp)
+    assert e.negate is False
+
+
+def test_is_not_null_uppercase():
+    e = parse_expr("title IS NOT NULL")
+    assert isinstance(e, IsNullOp)
+    assert e.negate is True
+
+
+def test_is_null_in_and():
+    e = parse_expr("age > 18 and title is not null")
+    assert isinstance(e, And)
+    assert isinstance(e.operands[1], IsNullOp)
+    assert e.operands[1].negate is True
+
+
+def test_is_null_lhs_must_be_field():
+    with pytest.raises(FilterParseError, match="field reference"):
+        parse_expr("'literal' is null")
+
+
+def test_is_missing_null_keyword():
+    with pytest.raises(FilterParseError, match="expected 'null'"):
+        parse_expr("title is something")
+
+
+def test_is_not_missing_null():
+    with pytest.raises(FilterParseError, match="expected 'not null'"):
+        parse_expr("title is not 5")

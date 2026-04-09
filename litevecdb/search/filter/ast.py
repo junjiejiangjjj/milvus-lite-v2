@@ -119,6 +119,49 @@ class Not:
     pos: int
 
 
+# ── Phase F2a: arithmetic / LIKE / IS NULL ──────────────────────────────────
+
+@dataclass(frozen=True)
+class ArithOp:
+    """Binary arithmetic: +, -, *, /.
+
+    Operand types must be numeric (int or float). Result type is float
+    if either operand is float, else int. Modulo and power are deferred
+    to a later F2 sub-phase.
+    """
+    op: str           # "+", "-", "*", "/"
+    left: "Expr"
+    right: "Expr"
+    pos: int
+
+
+@dataclass(frozen=True)
+class LikeOp:
+    """SQL LIKE: `value LIKE 'pattern'`.
+
+    The pattern uses SQL wildcards: '%' matches any sequence (incl. empty),
+    '_' matches a single character. Escape support is deferred to F3.
+
+    The value side must be a string-typed expression (typically a
+    FieldRef of a VARCHAR field). The pattern must be a string literal.
+    """
+    value: "Expr"
+    pattern: StringLit
+    pos: int
+
+
+@dataclass(frozen=True)
+class IsNullOp:
+    """`field IS NULL` or `field IS NOT NULL`.
+
+    The operand must be a FieldRef. Returns bool. Phase F2a only supports
+    plain field refs; JSON path access (`$meta["key"] is null`) lands in F2b.
+    """
+    field: FieldRef
+    negate: bool      # True for "IS NOT NULL"
+    pos: int
+
+
 # ── Type alias for the union of all node types ──────────────────────────────
 
 Expr = Union[
@@ -126,4 +169,5 @@ Expr = Union[
     ListLit,
     FieldRef,
     CmpOp, InOp, And, Or, Not,
+    ArithOp, LikeOp, IsNullOp,
 ]

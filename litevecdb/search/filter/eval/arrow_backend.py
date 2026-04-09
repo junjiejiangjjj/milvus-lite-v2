@@ -20,12 +20,15 @@ import pyarrow.compute as pc
 
 from litevecdb.search.filter.ast import (
     And,
+    ArithOp,
     BoolLit,
     CmpOp,
     FieldRef,
     FloatLit,
     InOp,
     IntLit,
+    IsNullOp,
+    LikeOp,
     ListLit,
     Not,
     Or,
@@ -43,6 +46,14 @@ _CMP_KERNELS = {
     "<=": pc.less_equal,
     ">":  pc.greater,
     ">=": pc.greater_equal,
+}
+
+# Phase F2a — arithmetic kernels
+_ARITH_KERNELS = {
+    "+": pc.add,
+    "-": pc.subtract,
+    "*": pc.multiply,
+    "/": pc.divide,
 }
 
 
@@ -77,6 +88,21 @@ def evaluate_arrow(
     if isinstance(result, pa.ChunkedArray):
         result = result.combine_chunks() if result.num_chunks > 0 else pa.array([], type=pa.bool_())
     return pc.fill_null(result, False)
+
+
+def _to_float(value):
+    """Cast a pyarrow scalar/array to float64 if it's integer-typed.
+
+    Used to make `/` produce float division like Python's `/`.
+    """
+    if isinstance(value, pa.Scalar):
+        if pa.types.is_integer(value.type):
+            return pa.scalar(float(value.as_py()), type=pa.float64())
+        return value
+    # Array / ChunkedArray
+    if pa.types.is_integer(value.type):
+        return pc.cast(value, pa.float64())
+    return value
 
 
 def _eval(node, table):
@@ -135,5 +161,31 @@ def _eval(node, table):
     if isinstance(node, Not):
         operand = _eval(node.operand, table)
         return pc.invert(operand)
+
+    # ── Phase F2a ───────────────────────────────────────────────
+    if isinstance(node, ArithOp):
+        left = _eval(node.left, table)
+        right = _eval(node.right, table)
+        # Match Python's `/` semantics: int / int → float (not floor div).
+        # pc.divide on two int columns does integer division by default,
+        # which differs from python_backend (operator.truediv) and from
+        # what users expect in filter expressions.
+        if node.op == "/":
+            left = _to_float(left)
+            right = _to_float(right)
+        kernel = _ARITH_KERNELS[node.op]
+        return kernel(left, right)
+
+    if isinstance(node, LikeOp):
+        value = _eval(node.value, table)
+        # pc.match_like uses SQL LIKE syntax: % matches any sequence,
+        # _ matches any single character. The pattern is the literal
+        # value from the parser; pyarrow handles the rest.
+        return pc.match_like(value, node.pattern.value)
+
+    if isinstance(node, IsNullOp):
+        col = _eval(node.field, table)
+        result = pc.is_null(col)
+        return pc.invert(result) if node.negate else result
 
     raise TypeError(f"unknown AST node: {type(node).__name__}")

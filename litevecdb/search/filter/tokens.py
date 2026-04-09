@@ -54,8 +54,19 @@ class TokenKind(Enum):
     # Membership
     IN = "IN"
 
-    # Unary minus (parser handles whether it's unary or binary)
-    SUB = "-"
+    # Arithmetic (Phase F2a)
+    ADD = "+"
+    SUB = "-"          # also unary minus — parser disambiguates
+    MUL = "*"
+    DIV = "/"
+
+    # String pattern (Phase F2a)
+    LIKE = "LIKE"
+
+    # NULL tests (Phase F2a). Tokenized as separate IS / NULL keywords;
+    # the parser combines `IS NULL` and `IS NOT NULL` into IsNullOp.
+    IS = "IS"
+    NULL = "NULL"
 
     # Sentinel
     EOF = "EOF"
@@ -76,6 +87,10 @@ _KEYWORD_MAP = {
     "or": TokenKind.OR, "OR": TokenKind.OR,
     "not": TokenKind.NOT, "NOT": TokenKind.NOT,
     "in": TokenKind.IN, "IN": TokenKind.IN,
+    # Phase F2a additions
+    "like": TokenKind.LIKE, "LIKE": TokenKind.LIKE,
+    "is": TokenKind.IS, "IS": TokenKind.IS,
+    "null": TokenKind.NULL, "NULL": TokenKind.NULL,
 }
 
 # Boolean literals — only these 6 forms are accepted as bool.
@@ -121,6 +136,18 @@ def tokenize(source: str) -> List[Token]:
             continue
         if ch == "-":
             tokens.append(Token(TokenKind.SUB, "-", i))
+            i += 1
+            continue
+        if ch == "+":
+            tokens.append(Token(TokenKind.ADD, "+", i))
+            i += 1
+            continue
+        if ch == "*":
+            tokens.append(Token(TokenKind.MUL, "*", i))
+            i += 1
+            continue
+        if ch == "/":
+            tokens.append(Token(TokenKind.DIV, "/", i))
             i += 1
             continue
 

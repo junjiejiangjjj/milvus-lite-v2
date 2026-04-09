@@ -335,3 +335,78 @@ def test_complex_with_parens_and_negation():
         TokenKind.RPAREN,
         TokenKind.EOF,
     ]
+
+
+# ---------------------------------------------------------------------------
+# Phase F2a — arithmetic, LIKE, IS NULL
+# ---------------------------------------------------------------------------
+
+def test_arithmetic_operators():
+    assert kinds("1 + 2 - 3 * 4 / 5") == [
+        TokenKind.INT, TokenKind.ADD,
+        TokenKind.INT, TokenKind.SUB,
+        TokenKind.INT, TokenKind.MUL,
+        TokenKind.INT, TokenKind.DIV,
+        TokenKind.INT,
+        TokenKind.EOF,
+    ]
+
+
+def test_arithmetic_with_field():
+    assert kinds("age + 1 > 20") == [
+        TokenKind.IDENT, TokenKind.ADD, TokenKind.INT,
+        TokenKind.GT, TokenKind.INT,
+        TokenKind.EOF,
+    ]
+
+
+@pytest.mark.parametrize("text", ["like", "LIKE"])
+def test_like_keyword(text):
+    tokens = tokenize(text)
+    assert tokens[0].kind == TokenKind.LIKE
+
+
+@pytest.mark.parametrize("text", ["is", "IS"])
+def test_is_keyword(text):
+    tokens = tokenize(text)
+    assert tokens[0].kind == TokenKind.IS
+
+
+@pytest.mark.parametrize("text", ["null", "NULL"])
+def test_null_keyword(text):
+    tokens = tokenize(text)
+    assert tokens[0].kind == TokenKind.NULL
+
+
+def test_is_null_two_tokens():
+    """`is null` is two tokens; parser will combine."""
+    assert kinds("title is null") == [
+        TokenKind.IDENT, TokenKind.IS, TokenKind.NULL, TokenKind.EOF,
+    ]
+
+
+def test_is_not_null_three_tokens():
+    assert kinds("title is not null") == [
+        TokenKind.IDENT, TokenKind.IS, TokenKind.NOT, TokenKind.NULL,
+        TokenKind.EOF,
+    ]
+
+
+def test_like_pattern_string():
+    tokens = tokenize("title like 'AI%'")
+    assert tokens[0].kind == TokenKind.IDENT
+    assert tokens[1].kind == TokenKind.LIKE
+    assert tokens[2].kind == TokenKind.STRING
+    assert tokens[2].value == "AI%"
+
+
+def test_like_case_insensitive():
+    """LIKE / like are both keywords."""
+    assert tokenize("a LIKE 'b%'")[1].kind == TokenKind.LIKE
+
+
+def test_arithmetic_token_positions():
+    tokens = tokenize("a + b * c")
+    assert tokens[0].pos == 0  # a
+    assert tokens[1].pos == 2  # +
+    assert tokens[3].pos == 6  # *

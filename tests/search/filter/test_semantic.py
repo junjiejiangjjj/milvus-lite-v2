@@ -248,3 +248,102 @@ def test_fields_used_carry_dtype(schema):
     c = compile_str("age > 18", schema)
     assert c.fields["age"].dtype == DataType.INT64
     assert c.fields["age"].sem_type == "int"
+
+
+# ---------------------------------------------------------------------------
+# Phase F2a — arithmetic
+# ---------------------------------------------------------------------------
+
+def test_arith_int_plus_int(schema):
+    compile_str("age + 1 > 20", schema)
+
+
+def test_arith_int_plus_float(schema):
+    compile_str("age + 0.5 > 20", schema)
+
+
+def test_arith_float_only(schema):
+    compile_str("score * 2.0 > 1.5", schema)
+
+
+def test_arith_with_string_rejected(schema):
+    with pytest.raises(FilterTypeError, match="numeric"):
+        compile_str("category + 1 > 0", schema)
+
+
+def test_arith_with_bool_rejected(schema):
+    with pytest.raises(FilterTypeError, match="numeric"):
+        compile_str("active + 1 > 0", schema)
+
+
+def test_arith_unary_minus_field(schema):
+    compile_str("-age > -50", schema)
+
+
+def test_arith_division_promotes_to_float(schema):
+    """`/` always returns float, so `int / int >= int` is allowed
+    via int→float promotion on the RHS."""
+    compile_str("age / 2 >= 10", schema)
+
+
+def test_arith_in_complex(schema):
+    compile_str("age * 2 + 1 < 100 and score - 0.1 > 0", schema)
+
+
+# ---------------------------------------------------------------------------
+# Phase F2a — LIKE
+# ---------------------------------------------------------------------------
+
+def test_like_string_field(schema):
+    compile_str("title like 'AI%'", schema)
+
+
+def test_like_int_field_rejected(schema):
+    with pytest.raises(FilterTypeError, match="string"):
+        compile_str("age like 'pattern'", schema)
+
+
+def test_like_bool_field_rejected(schema):
+    with pytest.raises(FilterTypeError, match="string"):
+        compile_str("active like 'x'", schema)
+
+
+def test_like_in_compound(schema):
+    compile_str("title like 'AI%' and age > 18", schema)
+
+
+# ---------------------------------------------------------------------------
+# Phase F2a — IS NULL
+# ---------------------------------------------------------------------------
+
+def test_is_null_nullable_field(schema):
+    """title is nullable, IS NULL works."""
+    compile_str("title is null", schema)
+
+
+def test_is_null_non_nullable_field(schema):
+    """IS NULL is also allowed on non-nullable fields (always False)."""
+    compile_str("age is null", schema)
+
+
+def test_is_not_null(schema):
+    compile_str("title is not null", schema)
+
+
+def test_is_null_in_complex(schema):
+    compile_str("title is not null and age > 18 and category in ['tech']", schema)
+
+
+def test_is_null_unknown_field(schema):
+    with pytest.raises(FilterFieldError):
+        compile_str("nonexistent is null", schema)
+
+
+def test_is_null_reserved_field(schema):
+    with pytest.raises(FilterFieldError, match="reserved"):
+        compile_str("_seq is null", schema)
+
+
+def test_is_null_vector_field(schema):
+    with pytest.raises(FilterTypeError, match="float_vector"):
+        compile_str("vec is null", schema)

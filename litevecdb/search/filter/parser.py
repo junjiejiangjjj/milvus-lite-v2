@@ -27,6 +27,7 @@ from typing import List, Optional
 
 from litevecdb.search.filter.ast import (
     And,
+    ArithOp,
     BoolLit,
     CmpOp,
     Expr,
@@ -34,6 +35,8 @@ from litevecdb.search.filter.ast import (
     FloatLit,
     InOp,
     IntLit,
+    IsNullOp,
+    LikeOp,
     ListLit,
     Literal,
     Not,
@@ -115,23 +118,23 @@ class Parser:
         return self.parse_cmp()
 
     def parse_cmp(self) -> Expr:
-        """prec 4: comparisons + IN.
+        """prec 4: comparisons + IN + LIKE + IS NULL.
 
-        After parsing the LHS primary/unary, loop on comparison ops to
-        produce left-associative chaining (`a == b == c` becomes
-        `(a == b) == c`). Chained comparisons are parse-accepted; the
-        semantic checker rejects them with a precise type error
-        ("left side is bool, right side is int").
-
-        After zero-or-more cmp ops, also check for IN / NOT IN.
+        After parsing the LHS additive expression, dispatch on the
+        next token:
+            - cmp op  → CmpOp (left-assoc, chaining parse-accepted)
+            - in      → InOp
+            - not in  → InOp(negate=True)
+            - LIKE    → LikeOp
+            - IS NULL / IS NOT NULL → IsNullOp
         """
-        left = self.parse_unary()
+        left = self.parse_add()
 
         while True:
             peek = self._peek()
             if peek.kind in _CMP_KINDS:
                 op_tok = self._consume()
-                right = self.parse_unary()
+                right = self.parse_add()
                 left = CmpOp(
                     op=_CMP_TEXT[op_tok.kind],
                     left=left,
@@ -147,9 +150,78 @@ class Parser:
                 if self.pos + 1 < len(self.tokens) and self.tokens[self.pos + 1].kind == TokenKind.IN:
                     self._consume()  # NOT
                     return self._parse_in_tail(left, negate=True)
+            if peek.kind == TokenKind.LIKE:
+                return self._parse_like_tail(left)
+            if peek.kind == TokenKind.IS:
+                return self._parse_is_null_tail(left)
             break
 
         return left
+
+    def parse_add(self) -> Expr:
+        """prec 5: additive (+, -) — left-associative."""
+        left = self.parse_mul()
+        while self._peek().kind in (TokenKind.ADD, TokenKind.SUB):
+            op_tok = self._consume()
+            right = self.parse_mul()
+            op = "+" if op_tok.kind == TokenKind.ADD else "-"
+            left = ArithOp(op=op, left=left, right=right, pos=op_tok.pos)
+        return left
+
+    def parse_mul(self) -> Expr:
+        """prec 6: multiplicative (*, /) — left-associative."""
+        left = self.parse_unary()
+        while self._peek().kind in (TokenKind.MUL, TokenKind.DIV):
+            op_tok = self._consume()
+            right = self.parse_unary()
+            op = "*" if op_tok.kind == TokenKind.MUL else "/"
+            left = ArithOp(op=op, left=left, right=right, pos=op_tok.pos)
+        return left
+
+    def _parse_like_tail(self, left: Expr) -> Expr:
+        """`<expr> LIKE 'pattern'` — parse the LIKE tail."""
+        like_tok = self._consume()  # LIKE
+        peek = self._peek()
+        if peek.kind != TokenKind.STRING:
+            raise FilterParseError(
+                "LIKE requires a string literal pattern",
+                self.source, peek.pos,
+                hint="example: title like 'AI%'",
+            )
+        pattern_tok = self._consume()
+        return LikeOp(
+            value=left,
+            pattern=StringLit(value=pattern_tok.value, pos=pattern_tok.pos),
+            pos=like_tok.pos,
+        )
+
+    def _parse_is_null_tail(self, left: Expr) -> Expr:
+        """`<field> IS NULL` or `<field> IS NOT NULL`.
+
+        IS NULL only applies to a FieldRef LHS. Anything else is a
+        compile-time error in semantic.py — but we already enforce the
+        FieldRef constraint here at parse time for a more direct error.
+        """
+        is_tok = self._consume()  # IS
+        if not isinstance(left, FieldRef):
+            raise FilterParseError(
+                "left side of 'is null' must be a field reference",
+                self.source, is_tok.pos,
+                hint="example: title is null",
+            )
+        negate = False
+        if self._peek().kind == TokenKind.NOT:
+            self._consume()
+            negate = True
+        if self._peek().kind != TokenKind.NULL:
+            tok = self._peek()
+            expected = "'not null'" if negate else "'null'"
+            raise FilterParseError(
+                f"expected {expected} after 'is', got {tok.text!r}",
+                self.source, tok.pos,
+            )
+        self._consume()  # NULL
+        return IsNullOp(field=left, negate=negate, pos=is_tok.pos)
 
     def _parse_in_tail(self, left: Expr, negate: bool) -> Expr:
         """Parse the `in [...]` tail. *left* must be a FieldRef."""
@@ -171,23 +243,23 @@ class Parser:
         return InOp(field=left, values=list_lit, negate=negate, pos=in_tok.pos)
 
     def parse_unary(self) -> Expr:
-        """prec 5: unary minus (prefix)."""
+        """prec 7: unary minus (prefix)."""
         if self._peek().kind == TokenKind.SUB:
             sub_tok = self._consume()
             operand = self.parse_unary()
-            # Constant-fold unary minus on int/float literals to avoid
-            # creating an extra wrapper node — also keeps the AST
-            # comparable to a literal-only AST.
+            # Constant-fold unary minus on int/float literals to keep
+            # the AST minimal and avoid generating ArithOp(-, 0, x) noise.
             if isinstance(operand, IntLit):
                 return IntLit(value=-operand.value, pos=sub_tok.pos)
             if isinstance(operand, FloatLit):
                 return FloatLit(value=-operand.value, pos=sub_tok.pos)
-            # No general arithmetic in F1, so a unary minus on a
-            # non-literal is meaningless.
-            raise FilterParseError(
-                "unary '-' is only allowed on numeric literals in Phase F1",
-                self.source, sub_tok.pos,
-                hint="arithmetic expressions will be supported in Phase F2",
+            # General unary minus: ArithOp(-, 0, operand). The semantic
+            # checker accepts this once the operand is numeric.
+            return ArithOp(
+                op="-",
+                left=IntLit(value=0, pos=sub_tok.pos),
+                right=operand,
+                pos=sub_tok.pos,
             )
         return self.parse_primary()
 

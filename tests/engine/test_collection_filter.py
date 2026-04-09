@@ -390,3 +390,107 @@ def test_filter_works_across_restart(tmp_path, schema):
     assert len(out) == 1
     assert out[0]["id"] == "a"
     col2.close()
+
+
+# ===========================================================================
+# Phase F2a — arithmetic, LIKE, IS NULL through Collection
+# ===========================================================================
+
+def test_search_with_arithmetic(col):
+    _populate(col)
+    # age + 1 > 25  matches age >= 25 → b(25), c(30), d(50), e(70)
+    results = col.search(
+        [[1.0, 0.0, 0.0, 0.0]], top_k=10, metric_type="L2",
+        expr="age + 1 > 25",
+    )
+    [hits] = results
+    ids = {h["id"] for h in hits}
+    assert ids == {"b", "c", "d", "e"}
+
+
+def test_query_with_arithmetic(col):
+    _populate(col)
+    out = col.query("age * 2 >= 50")
+    ids = {r["id"] for r in out}
+    # 2*age >= 50 → age >= 25 → b, c, d, e
+    assert ids == {"b", "c", "d", "e"}
+
+
+def test_query_with_division(col):
+    _populate(col)
+    out = col.query("age / 2 > 12")
+    ids = {r["id"] for r in out}
+    # age/2 > 12 → age > 24 → b(25), c(30), d(50), e(70)
+    assert ids == {"b", "c", "d", "e"}
+
+
+def test_query_with_unary_minus(col):
+    _populate(col)
+    out = col.query("-age < -25")
+    ids = {r["id"] for r in out}
+    # -age < -25 → age > 25 → c, d, e
+    assert ids == {"c", "d", "e"}
+
+
+def test_query_with_like_prefix(col):
+    _populate(col)
+    out = col.query("title like 'a%'")
+    ids = {r["id"] for r in out}
+    # titles starting with 'a': b='ai', e='ai'
+    assert ids == {"b", "e"}
+
+
+def test_query_with_like_contains(col):
+    _populate(col)
+    out = col.query("title like '%i%'")
+    ids = {r["id"] for r in out}
+    # titles containing 'i': a='intro', b='ai', e='ai'
+    assert ids == {"a", "b", "e"}
+
+
+def test_query_with_like_single_char(col):
+    _populate(col)
+    out = col.query("title like '_i'")
+    ids = {r["id"] for r in out}
+    # 2-char titles ending with 'i': b='ai', e='ai'
+    assert ids == {"b", "e"}
+
+
+def test_query_with_is_null(tmp_path, schema):
+    """Need to insert nullable values to test IS NULL."""
+    col = Collection("c", str(tmp_path / "d"), schema)
+    col.insert([
+        {"id": "with", "vec": [0.5, 0.25, 0.125, 0.75], "age": 10,
+         "title": "hello", "score": 0.5, "active": True, "category": "tech"},
+        {"id": "without", "vec": [0.5, 0.25, 0.125, 0.75], "age": 20,
+         "score": 0.5, "active": True, "category": "tech"},  # title omitted → null
+    ])
+    out = col.query("title is null")
+    ids = {r["id"] for r in out}
+    assert ids == {"without"}
+
+    out = col.query("title is not null")
+    ids = {r["id"] for r in out}
+    assert ids == {"with"}
+    col.close()
+
+
+def test_query_with_complex_f2a(col):
+    _populate(col)
+    out = col.query("age + 1 > 20 and title like '%i%'")
+    ids = {r["id"] for r in out}
+    # age+1 > 20 → age >= 20 → b,c,d,e
+    # AND title like '%i%' → b='ai', e='ai' (and a='intro' but a has age=18)
+    assert ids == {"b", "e"}
+
+
+def test_query_arithmetic_with_string_field_rejected(col):
+    _populate(col)
+    with pytest.raises(FilterTypeError, match="numeric"):
+        col.query("category + 1 > 0")
+
+
+def test_query_like_on_int_rejected(col):
+    _populate(col)
+    with pytest.raises(FilterTypeError, match="string"):
+        col.query("age like '1%'")
