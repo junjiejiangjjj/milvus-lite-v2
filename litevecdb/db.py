@@ -100,7 +100,9 @@ class LiteVecDB:
         validate_schema(schema)
 
         if self.has_collection(name):
-            raise CollectionAlreadyExistsError(name)
+            raise CollectionAlreadyExistsError(
+                f"collection {name!r} already exists"
+            )
 
         col_dir = self._collection_dir(name)
         os.makedirs(col_dir, exist_ok=False)
@@ -120,7 +122,9 @@ class LiteVecDB:
         if name in self._collections:
             return self._collections[name]
         if not self.has_collection(name):
-            raise CollectionNotFoundError(name)
+            raise CollectionNotFoundError(
+                f"collection {name!r} does not exist"
+            )
 
         col_dir = self._collection_dir(name)
         _name, schema = load_schema(os.path.join(col_dir, SCHEMA_FILENAME))
@@ -132,7 +136,9 @@ class LiteVecDB:
         """Close and delete a Collection. Raises if it does not exist."""
         self._check_open()
         if not self.has_collection(name):
-            raise CollectionNotFoundError(name)
+            raise CollectionNotFoundError(
+                f"collection {name!r} does not exist"
+            )
 
         # Close the cached instance first so its WAL writers release
         # any open file handles before we rmtree the directory.

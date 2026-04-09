@@ -21,19 +21,28 @@ Implementation discipline (from grpc-adapter-design.md §15):
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import grpc
-from pymilvus.grpc_gen import common_pb2, milvus_pb2, milvus_pb2_grpc
+from pymilvus.grpc_gen import common_pb2, milvus_pb2, milvus_pb2_grpc, schema_pb2
+
+from litevecdb.adapter.grpc.errors import (
+    SUCCESS as _SUCCESS,
+    UNEXPECTED_ERROR as _UNEXPECTED_ERROR,
+    success_status_kwargs,
+    to_status_kwargs,
+)
+from litevecdb.adapter.grpc.translators.schema import (
+    litevecdb_to_milvus_schema,
+    milvus_to_litevecdb_schema,
+)
+from litevecdb.exceptions import LiteVecDBError
 
 if TYPE_CHECKING:
     from litevecdb.db import LiteVecDB
 
-
-# Milvus ErrorCode constants we use directly (the full enum lives in
-# pymilvus.grpc_gen.common_pb2.ErrorCode but we only need a few here).
-_SUCCESS = 0
-_UNEXPECTED_ERROR = 1
+logger = logging.getLogger(__name__)
 
 
 class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
@@ -88,6 +97,87 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             isHealthy=True,
             reasons=[],
         )
+
+    # ── Collection lifecycle (Phase 10.2) ───────────────────────
+
+    def CreateCollection(self, request, context):
+        """Decode the schema bytes blob, validate, then call
+        ``LiteVecDB.create_collection``."""
+        try:
+            proto_schema = schema_pb2.CollectionSchema()
+            proto_schema.ParseFromString(request.schema)
+            litevecdb_schema = milvus_to_litevecdb_schema(proto_schema)
+            self._db.create_collection(request.collection_name, litevecdb_schema)
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("CreateCollection failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def DropCollection(self, request, context):
+        try:
+            self._db.drop_collection(request.collection_name)
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("DropCollection failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def HasCollection(self, request, context):
+        try:
+            exists = self._db.has_collection(request.collection_name)
+            return milvus_pb2.BoolResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                value=exists,
+            )
+        except Exception as e:
+            logger.exception("HasCollection failed: %s", e)
+            return milvus_pb2.BoolResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+                value=False,
+            )
+
+    def DescribeCollection(self, request, context):
+        """Return the collection's schema + basic stats. The Phase 9
+        Collection.describe() output is rebuilt into Milvus's
+        DescribeCollectionResponse shape."""
+        try:
+            col = self._db.get_collection(request.collection_name)
+            proto_schema = litevecdb_to_milvus_schema(col.name, col.schema)
+            return milvus_pb2.DescribeCollectionResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                schema=proto_schema,
+                collection_name=col.name,
+                shards_num=1,
+                num_partitions=len(col.list_partitions()),
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.DescribeCollectionResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("DescribeCollection failed: %s", e)
+            return milvus_pb2.DescribeCollectionResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    def ShowCollections(self, request, context):
+        """Return the list of collection names. Milvus's response also
+        carries timestamps and IDs which we don't track — those slots
+        stay empty."""
+        try:
+            names = self._db.list_collections()
+            return milvus_pb2.ShowCollectionsResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                collection_names=names,
+            )
+        except Exception as e:
+            logger.exception("ShowCollections failed: %s", e)
+            return milvus_pb2.ShowCollectionsResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
 
     # ── Helpers (used by Phase 10.2+ implementations) ───────────
 

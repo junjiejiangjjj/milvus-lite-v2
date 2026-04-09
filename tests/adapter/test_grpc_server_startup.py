@@ -77,12 +77,14 @@ def test_get_version_returns_litevecdb_string(grpc_server):
 def test_unimplemented_rpc_raises_clean_error(milvus_client):
     """Calling an RPC we haven't implemented yet should raise a
     pymilvus exception that wraps gRPC's UNIMPLEMENTED status, NOT
-    crash the connection or silent-fail."""
+    crash the connection or silent-fail.
+
+    We use ``rename_collection`` because it's intentionally
+    UNIMPLEMENTED in Phase 10 — schema mutations aren't in scope.
+    Most other "destructive" RPCs are also still unimplemented as
+    of Phase 10.2."""
     with pytest.raises(Exception) as exc_info:
-        # list_collections → ShowCollections RPC, not implemented yet
-        milvus_client.list_collections()
-    # The error string should mention the gRPC UNIMPLEMENTED code or
-    # the "Method not implemented" details from the base servicer.
+        milvus_client.rename_collection("a", "b")
     assert "implement" in str(exc_info.value).lower()
 
 
@@ -91,9 +93,9 @@ def test_connection_survives_unimplemented_call(grpc_server, milvus_client):
     next call should still go through."""
     port, _db = grpc_server
 
-    # Trigger an UNIMPLEMENTED error
+    # Trigger an UNIMPLEMENTED error via a still-unimplemented RPC
     with pytest.raises(Exception):
-        milvus_client.list_collections()
+        milvus_client.rename_collection("a", "b")
 
     # Connection-level RPCs should still work on a fresh connection
     from pymilvus import connections, utility
