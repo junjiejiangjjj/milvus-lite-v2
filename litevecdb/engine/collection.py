@@ -475,6 +475,16 @@ class Collection:
                 break
         return out
 
+    def _index_dir(self, partition: str) -> str:
+        """Phase 9.4: canonical path for a partition's index sidecar dir.
+
+        Layout: ``data_dir/partitions/<partition>/indexes/``
+
+        The directory is created on demand by build_or_load_index when
+        the first .idx is written.
+        """
+        return os.path.join(self._data_dir, "partitions", partition, "indexes")
+
     def _require_loaded(self) -> None:
         """Phase 9.3 guard: search/get/query require loaded state.
 
@@ -672,10 +682,8 @@ class Collection:
         self._load_state = "released"
 
     def drop_index(self, field_name: Optional[str] = None) -> None:
-        """Remove the IndexSpec and release any in-memory segment indexes.
-
-        Phase 9.3 only clears the spec + in-memory state. Phase 9.4 will
-        also delete on-disk .idx files.
+        """Remove the IndexSpec, release in-memory indexes, and delete
+        on-disk .idx files.
 
         Args:
             field_name: optional; if given, must match the existing
@@ -684,6 +692,11 @@ class Collection:
 
         Raises:
             IndexNotFoundError: no index has been created
+
+        Phase 9.4: also walks every partition's ``indexes/`` directory
+        and deletes the .idx files matching the dropped index_type.
+        Other index_type files (if any — currently impossible since we
+        only support one index per Collection) are left alone.
         """
         if self._index_spec is None:
             raise IndexNotFoundError("no index to drop")
@@ -696,6 +709,22 @@ class Collection:
         # Release in-memory indexes.
         for seg in self._segment_cache.values():
             seg.release_index()
+
+        # Phase 9.4: delete on-disk .idx files matching this index_type.
+        # We do this BEFORE clearing self._index_spec so we still know
+        # the index_type for the path computation.
+        suffix = f".{self._index_spec.index_type.lower()}.idx"
+        for partition in self._manifest.list_partitions():
+            index_dir = self._index_dir(partition)
+            if not os.path.exists(index_dir):
+                continue
+            for entry in os.listdir(index_dir):
+                if entry.endswith(suffix):
+                    try:
+                        os.remove(os.path.join(index_dir, entry))
+                    except OSError:
+                        pass  # best effort — drop_index should not fail
+                              # for filesystem hiccups
 
         self._index_spec = None
         self._manifest.set_index_spec(None)
@@ -713,14 +742,16 @@ class Collection:
         return self._index_spec.to_dict() if self._index_spec is not None else None
 
     def load(self) -> None:
-        """Move to the loaded state. Build a VectorIndex per segment if
-        an IndexSpec exists; idempotent if already loaded.
+        """Move to the loaded state. Build or load a VectorIndex per
+        segment if an IndexSpec exists; idempotent if already loaded.
 
-        Phase 9.3 always uses BruteForceIndex (Phase 9.5 will route via
-        the factory to FaissHnswIndex when available). Building a
-        BruteForceIndex is essentially free (just stores a reference),
-        so the only observable effect of load() in Phase 9.3 is the
-        state-machine transition + an index attached to every segment.
+        Phase 9.4: indexes are persisted to disk. The first load() after
+        a fresh create_index builds them and writes .idx sidecars; every
+        subsequent load() (including after process restart) reads them
+        back via Segment.build_or_load_index, so cold-start is fast.
+
+        Phase 9.3-9.4 only routes to BruteForceIndex; Phase 9.5 will
+        plug in the factory + FaissHnswIndex.
 
         Raises any exception encountered during build, with the state
         machine rolled back to released.
@@ -733,13 +764,9 @@ class Collection:
                 for seg in self._segment_cache.values():
                     if seg.num_rows == 0:
                         continue
-                    # Phase 9.3: BruteForceIndex only. Phase 9.5 will
-                    # route through index/factory.py to pick FAISS HNSW
-                    # / IVF / etc based on spec.index_type.
-                    idx = BruteForceIndex.build(
-                        seg.vectors, self._index_spec.metric_type
+                    seg.build_or_load_index(
+                        self._index_spec, self._index_dir(seg.partition)
                     )
-                    seg.attach_index(idx)
             self._load_state = "loaded"
         except Exception:
             self._load_state = "released"
@@ -914,6 +941,70 @@ class Collection:
 
         # ── refresh segment cache (picks up flushed + compacted) ─
         self._refresh_segment_cache()
+
+        # ── Phase 9.4: index hook ─────────────────────────────────
+        # If the Collection is loaded, attach an index to any newly
+        # created segments. This covers BOTH the flush case (new
+        # data parquet → new index) AND the compaction case (new
+        # merged segment → new index; the old segments and their
+        # .idx files were already evicted in _refresh_segment_cache
+        # via _cleanup_orphan_index_files below).
+        self._cleanup_orphan_index_files()
+        self._ensure_loaded_segments_indexed()
+
+    def _ensure_loaded_segments_indexed(self) -> None:
+        """Phase 9.4: post-flush / post-compaction index hook.
+
+        For every segment in the cache that lacks an attached index,
+        build/load it. No-op when:
+            - Collection has no IndexSpec (nothing to build)
+            - Collection is not in 'loaded' state (the user explicitly
+              released, so we don't bring it back)
+        Already-attached segments are skipped by build_or_load_index.
+        """
+        if self._load_state != "loaded" or self._index_spec is None:
+            return
+        for seg in self._segment_cache.values():
+            if seg.index is None and seg.num_rows > 0:
+                seg.build_or_load_index(
+                    self._index_spec, self._index_dir(seg.partition)
+                )
+
+    def _cleanup_orphan_index_files(self) -> None:
+        """Phase 9.4: delete .idx files whose source segment is gone.
+
+        Called from _trigger_flush after _refresh_segment_cache (which
+        evicts compaction-removed segments). The cleanup compares the
+        on-disk indexes/ directories against the manifest's data file
+        list and removes any .idx whose stem doesn't match a current
+        data file.
+
+        This is the architectural safety net for invariant §11
+        (index 1:1 bound to data; lifecycles strictly aligned).
+        """
+        if not self._index_spec:
+            # Without an index spec we don't know what suffix to clean.
+            # Leftover files (e.g. from a previous create_index +
+            # drop_index) are handled by drop_index itself.
+            return
+
+        suffix = f".{self._index_spec.index_type.lower()}.idx"
+        for partition, data_files in self._manifest.get_all_data_files().items():
+            index_dir = self._index_dir(partition)
+            if not os.path.exists(index_dir):
+                continue
+            valid_stems = {
+                os.path.splitext(os.path.basename(df))[0] for df in data_files
+            }
+            for entry in os.listdir(index_dir):
+                if not entry.endswith(suffix):
+                    continue
+                stem = entry[: -len(suffix)]
+                if stem not in valid_stems:
+                    try:
+                        os.remove(os.path.join(index_dir, entry))
+                    except OSError:
+                        pass
 
     def _refresh_segment_cache(self) -> None:
         """Reconcile self._segment_cache with the manifest's data files.

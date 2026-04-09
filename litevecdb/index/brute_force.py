@@ -139,13 +139,19 @@ class BruteForceIndex:
     # ── Persistence ─────────────────────────────────────────────
 
     def save(self, path: str) -> None:
-        """Save vectors as a .npy file.
+        """Save vectors to *path* in NPY format.
 
-        np.save adds a small header carrying dtype + shape so the load
-        path doesn't need explicit dim/metric — only metric is supplied
-        externally because it's a semantic property, not stored data.
+        Uses an explicit file handle (np.save would otherwise auto-
+        append .npy if the path lacks that extension, which would break
+        Phase 9.4's strict ``<segment_stem>.<index_type>.idx`` naming
+        convention).
+
+        The NPY header carries dtype + shape so the load path doesn't
+        need explicit dim/metric — only metric is supplied externally
+        because it's a semantic property, not stored data.
         """
-        np.save(path, self._vectors, allow_pickle=False)
+        with open(path, "wb") as f:
+            np.save(f, self._vectors, allow_pickle=False)
 
     @classmethod
     def load(cls, path: str, metric: str, dim: int) -> "BruteForceIndex":
@@ -155,11 +161,8 @@ class BruteForceIndex:
         loud error (not a silent reshape) since it indicates the .idx
         file is paired with the wrong segment.
         """
-        # Try the path as-is first; numpy may add .npy if missing.
-        try:
-            vectors = np.load(path, allow_pickle=False)
-        except FileNotFoundError:
-            vectors = np.load(path + ".npy", allow_pickle=False)
+        with open(path, "rb") as f:
+            vectors = np.load(f, allow_pickle=False)
         if vectors.ndim != 2:
             raise ValueError(
                 f"loaded index has shape {vectors.shape}, expected (N, dim)"

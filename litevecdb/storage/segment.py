@@ -33,6 +33,7 @@ from litevecdb.storage.data_file import read_data_file
 
 if TYPE_CHECKING:
     from litevecdb.index.protocol import VectorIndex
+    from litevecdb.index.spec import IndexSpec
 
 
 class Segment:
@@ -131,7 +132,7 @@ class Segment:
             result[name] = self.table.column(name)[row_idx].as_py()
         return result
 
-    # ── index lifecycle (Phase 9.2) ─────────────────────────────
+    # ── index lifecycle (Phase 9.2 / 9.4) ───────────────────────
 
     def attach_index(self, index: "VectorIndex") -> None:
         """Attach a built or loaded VectorIndex to this segment.
@@ -150,6 +151,61 @@ class Segment:
         drop_index. Calling on a segment with no index is a no-op.
         """
         self.index = None
+
+    def index_file_path(self, index_dir: str, index_type: str) -> str:
+        """Return the canonical .idx path for this segment.
+
+        Naming convention (Phase 9.4 — architectural invariant §11):
+            ``<index_dir>/<segment_filename_stem>.<index_type_lower>.idx``
+
+        Example: data file ``data_000001_000500.parquet`` with index
+        type ``HNSW`` → ``indexes/data_000001_000500.hnsw.idx``.
+
+        The 1:1 stem correspondence is what makes orphan cleanup at
+        recovery time work — given an .idx, we can recover the source
+        data file's stem just by stripping the suffix and looking it
+        up in the manifest.
+        """
+        import os
+        stem = os.path.splitext(os.path.basename(self.file_path))[0]
+        return os.path.join(index_dir, f"{stem}.{index_type.lower()}.idx")
+
+    def build_or_load_index(
+        self,
+        spec: "IndexSpec",  # type: ignore[name-defined]  # forward
+        index_dir: str,
+    ) -> None:
+        """Phase 9.4: ensure this segment has an attached index.
+
+        - If a matching .idx file exists in *index_dir*, load it.
+        - Else, build a fresh VectorIndex from the segment's vectors
+          and persist it for next time.
+
+        Phase 9.4 only routes to BruteForceIndex (no factory yet —
+        that comes in 9.5 with FAISS). The path uses local imports to
+        avoid pulling the index package up to the storage layer.
+
+        Idempotent: if the segment already has an index attached, this
+        is a no-op (the on-disk file is assumed to be in sync).
+        """
+        if self.index is not None:
+            return
+        if self.num_rows == 0:
+            return
+
+        import os
+        from litevecdb.index.brute_force import BruteForceIndex
+
+        path = self.index_file_path(index_dir, spec.index_type)
+
+        if os.path.exists(path):
+            idx = BruteForceIndex.load(path, spec.metric_type, self.vector_dim)
+        else:
+            idx = BruteForceIndex.build(self.vectors, spec.metric_type)
+            os.makedirs(index_dir, exist_ok=True)
+            idx.save(path)
+
+        self.attach_index(idx)
 
     # ── introspection ───────────────────────────────────────────
 

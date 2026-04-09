@@ -173,6 +173,12 @@ def _cleanup_orphan_files(data_dir: str, manifest: "Manifest") -> None:
     """Remove Parquet files on disk that are NOT referenced by the manifest.
 
     Walks every partition's data/ and delta/ subdirectories.
+
+    Phase 9.4: also walks ``indexes/`` and removes any .idx whose
+    source data file (matched by filename stem) is no longer in the
+    manifest. This handles the case where a crash happens after
+    compaction wrote new segments but before the old indexes were
+    cleaned up.
     """
     partitions_root = os.path.join(data_dir, "partitions")
     if not os.path.exists(partitions_root):
@@ -184,6 +190,16 @@ def _cleanup_orphan_files(data_dir: str, manifest: "Manifest") -> None:
     referenced_delta: dict[str, set[str]] = {
         p: set(files) for p, files in manifest.get_all_delta_files().items()
     }
+    # For index orphan detection we need the bare stems (without the
+    # "data/" prefix and ".parquet" suffix) so we can compare against
+    # .idx file stems.
+    referenced_data_stems: dict[str, set[str]] = {}
+    for p, files in referenced_data.items():
+        stems: set[str] = set()
+        for rel in files:
+            stem = os.path.splitext(os.path.basename(rel))[0]
+            stems.add(stem)
+        referenced_data_stems[p] = stems
 
     for partition in os.listdir(partitions_root):
         partition_dir = os.path.join(partitions_root, partition)
@@ -215,5 +231,31 @@ def _cleanup_orphan_files(data_dir: str, manifest: "Manifest") -> None:
                     try:
                         os.remove(abs_path)
                         logger.info("recovery: removed orphan delta file %s", abs_path)
+                    except OSError:
+                        pass
+
+        # Phase 9.4: indexes subdir
+        index_subdir = os.path.join(partition_dir, "indexes")
+        if os.path.isdir(index_subdir):
+            valid_stems = referenced_data_stems.get(partition, set())
+            for fn in os.listdir(index_subdir):
+                # Index filename convention: <data_stem>.<index_type_lower>.idx
+                # The data stem is everything before the second-to-last dot.
+                # E.g. "data_000001_000050.brute_force.idx" → stem
+                # "data_000001_000050".
+                if not fn.endswith(".idx"):
+                    continue
+                base = fn[:-len(".idx")]  # strip ".idx"
+                # Now base is "data_000001_000050.brute_force" → split off
+                # the index_type tag.
+                stem, _dot, _index_type = base.rpartition(".")
+                if not stem:
+                    # Malformed name; remove defensively.
+                    stem = base
+                if stem not in valid_stems:
+                    abs_path = os.path.join(index_subdir, fn)
+                    try:
+                        os.remove(abs_path)
+                        logger.info("recovery: removed orphan index file %s", abs_path)
                     except OSError:
                         pass
