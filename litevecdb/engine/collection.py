@@ -31,7 +31,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pyarrow as pa
 
-from litevecdb.constants import ALL_PARTITIONS, DEFAULT_PARTITION, MEMTABLE_SIZE_LIMIT
+from litevecdb.constants import (
+    ALL_PARTITIONS,
+    DEFAULT_PARTITION,
+    FILTER_CACHE_SIZE,
+    MEMTABLE_SIZE_LIMIT,
+)
 from litevecdb.engine.compaction import CompactionManager
 from litevecdb.engine.flush import execute_flush
 from litevecdb.engine.operation import DeleteOp, InsertOp, Operation
@@ -148,6 +153,13 @@ class Collection:
 
         # ── 5. compaction manager ───────────────────────────────
         self._compaction_mgr = CompactionManager(data_dir, schema)
+
+        # ── 6. filter expression cache (Phase F2c) ──────────────
+        # LRU on (expr_string → CompiledExpr) — schema is implicit since
+        # the cache is per-Collection. Bounded by FILTER_CACHE_SIZE so
+        # adversarial / heavy expression diversity can't OOM.
+        from litevecdb.search.filter.cache import LRUCache
+        self._filter_cache: LRUCache = LRUCache(maxsize=FILTER_CACHE_SIZE)
 
     # ── public API ──────────────────────────────────────────────
 
@@ -431,13 +443,19 @@ class Collection:
         return out
 
     def _compile_filter(self, expr_str: str) -> "CompiledExpr":
-        """Parse + compile a filter expression against this Collection's schema.
+        """Parse + compile a filter expression, with LRU caching.
 
-        Phase F1: no caching. F2c will add an LRU cache keyed on
-        (schema_version, expr_str).
+        The cache is keyed only on the expression string because the
+        schema is implicit (this Collection's). Schema is immutable for
+        the lifetime of a Collection, so cached entries never go stale.
         """
+        cached = self._filter_cache.get(expr_str)
+        if cached is not None:
+            return cached
         from litevecdb.search.filter import compile_filter
-        return compile_filter(expr_str, self._schema)
+        compiled = compile_filter(expr_str, self._schema)
+        self._filter_cache.put(expr_str, compiled)
+        return compiled
 
     def _project_record(
         self,

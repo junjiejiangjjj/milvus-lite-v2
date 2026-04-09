@@ -16,3 +16,9 @@ WAL_DELTA_TEMPLATE = "wal_delta_{n:0{w}d}.arrow"
 # ── Partition ──
 DEFAULT_PARTITION = "_default"
 ALL_PARTITIONS = "_all"
+
+# ── Filter expression cache ──
+# Per-Collection LRU cache for compiled filter expressions. Phase F2c.
+# Most search workloads reuse a small set of expression strings — 256
+# is plenty for typical use and bounds memory at ~hundreds of KB.
+FILTER_CACHE_SIZE = 256

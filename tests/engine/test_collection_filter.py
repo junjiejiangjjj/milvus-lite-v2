@@ -662,3 +662,92 @@ def test_meta_complex_expression(col_dynamic):
     ids = {r["id"] for r in out}
     # b (news, prio 5), c (tech, prio 3)
     assert ids == {"b", "c"}
+
+
+# ===========================================================================
+# Phase F2c — filter expression cache
+# ===========================================================================
+
+def test_filter_cache_hit_returns_same_instance(col):
+    """Repeated _compile_filter on the same expression returns the same
+    CompiledExpr object — proves the cache is working."""
+    _populate(col)
+    first = col._compile_filter("age > 18")
+    second = col._compile_filter("age > 18")
+    assert first is second
+
+
+def test_filter_cache_distinct_expressions(col):
+    _populate(col)
+    a = col._compile_filter("age > 18")
+    b = col._compile_filter("age > 25")
+    assert a is not b
+    assert len(col._filter_cache) == 2
+
+
+def test_filter_cache_hits_recorded(col):
+    _populate(col)
+    col._compile_filter("age > 18")  # miss
+    col._compile_filter("age > 18")  # hit
+    col._compile_filter("age > 18")  # hit
+    assert col._filter_cache.hits == 2
+    assert col._filter_cache.misses == 1
+
+
+def test_filter_cache_through_search(col):
+    _populate(col)
+    col.search([[1.0, 0.0, 0.0, 0.0]], top_k=10, expr="age > 18")
+    col.search([[1.0, 0.0, 0.0, 0.0]], top_k=10, expr="age > 18")
+    col.search([[1.0, 0.0, 0.0, 0.0]], top_k=10, expr="age > 18")
+    assert col._filter_cache.hits == 2
+    assert col._filter_cache.misses == 1
+
+
+def test_filter_cache_through_query(col):
+    _populate(col)
+    col.query("category == 'tech'")
+    col.query("category == 'tech'")
+    assert col._filter_cache.hits == 1
+
+
+def test_filter_cache_through_get(col):
+    _populate(col)
+    col.get(["a"], expr="age > 0")
+    col.get(["a"], expr="age > 0")
+    assert col._filter_cache.hits == 1
+
+
+def test_filter_cache_lru_eviction(col):
+    """Force a small cache and verify LRU eviction."""
+    from litevecdb.search.filter.cache import LRUCache
+    col._filter_cache = LRUCache(maxsize=2)
+
+    _populate(col)
+    col._compile_filter("age > 1")
+    col._compile_filter("age > 2")
+    col._compile_filter("age > 3")  # evicts age > 1
+    assert len(col._filter_cache) == 2
+    assert "age > 1" not in col._filter_cache
+    assert "age > 2" in col._filter_cache
+    assert "age > 3" in col._filter_cache
+
+
+def test_filter_cache_does_not_cache_errors(col):
+    """A bad expression should never get cached and never poison subsequent
+    calls."""
+    _populate(col)
+    with pytest.raises(FilterParseError):
+        col._compile_filter("age >> 18")
+    # Cache should still be empty
+    assert len(col._filter_cache) == 0
+    # And a subsequent valid call works and gets cached.
+    col._compile_filter("age > 18")
+    assert len(col._filter_cache) == 1
+
+
+def test_filter_cache_meta_expression(col_dynamic):
+    """$meta expressions should also be cached."""
+    _populate_dynamic(col_dynamic)
+    col_dynamic._compile_filter('$meta["category"] == "tech"')
+    col_dynamic._compile_filter('$meta["category"] == "tech"')
+    assert col_dynamic._filter_cache.hits == 1
