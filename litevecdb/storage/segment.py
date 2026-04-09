@@ -14,16 +14,25 @@ Why pre-extract numpy arrays at load time:
 
 The original pa.Table is retained so that returning entity fields
 (non-vector columns) for top-k results doesn't require a second read.
+
+Phase 9.2: Each Segment may carry an attached VectorIndex. The index
+is bound 1:1 to the segment and shares its lifetime — when the segment
+is evicted (compaction, drop_partition), the index is dropped with it.
+The index is None until Collection.load() (or a flush/compaction hook)
+attaches one.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import numpy as np
 import pyarrow as pa
 
 from litevecdb.storage.data_file import read_data_file
+
+if TYPE_CHECKING:
+    from litevecdb.index.protocol import VectorIndex
 
 
 class Segment:
@@ -49,6 +58,7 @@ class Segment:
         "vectors",
         "table",
         "pk_to_row",
+        "index",
         "_pk_field",
         "_vector_field",
     )
@@ -73,6 +83,9 @@ class Segment:
         self.vectors = vectors
         self.table = table
         self.pk_to_row: Dict[Any, int] = {pk: i for i, pk in enumerate(pks)}
+        # Phase 9.2: optional attached VectorIndex. None until Collection
+        # load() (or flush/compaction hooks) attaches one.
+        self.index: Optional["VectorIndex"] = None
 
     # ── factory ─────────────────────────────────────────────────
 
@@ -117,6 +130,26 @@ class Segment:
                 continue
             result[name] = self.table.column(name)[row_idx].as_py()
         return result
+
+    # ── index lifecycle (Phase 9.2) ─────────────────────────────
+
+    def attach_index(self, index: "VectorIndex") -> None:
+        """Attach a built or loaded VectorIndex to this segment.
+
+        Idempotent — replaces any existing index. Used by:
+            - Collection.load() (Phase 9.3)
+            - flush.execute_flush() index hook (Phase 9.4)
+            - compaction.run_compaction() index hook (Phase 9.4)
+        """
+        self.index = index
+
+    def release_index(self) -> None:
+        """Drop the index reference. Memory is freed when GC collects.
+
+        Called by Collection.release() and during drop_partition /
+        drop_index. Calling on a segment with no index is a no-op.
+        """
+        self.index = None
 
     # ── introspection ───────────────────────────────────────────
 

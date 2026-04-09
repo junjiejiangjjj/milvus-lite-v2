@@ -56,6 +56,7 @@ from litevecdb.schema.validation import (
 )
 from litevecdb.search.assembler import assemble_candidates
 from litevecdb.search.executor import execute_search
+from litevecdb.search.executor_indexed import execute_search_with_index
 from litevecdb.storage.manifest import Manifest
 from litevecdb.storage.memtable import MemTable
 from litevecdb.storage.segment import Segment
@@ -368,27 +369,24 @@ class Collection:
 
         compiled_filter = self._compile_filter(expr) if expr else None
 
-        # Assemble candidates from segments + MemTable.
-        all_pks, all_seqs, all_vectors, all_records, filter_mask = assemble_candidates(
+        # Phase 9.2: index-aware path. Each segment uses its attached
+        # VectorIndex if present, else an ad-hoc BruteForceIndex; the
+        # memtable always uses brute force; results are merged across
+        # sources at the end. The differential test in
+        # tests/search/test_executor_with_index.py validates that this
+        # produces the same top-k as the legacy execute_search path
+        # for any (records, expr, partition) combination.
+        return execute_search_with_index(
+            query_vectors=q_arr,
             segments=self._segment_cache.values(),
             memtable=self._memtable,
-            vector_field=self._vector_name,
-            partition_names=partition_names,
-            filter_compiled=compiled_filter,
-        )
-
-        return execute_search(
-            query_vectors=q_arr,
-            all_pks=all_pks,
-            all_seqs=all_seqs,
-            all_vectors=all_vectors,
-            all_records=all_records,
             delta_index=self._delta_index,
             top_k=top_k,
             metric_type=metric_type,
             pk_field=self._pk_name,
             vector_field=self._vector_name,
-            filter_mask=filter_mask,
+            partition_names=partition_names,
+            compiled_filter=compiled_filter,
             output_fields=output_fields,
         )
 
