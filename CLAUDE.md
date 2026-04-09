@@ -4,19 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-LiteVecDB — a local embedded vector database, designed as a **local version of Milvus**. Pure Python, two-layer plan: an LSM-style internal engine (current focus) and a future gRPC adapter that will speak the Milvus protocol so pymilvus can connect directly.
+LiteVecDB — a local embedded vector database, designed as a **local version of Milvus**. Implementation is in Python. The code lives in `milvus-lite-v2/litevecdb/`.
 
-## Design Docs (read before implementing)
+## Repository Layout
 
-Authoritative design lives in `plan/`, written in **Chinese**:
-
-- **`plan/modules.md`** — file-by-file module breakdown with per-class/function signatures and responsibilities. Consult this before implementing or modifying any module.
-- **`plan/wal-design.md`** — deep-dive on WAL (Arrow IPC Streaming), segment architecture, and the search pipeline.
-- `plan/MVP.md`, `plan/write-pipeline.md`, `plan/research.md` — scope, write flow, and background research.
-
-These files are mirrored from the parent `lite-v2/` directory; treat `plan/` as the in-repo source of truth.
+- **Design docs** (root-level, written in Chinese): `MVP.md`, `write-pipeline.md`, `research.md`, `modules.md`, `wal-design.md`, `filter-design.md`, `roadmap.md`
+- **Code repo**: `milvus-lite-v2/` (git root) — design docs are also copied into `milvus-lite-v2/plan/`
+- **`modules.md`**: Authoritative module design — file-by-file breakdown with per-class/function signatures. Consult before implementing any module. §9.19-9.28 cover the Phase 8 filter subsystem.
+- **`wal-design.md`**: Deep-dive on WAL (Arrow IPC Streaming), segment architecture, and search pipeline.
+- **`filter-design.md`**: Deep-dive on the Phase 8 scalar filter subsystem (grammar, AST, three-stage compilation, dual backend).
+- **`roadmap.md`**: Phased implementation plan from current state through MVP. Phases 0-7 are landed; Phase 8 (filter) has subphases F1/F2/F3.
 
 ## Development Commands
+
+All commands run from `milvus-lite-v2/`:
 
 ```bash
 # Install in editable mode with dev deps
@@ -31,56 +32,57 @@ pytest tests/storage/test_wal.py
 # Run a specific test
 pytest tests/storage/test_wal.py::test_write_recover -v
 
-# Coverage
+# Run with coverage
 pytest --cov=litevecdb
 ```
 
-Build system: Hatchling. Runtime deps: `pyarrow>=15.0`, `numpy>=1.24`. Dev: `pytest>=8.0`, `pytest-cov>=5.0`. Requires Python >=3.10.
+Build system: Hatchling. Dependencies: `pyarrow>=15.0`, `numpy>=1.24`. Dev: `pytest>=8.0`, `pytest-cov>=5.0`. Requires Python >=3.10.
 
-## Code Layout (`litevecdb/`)
+## Architecture (Two-Layer)
 
-Four packages, layered bottom-up. **The codebase is in early implementation** — most modules are still stubs; consult `plan/modules.md` for the target shape before adding code.
+- **Internal Engine**: LSM-Tree style storage with PyArrow in-memory and Parquet on disk. This is the current design focus.
+- **gRPC Adapter Layer** (future): Sits on top of the engine to provide Milvus protocol compatibility, allowing pymilvus to connect directly.
 
-1. **`schema/`** — Data model & type system. Implemented: `types.py` (`DataType`, `FieldSchema`, `CollectionSchema`, `TYPE_MAP`) and `arrow_builder.py` (four schema builders: `data`, `delta`, `wal_data`, `wal_delta`).
-2. **`storage/`** — Persistence layer. Implemented: `wal.py` (Arrow IPC Streaming, dual-file with lazy init, recovery tolerant of truncated tail). Planned: MemTable, DataFile, DeltaLog, Manifest.
-3. **`engine/`** — Core orchestration. Planned: `Collection` (entry point, `_seq` allocation, CRUD, partition management), Flush pipeline, crash Recovery, Size-Tiered Compaction.
-4. **`search/`** — Vector retrieval. Planned: bitmap pipeline (dedup + delete filtering), distance functions (cosine/L2/IP via NumPy), top-k executor.
+## Code Structure (`litevecdb/`)
 
-Top-level: `db.py` (`LiteVecDB` — currently a stub for the multi-collection lifecycle), `constants.py` (size limits, file-name templates, partition sentinels), `exceptions.py`.
+Four packages, layered bottom-up:
 
-## Architectural Invariants
+1. **`schema/`** — Data model & type system. `DataType` enum, `FieldSchema`, `CollectionSchema`, record validation, Arrow schema builders (4 variants: data/delta/wal_data/wal_delta), schema.json persistence.
+2. **`storage/`** — Persistence layer. WAL (Arrow IPC Streaming, dual-file), MemTable (RecordBatch list + pk_index + delete_index, seq-aware), DataFile / DeltaFile (Parquet IO), DeltaIndex (in-memory tombstone map + gc_below), Segment (immutable Parquet cache), Manifest (JSON + .prev backup, atomic via tmp+rename).
+3. **`engine/`** — Core logic orchestration. `Collection` class (entry point, `_seq` allocation, insert/delete/get/search/query, _apply orchestration), Operation abstraction (InsertOp/DeleteOp), Flush pipeline (7 steps, sync), Recovery (5 steps), Compaction (Size-Tiered + tombstone GC).
+4. **`search/`** — Vector retrieval. Bitmap pipeline (dedup + delete + scalar filter), distance functions (cosine/L2/IP via NumPy), assembler (segments + memtable → numpy + filter mask), executor (top-k). **`search/filter/`** subpackage (Phase 8): tokenizer + Pratt parser + semantic check + dual backend (pyarrow.compute primary, Python row-wise fallback) for Milvus-style scalar expressions.
 
-These hold across the engine and should guide every change:
+Top-level: `db.py` (`LiteVecDB` — multi-collection lifecycle), `constants.py`, `exceptions.py`.
 
-- **Data hierarchy**: DB → Collection → Partition. WAL, MemTable, and the `_seq` counter are **Collection-level** shared state. Data files are **Partition-level** isolated (one directory per partition).
-- **Insert vs Delete are separate flows** with different file types: data Parquet vs delta Parquet, plus matching WAL variants.
-- **`_seq` allocation**: a batch insert assigns an independent `_seq` per record; a batch delete shares one `_seq` for the whole batch.
-- **Manifest is the single source of truth**, atomically updated via write-tmp + rename.
-- **All disk files are immutable**: create → never modify → delete the whole file. No in-place edits.
-- **Four distinct Arrow/Parquet schemas** — see `litevecdb/schema/arrow_builder.py`:
-  - `data` (Parquet): `_seq` + user fields + optional `$meta`
-  - `delta` (Parquet): `{pk}` + `_seq`
-  - `wal_data` (Arrow IPC): `_seq` + `_partition` + user fields + optional `$meta`
-  - `wal_delta` (Arrow IPC): `{pk}` + `_seq` + `_partition`
-- **WAL files are paired**: each round produces `wal_data_{N}.arrow` + `wal_delta_{N}.arrow`; both are deleted together after a successful flush. Writers are lazily initialized so unused files are never created.
-- **WAL recovery tolerates truncation**: `_read_wal_file` keeps batches read before an `ArrowInvalid` and returns `[]` for missing/severely corrupted files.
+## Data Hierarchy
 
-## Internal Engine API (target shape)
+DB → Collection → Partition. WAL/MemTable/`_seq` are Collection-level shared. Data files are Partition-level isolated (directory per partition).
+
+## Internal Engine API
 
 All inputs are Lists — no single-value normalization:
 
 - `insert(records: List[dict], partition_name="_default") → List[pk]` — upsert semantics
-- `delete(pks: List, partition_name=None) → int` — `None` means cross-all-partitions
-- `get(pks: List, partition_names=None) → List[dict]`
-- `search(vectors: List[list], top_k=10, metric_type="COSINE", partition_names=None) → List[List[dict]]`
+- `delete(pks: List, partition_name=None) → int` — None means cross-all-partitions
+- `get(pks: List, partition_names=None, expr=None) → List[dict]`
+- `search(query_vectors: List[list], top_k=10, metric_type="COSINE", partition_names=None, expr=None) → List[List[dict]]`
+- `query(expr: str, output_fields=None, partition_names=None, limit=None) → List[dict]` — Phase 8, pure scalar query
 
-**Convention**: write ops take `partition_name` (singular `str`); read ops take `partition_names` (plural `List[str]`).
+Write ops take `partition_name` (singular str). Read ops take `partition_names` (plural List[str]).
+The optional `expr` parameter on read ops is a Milvus-style scalar filter expression (Phase 8).
 
-## Constants & File Naming
+## Key Design Decisions
 
-Defined in `litevecdb/constants.py`:
-
-- `MEMTABLE_SIZE_LIMIT = 10_000`
-- Compaction: `MAX_DATA_FILES = 32`, Size-Tiered with `COMPACTION_BUCKET_BOUNDARIES = [1MB, 10MB, 100MB]`, `COMPACTION_MIN_FILES_PER_BUCKET = 4`
-- File templates use `SEQ_FORMAT_WIDTH = 6` zero-padded numbers: `data_{min}_{max}.parquet`, `delta_{min}_{max}.parquet`, `wal_data_{N}.arrow`, `wal_delta_{N}.arrow`
-- Partition sentinels: `DEFAULT_PARTITION = "_default"`, `ALL_PARTITIONS = "_all"`
+- `_seq` is the global ordering for all override/discard decisions; never depend on call order or file physical order
+- MemTable cross-clear is seq-aware (apply_insert / apply_delete are order-independent)
+- Insert and Delete are separate data flows → different file types (data Parquet vs delta Parquet)
+- Batch delete shares one `_seq`; batch insert assigns independent `_seq` per record
+- Manifest is the single source of truth (atomic update via write-tmp + rename, with `.prev` backup)
+- All disk files are immutable (create → never modify → delete whole file)
+- Four distinct Arrow/Parquet schemas: `wal_data`, `wal_delta`, `data` (Parquet), `delta` (Parquet) — see `schema/arrow_builder.py`
+- MVP synchronous flush; async deferred to future
+- Single writer per Collection; single process per data_dir (fcntl.flock LOCK file)
+- Schema is immutable (no alter table in MVP)
+- WAL default `sync_mode="close"` for OOM-restart safety
+- Phase 8 filter: parser and evaluator are decoupled via the AST — parser implementation can be swapped (hand-written → ANTLR) without touching type checker / backends
+- Design documents are written in Chinese

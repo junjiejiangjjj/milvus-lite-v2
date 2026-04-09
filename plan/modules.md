@@ -54,10 +54,22 @@ lite-v2/
 │   │   └── compaction.py           #   Compaction Manager (Size-Tiered + tombstone GC)
 │   │
 │   ├── search/                     # ══ 搜索层 ══
-│   │   ├── __init__.py             #   导出: search 函数
-│   │   ├── bitmap.py               #   bitmap 管线 (去重 + 删除过滤, 将来扩展标量过滤)
+│   │   ├── __init__.py             #   导出: execute_search
+│   │   ├── bitmap.py               #   bitmap 管线 (去重 + 删除过滤 + 可选 filter_mask)
 │   │   ├── distance.py             #   距离计算 (cosine / L2 / inner product, NumPy 实现)
-│   │   └── executor.py             #   搜索执行器 (收集数据 + bitmap + 向量检索 + top-k, 将来替换为 FAISS)
+│   │   ├── assembler.py            #   候选集拼装 (segments + memtable → numpy + 可选 filter_mask)
+│   │   ├── executor.py             #   搜索执行器 (收集数据 + bitmap + 向量检索 + top-k)
+│   │   └── filter/                 # ══ 标量过滤子系统 (Phase 8) ══
+│   │       ├── __init__.py         #   导出: parse_expr, compile_expr, evaluate, FilterError
+│   │       ├── exceptions.py       #   FilterError / FilterParseError / FilterFieldError / FilterTypeError
+│   │       ├── tokens.py           #   TokenKind enum + Token + tokenize()
+│   │       ├── ast.py              #   11 个 frozen AST 节点 + Expr Union
+│   │       ├── parser.py           #   Pratt parser (借鉴 Milvus Plan.g4)
+│   │       ├── semantic.py         #   compile_expr + 类型推断 + 字段绑定 + backend 选择
+│   │       └── eval/
+│   │           ├── __init__.py     #   evaluate() backend dispatcher
+│   │           ├── arrow_backend.py #   pyarrow.compute 后端 (主)
+│   │           └── python_backend.py#   row-wise Python 后端 (兜底 + 差分测试基准)
 │   │
 │   └── db.py                       # ══ DB 层 ══
 │                                    #   LiteVecDB 类 (create/get/drop/list_collection, close)
@@ -87,11 +99,19 @@ lite-v2/
 │   │   └── test_compaction.py      #   文件分桶, 合并去重, 删除过滤, Manifest 更新, tombstone GC
 │   │
 │   ├── search/
-│   │   ├── test_bitmap.py          #   bitmap 构建: 去重 + 删除过滤
+│   │   ├── test_bitmap.py          #   bitmap 构建: 去重 + 删除过滤 + filter_mask
 │   │   ├── test_distance.py        #   cosine / L2 / IP 距离正确性
-│   │   └── test_executor.py        #   搜索端到端, top-k, Partition Pruning
+│   │   ├── test_executor.py        #   搜索端到端, top-k, Partition Pruning
+│   │   └── filter/                 #   ── 过滤子系统单元测试 ──
+│   │       ├── test_tokens.py      #   各 literal 词法 + 关键字大小写 + 错误位置
+│   │       ├── test_parser.py      #   Pratt 优先级 + 括号 + 错误恢复
+│   │       ├── test_semantic.py    #   字段不存在 / 类型不匹配 / did-you-mean
+│   │       ├── test_arrow_backend.py    #   每个 AST 节点 → 正确 BooleanArray
+│   │       ├── test_python_backend.py   #   同上, 行级实现对照
+│   │       └── test_e2e.py         #   差分测试: arrow == python
 │   │
-│   └── test_db.py                  #   多 Collection 生命周期, close/cleanup
+│   ├── test_db.py                  #   多 Collection 生命周期, close/cleanup
+│   └── test_smoke_e2e.py           #   走公开 API 的端到端冒烟
 │
 ├── pyproject.toml
 └── requirements.txt
@@ -196,22 +216,30 @@ from litevecdb.engine.collection import Collection
 
 ### 3.4 search/ — 搜索层
 
-**职责边界**：向量检索，输入是数据 + 查询，输出是 top-k 结果。不关心数据从哪来。
+**职责边界**：向量检索，输入是数据 + 查询，输出是 top-k 结果。不关心数据从哪来。**含可选的标量过滤子系统** `search/filter/`（Phase 8 新增），见 §9.19-9.25。
 
 | 子模块 | 职责 | 核心函数 |
 |--------|------|---------|
-| `bitmap.py` | 有效性过滤 | `build_valid_mask(all_pks, all_seqs, delta_log)→np.ndarray[bool]` — 去重(同PK保留max_seq) + 删除过滤(delta_log.is_deleted) + 将来扩展标量过滤 |
+| `bitmap.py` | 有效性过滤 | `build_valid_mask(all_pks, all_seqs, delta_index, filter_mask=None)→np.ndarray[bool]` — 去重 + 删除过滤 + 可选标量过滤 mask |
 | `distance.py` | 距离计算 | `cosine_distance(q, candidates)→np.ndarray`, `l2_distance(...)`, `ip_distance(...)`, `compute_distances(q, candidates, metric_type)` — 纯数学，无状态 |
-| `executor.py` | 搜索编排 | `execute_search(query_vectors, all_pks, all_seqs, all_vectors, delta_log, top_k, metric_type)→List[List[dict]]` — 调用 bitmap + distance + top-k 选择 |
+| `assembler.py` | 候选拼装 | `assemble_candidates(segments, memtable, vector_field, partition_names=None, filter_compiled=None)` — 把各源数据拼成统一 numpy + 可选 filter mask |
+| `executor.py` | 搜索编排 | `execute_search(query_vectors, all_pks, all_seqs, all_vectors, all_records, delta_index, top_k, metric_type, ...)→List[List[dict]]` — bitmap + distance + top-k 选择 |
+| `filter/` | 标量过滤子系统 | `parse_expr(s) → compile_expr(expr, schema) → evaluate(compiled, table) → BooleanArray`，详见 §9.19-9.25 |
 
 ```python
 # search/__init__.py
 from litevecdb.search.executor import execute_search
+from litevecdb.search.assembler import assemble_candidates
+from litevecdb.search.filter import (
+    parse_expr, compile_expr, evaluate,
+    FilterError, FilterParseError, FilterFieldError, FilterTypeError,
+)
 ```
 
 **为什么 search 独立为 package**：
-- bitmap 管线将来要扩展标量过滤，逻辑会增长
+- bitmap 管线扩展标量过滤后逻辑增长（filter_mask）
 - distance 是纯数学模块，将来替换 FAISS 时只需替换 executor.py
+- filter 子包是相对独立的"小型 DSL"，单独成 package 便于测试和未来切换 parser 实现
 - 与 engine 解耦：engine.collection 调用 `search.execute_search()`，传入收集好的数据
 
 ## 4. 依赖图
@@ -948,26 +976,30 @@ class Manifest:
 
 ```python
 def build_valid_mask(
-    all_pks: np.ndarray,
+    all_pks: List[Any],
     all_seqs: np.ndarray,
     delta_index: "DeltaIndex",
+    filter_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """构建有效行 bitmap（np.ndarray[bool]，True=有效）。
 
-    两步过滤：
+    三步过滤（按顺序）：
     1. 去重：同一 PK 出现多次时，只保留 _seq 最大的行，其余标记 False
     2. 删除过滤：调用 delta_index.is_deleted(pk, seq)，已删除标记 False
-
-    将来扩展：
-    3. 标量过滤（filter expression）
+    3. 标量过滤：若 filter_mask 不为 None，按位 AND 进最终 mask
 
     Args:
-        all_pks: shape=(N,) 所有行的主键值
+        all_pks: 长度 N 的 pk 列表
         all_seqs: shape=(N,) 所有行的 _seq
         delta_index: DeltaIndex 实例，提供 is_deleted() 查询
+        filter_mask: 可选，长度 N 的 bool array，由 search/filter 子系统对
+            assemble_candidates 中各源的 pa.Table 求值后拼接得到
 
     Returns:
         np.ndarray[bool] shape=(N,)
+
+    Raises:
+        ValueError: filter_mask 长度不等于 all_pks 长度
     """
 ```
 
@@ -1009,18 +1041,22 @@ def compute_distances(
 ```python
 def execute_search(
     query_vectors: np.ndarray,      # shape=(nq, dim)，nq 个查询向量
-    all_pks: np.ndarray,            # shape=(N,)，所有候选行的 PK
+    all_pks: List[Any],             # 长度 N，所有候选行的 PK
     all_seqs: np.ndarray,           # shape=(N,)，所有候选行的 _seq
     all_vectors: np.ndarray,        # shape=(N, dim)，所有候选行的向量
     all_records: List[dict],        # 所有候选行的完整记录（用于返回 entity 字段）
     delta_index: "DeltaIndex",
     top_k: int,
     metric_type: str,
+    pk_field: str,
+    vector_field: str,
+    filter_mask: Optional[np.ndarray] = None,    # Phase 8: 标量过滤
 ) -> List[List[dict]]:
     """执行向量搜索。
 
     流程：
-    1. build_valid_mask() → 有效行 bitmap
+    1. build_valid_mask(filter_mask=filter_mask) → 有效行 bitmap（含去重 +
+       删除过滤 + 标量过滤）
     2. 对每个 query_vector：
        a. 用 bitmap 过滤候选向量
        b. compute_distances() → 距离数组
@@ -1034,6 +1070,36 @@ def execute_search(
         每条结果: {"id": pk_value, "distance": float, "entity": {field: value}}
     """
 ```
+
+### 9.13.5 search/assembler.py
+
+```python
+def assemble_candidates(
+    segments: Iterable["Segment"],
+    memtable: "MemTable",
+    vector_field: str,
+    partition_names: Optional[List[str]] = None,
+    filter_compiled: Optional["CompiledExpr"] = None,
+) -> Tuple[
+    List[Any],         # all_pks
+    np.ndarray,        # all_seqs (uint64)
+    np.ndarray,        # all_vectors (float32, shape=(N, dim))
+    List[dict],        # all_records (entity dicts)
+    Optional[np.ndarray],  # filter_mask (bool, length N) or None
+]:
+    """把 segments 和 MemTable 拼成统一的候选数组。
+
+    顺序：先 segments（按迭代顺序），然后 MemTable。这个顺序决定 filter_mask
+    的拼接顺序，bitmap 阶段按相同顺序使用。
+
+    若 filter_compiled 非 None：
+        - 对每个进入候选集的 segment，调 evaluator 求出 BooleanArray
+        - 对 MemTable 的活跃数据，构造临时 pa.Table 后调 evaluator
+        - 各源的 mask 按 candidate 顺序 concat 成单一 numpy array
+    """
+```
+
+`assembler` 是 search 子系统中**唯一同时知道 storage 类型 (Segment, MemTable) 和 filter 子系统**的模块——其他 search 文件都是 storage-agnostic 的。
 
 ---
 
@@ -1393,44 +1459,73 @@ class Collection:
     def get(
         self,
         pks: List,
-        output_fields: Optional[List[str]] = None,
         partition_names: Optional[List[str]] = None,
+        expr: Optional[str] = None,                  # Phase 8
     ) -> List[dict]:
         """按 PK 批量查询。
 
-        流程: MemTable 查 → 数据文件查（从新到旧）→ deleted_map 过滤
-        未找到的 PK 不在返回列表中。
+        流程：MemTable 查 → segment 查（取 max-seq 版本）→ delta_index 过滤 →
+              （若 expr 给出）调 filter.evaluate 在命中行上再过滤一遍。
 
         Args:
             pks: PK 值列表
-            output_fields: 返回字段列表，None 则返回所有字段
             partition_names: 搜索范围，None 则搜索所有 Partition
+            expr: 可选 Milvus-style 过滤表达式（详见 §9.19-9.25）。命中
+                的 pk 必须额外满足该表达式才会出现在结果里。
 
         Returns:
-            List[dict]，每个 dict 为一条记录
+            List[dict]，每个 dict 为一条记录（不在返回列表中 = pk 不存在
+            或被过滤掉）
         """
 
     def search(
         self,
-        vectors: List[list],
+        query_vectors: List[list],
         top_k: int = 10,
         metric_type: str = "COSINE",
         partition_names: Optional[List[str]] = None,
+        expr: Optional[str] = None,                  # Phase 8
     ) -> List[List[dict]]:
         """向量检索。
 
-        流程: Partition 剪枝 → 收集数据(MemTable + Parquet) → bitmap → 向量检索 → top-k
+        流程：(若 expr 给出) parse_expr → compile_expr →
+              assemble_candidates(filter_compiled=...) →
+              execute_search(filter_mask=...)
 
         Args:
-            vectors: 查询向量列表，每个元素是 list[float]
+            query_vectors: 查询向量列表，每个元素是 list[float]
             top_k: 返回最近邻数量
-            metric_type: 距离度量 "COSINE" | "L2" | "IP"
+            metric_type: "COSINE" | "L2" | "IP"
             partition_names: 搜索范围，None 则搜索所有 Partition
+            expr: 可选 Milvus-style 过滤表达式（详见 §9.19-9.25）
 
         Returns:
             外层 List = 每个查询向量
             内层 List = top-K 结果
             每条: {"id": pk, "distance": float, "entity": {field: value}}
+        """
+
+    def query(                                       # Phase 8 新方法
+        self,
+        expr: str,
+        output_fields: Optional[List[str]] = None,
+        partition_names: Optional[List[str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[dict]:
+        """纯标量查询（无向量、无 distance）。
+
+        流程：parse_expr → compile_expr → assemble_candidates(无 query) →
+              build_valid_mask(filter_mask=...) → 取所有 True 行 →
+              project output_fields → 截断 limit。
+
+        Args:
+            expr: 必填，过滤表达式（详见 §9.19-9.25）
+            output_fields: 返回字段列表，None 返回所有字段（不含 _seq, _partition）
+            partition_names: 搜索范围
+            limit: 最多返回条数（None = 不限）
+
+        Returns:
+            List[dict]，每个 dict 是一条匹配的记录
         """
 
     # ─── Partition 管理 ───
@@ -1501,3 +1596,417 @@ class LiteVecDB:
 
     def close(self) -> None:
         """关闭所有已加载的 Collection。"""
+```
+
+---
+
+## Phase 8: search/filter 子系统接口详解
+
+**目标**：让 `Collection.search` / `get` / `query` 接受 Milvus-style 标量过滤表达式。
+
+**架构**：三阶段编译 + 双 backend dispatcher。
+
+```
+source string  ──parse_expr()──▶  Expr (raw AST, schema 无关)
+                                      │
+                                      │ compile_expr(expr, schema)
+                                      ▼
+                              CompiledExpr (字段绑定 + 类型检查 + backend 标记)
+                                      │
+                                      │ evaluate(compiled, table)
+                                      ▼
+                              pa.BooleanArray (length == table.num_rows)
+```
+
+**架构不变量补充（写进顶部"架构不变量"区段）**：
+
+11. **Filter parser 与 evaluator 通过 AST 解耦**——AST 是稳定接口，未来切换 parser 实现（例如 ANTLR）不影响 type checker / backends。
+12. **Filter backend 在 compile 时静态决定**——不在 evaluate 热路径上 dispatch；F1 始终选 arrow，未来 F2b 引入 `$meta` 时遇到含动态字段的 ref 才升级到 python。
+
+### 9.19 search/filter/exceptions.py
+
+```python
+from litevecdb.exceptions import LiteVecDBError
+
+class FilterError(LiteVecDBError):
+    """Base class for filter expression errors."""
+
+class FilterParseError(FilterError):
+    """Lexing or parsing failed.
+
+    Carries (source, pos) for caret-style rendering:
+
+        FilterParseError: unexpected token '>' at column 5
+          age >> 18
+              ^
+    """
+    def __init__(self, message: str, source: str, pos: int) -> None: ...
+
+class FilterFieldError(FilterError):
+    """Reference to a field that does not exist in the schema.
+
+    Includes did-you-mean suggestion via difflib:
+
+        FilterFieldError: unknown field 'agg' at column 1
+          agg > 18
+          ^^^
+        did you mean 'age'?
+    """
+
+class FilterTypeError(FilterError):
+    """Type mismatch in expression operands.
+
+        FilterTypeError: type mismatch at column 7
+          age > 'eighteen'
+                ^^^^^^^^^
+        left side is int (field 'age'), right side is string
+    """
+```
+
+### 9.20 search/filter/tokens.py
+
+```python
+from enum import Enum
+from dataclasses import dataclass
+from typing import Any, List
+
+class TokenKind(Enum):
+    INT = "INT"
+    FLOAT = "FLOAT"
+    STRING = "STRING"
+    BOOL = "BOOL"
+    IDENT = "IDENT"
+    LPAREN = "("
+    RPAREN = ")"
+    LBRACKET = "["
+    RBRACKET = "]"
+    COMMA = ","
+    EQ = "=="
+    NE = "!="
+    LT = "<"
+    LE = "<="
+    GT = ">"
+    GE = ">="
+    AND = "AND"     # and / AND / &&
+    OR = "OR"       # or / OR / ||
+    NOT = "NOT"     # not / NOT / !
+    IN = "IN"       # in / IN
+    SUB = "-"       # 一元负号（不识别为 INT 字面量的一部分）
+    EOF = "EOF"
+
+@dataclass(frozen=True)
+class Token:
+    kind: TokenKind
+    text: str       # original source slice
+    pos: int        # column in source
+    value: Any      # parsed literal value (None for non-literals)
+
+def tokenize(source: str) -> List[Token]:
+    """Single-pass lexer.
+
+    Behaviour (matches Milvus Plan.g4 where applicable):
+        - Whitespace ' \\t \\r \\n' skipped (no comments)
+        - Identifiers case-sensitive: [a-zA-Z_][a-zA-Z_0-9]*
+        - Keywords case-insensitive: 'and'/'AND'/'&&', 'or'/'OR'/'||',
+          'not'/'NOT'/'!', 'in'/'IN'
+        - Booleans: 'true'/'True'/'TRUE', 'false'/'False'/'FALSE'
+          (only these 6 forms — 'tRuE' rejected with did-you-mean)
+        - Strings: "..." or '...' with escapes \\" \\' \\\\ \\n \\t \\r
+        - Numbers: decimal int + decimal float + scientific notation
+          (1, 3.14, 1e3, 1.5e-2). Negative sign is unary, not part of literal.
+        - '==' is the equality operator; '=' alone raises FilterParseError
+          with hint "did you mean '=='?".
+
+    Raises:
+        FilterParseError: on lex errors. Always carries source + pos.
+    """
+```
+
+### 9.21 search/filter/ast.py
+
+```python
+from dataclasses import dataclass
+from typing import Tuple, Union
+
+# ── Literals ────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class IntLit:
+    value: int
+    pos: int
+
+@dataclass(frozen=True)
+class FloatLit:
+    value: float
+    pos: int
+
+@dataclass(frozen=True)
+class StringLit:
+    value: str
+    pos: int
+
+@dataclass(frozen=True)
+class BoolLit:
+    value: bool
+    pos: int
+
+@dataclass(frozen=True)
+class ListLit:
+    """Homogeneous literal list, used inside `in [...]`."""
+    elements: Tuple["Literal", ...]
+    pos: int
+
+# ── Reference ───────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class FieldRef:
+    name: str
+    pos: int
+
+# ── Operations ──────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class CmpOp:
+    op: str          # "==", "!=", "<", "<=", ">", ">="
+    left: "Expr"
+    right: "Expr"
+    pos: int
+
+@dataclass(frozen=True)
+class InOp:
+    field: FieldRef
+    values: ListLit
+    negate: bool     # True for "not in"
+    pos: int
+
+@dataclass(frozen=True)
+class And:
+    operands: Tuple["Expr", ...]
+    pos: int
+
+@dataclass(frozen=True)
+class Or:
+    operands: Tuple["Expr", ...]
+    pos: int
+
+@dataclass(frozen=True)
+class Not:
+    operand: "Expr"
+    pos: int
+
+# ── Type aliases ────────────────────────────────────────────
+
+Literal = Union[IntLit, FloatLit, StringLit, BoolLit]
+
+Expr = Union[
+    Literal, ListLit, FieldRef,
+    CmpOp, InOp, And, Or, Not,
+]
+```
+
+**关键设计**：
+- 11 个 frozen dataclass，全部值语义、可哈希、自动 `__eq__`
+- 用 `tuple` 不用 `list`（frozen 友好）
+- 没有共同 base class — 用 `Union` + `isinstance` dispatch（与 Operation 一致）
+- 没有方法 — 行为在 backend 里
+- 每节点带 `pos` 用于错误信息溯源
+- 节点命名比 Milvus 简化：单一 `CmpOp`（带 op 字段）替代 Milvus 的 `Equality`/`Relational`
+
+### 9.22 search/filter/parser.py
+
+```python
+class Parser:
+    def __init__(self, tokens: List[Token], source: str) -> None: ...
+
+    def parse(self) -> Expr:
+        """Parse one expression and verify EOF."""
+
+    # Pratt-style descent (low → high precedence)
+    def parse_or(self) -> Expr: ...      # prec 1: a or b or c
+    def parse_and(self) -> Expr: ...     # prec 2: a and b and c
+    def parse_not(self) -> Expr: ...     # prec 3: not a
+    def parse_cmp(self) -> Expr: ...     # prec 4: a == b, a in [...]
+    def parse_primary(self) -> Expr: ... # literal | ident | ( expr )
+
+def parse_expr(source: str) -> Expr:
+    """Public entry. Lex + parse."""
+```
+
+**优先级表**（与 Milvus Plan.g4 对齐）：
+
+| Prec | Operator | Associativity |
+|---|---|---|
+| 1 | `or`, `OR`, `\|\|` | left |
+| 2 | `and`, `AND`, `&&` | left |
+| 3 | `not`, `NOT`, `!` (前缀) | right |
+| 4 | `==, !=, <, <=, >, >=` | left（链式比较 parse 接受、semantic 拒绝）|
+| 4 | `in [...]`, `not in [...]` | non-assoc |
+| 5 | unary `-`（前缀） | right |
+| 6 | literal / ident / `(...)` | — |
+
+**与 Milvus 收紧的部分**：
+- `in` 的 RHS 必须是字面量数组（Milvus 接受任意 expr，但实际只用字面量数组）
+- 数组字面量元素必须是字面量（Milvus 接受 expr，F1 只接 literal）
+- F1 不支持算术 / `like` / `is null` / `exists` / `$meta` / 函数调用 — 这些 token 会被 lex 或 parse 阶段拒绝并给出 "Phase F2/F3 will support" 提示
+
+### 9.23 search/filter/semantic.py
+
+```python
+@dataclass(frozen=True)
+class FieldInfo:
+    name: str
+    dtype: DataType
+    nullable: bool
+
+@dataclass(frozen=True)
+class CompiledExpr:
+    """Type-checked, schema-bound expression ready for evaluation."""
+    ast: Expr
+    fields: Dict[str, FieldInfo]   # all field names referenced
+    backend: str                    # "arrow" | "python"
+
+def compile_expr(expr: Expr, schema: CollectionSchema) -> CompiledExpr:
+    """Bind field references, check types, choose backend.
+
+    Steps:
+        1. Walk AST, collect all FieldRef
+        2. For each: lookup in schema; reject reserved (_seq, _partition,
+           $meta) or vector fields; produce did-you-mean on miss
+        3. Walk again, infer + check types (cmp operands compat,
+           list elements homogeneous, bool combinators bool operands)
+        4. Choose backend:
+           - F1: always "arrow"
+           - F2b+: "python" if expression contains $meta access
+           - F3+: "python" if expression contains UDF call
+        5. Wrap in CompiledExpr
+
+    Raises:
+        FilterFieldError: unknown field reference
+        FilterTypeError:  operand type mismatch
+    """
+```
+
+**类型推断规则**：
+
+| 节点 | 推断类型 | 校验 |
+|---|---|---|
+| `IntLit` | `int` | — |
+| `FloatLit` | `float` | — |
+| `StringLit` | `string` | — |
+| `BoolLit` | `bool` | — |
+| `ListLit` | `list[T]` | 元素 mutually compatible |
+| `FieldRef` | schema 声明类型 | 必须存在、非保留、非 vector |
+| `CmpOp` | `bool` | 左右类型 compatible |
+| `InOp` | `bool` | field type ≈ list 元素类型 |
+| `And/Or/Not` | `bool` | operand 是 bool |
+
+**Compatible types**：
+- `int ≈ int` ✓
+- `int ≈ float` ✓（晋升）
+- `string ≈ string` ✓
+- `bool ≈ bool` ✓
+- 其他 ✗
+
+### 9.24 search/filter/eval/arrow_backend.py
+
+```python
+import functools
+import pyarrow as pa
+import pyarrow.compute as pc
+
+_CMP_KERNELS = {
+    "==": pc.equal, "!=": pc.not_equal,
+    "<":  pc.less,  "<=": pc.less_equal,
+    ">":  pc.greater, ">=": pc.greater_equal,
+}
+
+def evaluate_arrow(
+    compiled: "CompiledExpr",
+    data: Union[pa.Table, pa.RecordBatch],
+) -> pa.BooleanArray:
+    """Walk the AST, translating each node into pyarrow.compute calls.
+
+    NULL handling: top-level result is fill_null(False) so any null
+    in operand chain becomes "no row matches" rather than three-valued
+    result. AND/OR use the Kleene variants (and_kleene, or_kleene).
+    """
+```
+
+**Dispatch 表**（每个 AST 节点 → pyarrow.compute 调用）：
+
+| AST | pyarrow operation |
+|---|---|
+| `IntLit / FloatLit / StringLit / BoolLit` | `pa.scalar(value)` |
+| `FieldRef` | `table.column(name)` |
+| `CmpOp(op, l, r)` | `_CMP_KERNELS[op](_eval(l), _eval(r))` |
+| `InOp(field, values, negate)` | `pc.is_in(col, value_set=values)`，`negate` 时 `pc.invert` |
+| `And(operands)` | `functools.reduce(pc.and_kleene, masks)` |
+| `Or(operands)` | `functools.reduce(pc.or_kleene, masks)` |
+| `Not(operand)` | `pc.invert(_eval(operand))` |
+
+### 9.25 search/filter/eval/python_backend.py
+
+```python
+def evaluate_python(
+    compiled: "CompiledExpr",
+    data: Union[pa.Table, pa.RecordBatch],
+) -> pa.BooleanArray:
+    """Row-wise interpreter. Slow but flexible.
+
+    F1 用途：差分测试基准（arrow_backend 的输出必须与之相等）。
+    F2b+ 用途：评估含 $meta 的表达式。
+    F3+ 用途：评估含 UDF 的表达式。
+
+    NULL 语义：用 Kleene 三值逻辑实现 AND/OR/NOT，最终结果 None → False。
+    """
+```
+
+**Dispatch**：与 arrow_backend 镜像，但每个节点接受 row dict 返回 Python 值：
+
+| AST | Python operation |
+|---|---|
+| `IntLit` 等 | `node.value` |
+| `FieldRef` | `row.get(node.name)` |
+| `CmpOp(op, l, r)` | `_CMP_OPS[op](_eval(l, row), _eval(r, row))`，None 传染 |
+| `InOp` | 集合查找 + 可选否定 |
+| `And/Or` | Kleene 三值短路 |
+| `Not` | None 传染 |
+
+### 9.26 search/filter/eval/__init__.py
+
+```python
+def evaluate(
+    compiled: "CompiledExpr",
+    data: Union[pa.Table, pa.RecordBatch],
+) -> pa.BooleanArray:
+    """Backend dispatcher.
+
+    F1 始终走 arrow_backend；F2b+ 根据 compiled.backend 字段 dispatch。
+    在 evaluate 热路径上**不做**重复 backend 决策——决策已在 compile_expr
+    完成、固化在 CompiledExpr.backend 字段。
+    """
+    if compiled.backend == "arrow":
+        return evaluate_arrow(compiled, data)
+    elif compiled.backend == "python":
+        return evaluate_python(compiled, data)
+    raise ValueError(f"unknown filter backend: {compiled.backend!r}")
+```
+
+### 9.27 Phase 8 实施分阶段
+
+| Phase | 目标 grammar | Backend |
+|---|---|---|
+| **F1** | Tier 1：`==/!=/<.../in/and/or/not` + 字面量 + 字段引用 + 括号 | 仅 arrow_backend（python_backend 用作差分测试基准） |
+| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend |
+| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch（含 $meta 的表达式自动降级） |
+| **F2c** | + filter 缓存 + `query()` 公开方法（如果 F1 没做） | 与 backend 无关 |
+| **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap |
+| **F3+** | 性能优化：per-batch JSON 预处理 / DuckDB opt-in | 引入 hybrid_backend |
+
+### 9.28 Phase 8 设计参考
+
+- **Milvus Plan.g4**: `internal/parser/planparserv2/Plan.g4`（master 分支）
+- **操作符优先级、关键字大小写、字面量语法均对齐 Milvus**
+- **AST 节点形态借鉴 Milvus PlanNode 概念**，但简化（`CmpOp` 替代 `Equality`/`Relational`）
+- **F1 不追 binary 兼容**——文档化我们的子集，未来 F3 才考虑
+- **F1 选手写 Pratt parser** 而非 ANTLR：F1 grammar 小、错误信息更友好、零依赖。AST 是稳定接口，F3 切 ANTLR 不影响 type checker / backends

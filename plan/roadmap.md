@@ -247,6 +247,126 @@ __init__.py              # 公开 API
 
 ---
 
+## Phase 8 — 标量过滤（Scalar Filter Expression）
+
+**目标**：让 `Collection.search` / `get` / `query` 接受 Milvus-style 过滤表达式
+（如 `"age > 18 and category == 'tech'"`），打通"向量召回 + 标量过滤"的混合查询。
+
+**架构**：三阶段编译 + 双 backend dispatcher。
+
+```
+parse_expr(s)            → Expr (raw AST, schema 无关)
+compile_expr(expr, schema) → CompiledExpr (类型检查 + backend 选择)
+evaluate(compiled, table) → pa.BooleanArray
+```
+
+**新增模块**（详见 modules.md §9.19-9.28）：
+
+```
+litevecdb/search/filter/
+├── __init__.py        # parse_expr / compile_expr / evaluate
+├── exceptions.py      # FilterError 系列
+├── tokens.py          # Tokenizer
+├── ast.py             # 11 个 frozen AST 节点
+├── parser.py          # Pratt parser (借鉴 Milvus Plan.g4)
+├── semantic.py        # compile_expr + 类型推断
+└── eval/
+    ├── __init__.py    # backend dispatcher
+    ├── arrow_backend.py  # pyarrow.compute (主)
+    └── python_backend.py # row-wise (兜底 + 差分基准)
+```
+
+**Collection 升级**：
+- `search(query_vectors, ..., expr=None)`
+- `get(pks, ..., expr=None)`
+- **新方法** `query(expr, output_fields=None, partition_names=None, limit=None) → List[dict]`
+  （纯标量查询，无 query vector）
+
+### 子阶段拆分
+
+| 子阶段 | grammar 增量 | Backend |
+|---|---|---|
+| **F1** | Tier 1：`==/!=/<.../in/and/or/not` + 字面量 + 字段引用 + 括号 | 仅 arrow_backend；python_backend 仅做差分测试基准 |
+| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend |
+| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch |
+| **F2c** | filter 缓存 + `query()`（如果 F1 没做） | 与 backend 无关 |
+| **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap |
+| **F3+** | 性能优化：per-batch JSON 预处理 / DuckDB opt-in | 引入 hybrid_backend |
+
+### Phase F1 任务清单
+
+| # | 任务 | 文件 |
+|---|---|---|
+| F1.1 | exceptions.py + 渲染逻辑 | `search/filter/exceptions.py` |
+| F1.2 | tokens.py (TokenKind + Token + tokenize) | `search/filter/tokens.py` + `tests/.../test_tokens.py` |
+| F1.3 | ast.py (11 个 frozen dataclass) | `search/filter/ast.py` |
+| F1.4 | parser.py (Pratt parser) | `search/filter/parser.py` + `test_parser.py` |
+| F1.5 | semantic.py (compile_expr + 类型推断) | `search/filter/semantic.py` + `test_semantic.py` |
+| F1.6 | eval/arrow_backend.py | + `test_arrow_backend.py` |
+| F1.7 | eval/python_backend.py | + `test_python_backend.py` |
+| F1.8 | eval/__init__.py (dispatcher) + 差分测试 | + `test_e2e.py` |
+| F1.9 | filter/__init__.py 公开 API | — |
+| F1.10 | bitmap.py 加 filter_mask 参数 | + 测试更新 |
+| F1.11 | assembler.py 调用 evaluator + 返回 mask | + `test_assembler_filter.py` |
+| F1.12 | executor.py 接 filter_mask | + 测试更新 |
+| F1.13 | Collection.search/get 加 expr 参数 | + `test_collection_filter.py` 部分 |
+| F1.14 | Collection.query 新方法 | + 完整集成测试 |
+| F1.15 | __init__.py 公开 query / FilterError | + smoke 补充 |
+| F1.16 | examples/m8_demo.py | — |
+| F1.17 | 跑全量 pytest | — |
+
+**M8 demo**：`examples/m8_demo.py` — 100 条记录 + 含 `age + category + score` 字段
++ search/get/query 三种用法 + 各种 expr 表达式。
+
+### 验证策略：差分测试
+
+`test_e2e.py` 里每个 case **同时跑两个 backend**，断言结果相等：
+
+```python
+@pytest.mark.parametrize("expr_str", [
+    "age > 18",
+    "category == 'tech'",
+    "age in [10, 20, 30]",
+    "age >= 18 and category == 'tech' or score > 0.5",
+    "not (status == 'draft')",
+    # ... 50+ cases
+])
+def test_arrow_python_equivalence(expr_str, sample_table, sample_schema):
+    expr = parse_expr(expr_str)
+    compiled = compile_expr(expr, sample_schema)
+
+    arrow_result = evaluate_arrow(compiled, sample_table)
+
+    py_compiled = CompiledExpr(ast=compiled.ast, fields=compiled.fields, backend="python")
+    py_result = evaluate_python(py_compiled, sample_table)
+
+    assert arrow_result.equals(py_result)
+```
+
+差分测试是 F1 的安全网：写两份实现互相校验，任何一边的 bug 都会被另一边暴露。
+NULL 三值逻辑、类型 promotion、边界值这些容易写错的地方靠对称性 catch。
+
+### 不在 Phase F1 范围内（明确推迟）
+
+- ❌ `like` 算子 → F2a
+- ❌ 算术 (`+, -, *, /, %`) → F2a
+- ❌ NULL 算子 (`is null` / `is not null`) → F2a
+- ❌ `$meta` 动态字段 → F2b
+- ❌ JSON / array 函数 → F3
+- ❌ UDF → F3
+- ❌ Expression cache → F2c
+- ❌ ANTLR-based parser → F3+ 可选切换
+- ❌ DuckDB 后端 → F3+ opt-in extra
+
+### 完成标志
+
+- F1 done：`col.search([[...]], expr="age > 18 and category in ['tech', 'news']")` 跑通；
+  差分测试 50+ case 全绿；m8 demo 通过。
+- F2 done：`col.search(expr="title like 'AI%' and $meta['priority'] > 5")` 跑通。
+- F3 done：跑通 pymilvus 表达式测试套件子集。
+
+---
+
 ## 验证体系
 
 | 层次 | 工具 | 触发 | 价值 |
@@ -276,7 +396,7 @@ __init__.py              # 公开 API
 ## 使用说明
 
 1. **Phase 0 必须先做**——后续所有 phase 的前提
-2. **Phase 1-7 严格按序**，phase 内部任务可乱序
+2. **Phase 1-8 严格按序**（Phase 8 含 F1/F2/F3 子阶段），phase 内部任务可乱序
 3. **每 phase 完成 = git tag**（`m1-fixes`, `m2-write`, …）
 4. **每 phase 一个 `examples/m{N}_demo.py`** 长期保留
 5. **PR description 引用本文档对应章节**，留决策轨迹
