@@ -31,6 +31,7 @@ from litevecdb.search.filter.ast import (
     LikeOp,
     ListLit,
     Literal,
+    MetaAccess,
     Not,
     Or,
     StringLit,
@@ -50,8 +51,12 @@ SEM_INT = "int"
 SEM_FLOAT = "float"
 SEM_STRING = "string"
 SEM_BOOL = "bool"
+# Phase F2b: $meta["key"] returns a value whose type is unknown until
+# runtime. SEM_DYNAMIC is compatible with any other type for the purpose
+# of comparisons / IN / arithmetic — runtime semantics decide.
+SEM_DYNAMIC = "dynamic"
 
-_SEM_TYPES = {SEM_INT, SEM_FLOAT, SEM_STRING, SEM_BOOL}
+_SEM_TYPES = {SEM_INT, SEM_FLOAT, SEM_STRING, SEM_BOOL, SEM_DYNAMIC}
 
 # Reserved field names that must not be referenced from filter expressions.
 _RESERVED_FIELDS = frozenset({"_seq", "_partition", "$meta"})
@@ -76,20 +81,26 @@ def _datatype_to_sem(dtype: DataType) -> Optional[str]:
 
 
 def _types_compatible(left: str, right: str) -> bool:
-    """Comparison-compatible: same type, or int↔float promotion."""
+    """Comparison-compatible: same type, or int↔float promotion, or
+    one side is dynamic ($meta access)."""
     if left == right:
         return True
     if {left, right} == {SEM_INT, SEM_FLOAT}:
+        return True
+    if SEM_DYNAMIC in (left, right):
         return True
     return False
 
 
 def _common_type(left: str, right: str) -> Optional[str]:
-    """Common type when comparing — float wins over int."""
+    """Common type when comparing — float wins over int. Dynamic wins
+    over everything (defers type resolution to runtime)."""
     if left == right:
         return left
     if {left, right} == {SEM_INT, SEM_FLOAT}:
         return SEM_FLOAT
+    if SEM_DYNAMIC in (left, right):
+        return SEM_DYNAMIC
     return None
 
 
@@ -141,9 +152,17 @@ def compile_expr(
     field_names = [f.name for f in schema.fields]
 
     fields_used: Dict[str, FieldInfo] = {}
+    ctx = _CompileCtx(
+        schema_fields=schema_fields,
+        field_names=field_names,
+        fields_used=fields_used,
+        source=source,
+        enable_dynamic_field=schema.enable_dynamic_field,
+        has_meta_access=False,
+    )
 
     # Walk the AST: type-check + collect referenced fields.
-    top_type = _check_node(expr, schema_fields, field_names, fields_used, source)
+    top_type = _check_node(expr, ctx)
 
     # Top-level expression must be boolean.
     if top_type != SEM_BOOL:
@@ -152,10 +171,10 @@ def compile_expr(
             source, getattr(expr, "pos", 0),
         )
 
-    # Phase F1 always uses arrow_backend. Future phases (F2b, F3) will
-    # inspect the AST for $meta refs / UDF calls and pick "python" when
-    # arrow_backend can't handle the expression.
-    backend = "arrow"
+    # Backend selection: any expression containing $meta access must
+    # go through python_backend (pyarrow.compute has no JSON path
+    # kernel). Otherwise stay on the fast arrow path.
+    backend = "python" if ctx.has_meta_access else "arrow"
 
     return CompiledExpr(
         ast=expr,
@@ -165,17 +184,23 @@ def compile_expr(
     )
 
 
+@dataclass
+class _CompileCtx:
+    """Internal walking context — packs the multiple parameters needed
+    by _check_node so the recursive call signature stays small."""
+    schema_fields: Dict[str, FieldSchema]
+    field_names: List[str]
+    fields_used: Dict[str, FieldInfo]
+    source: str
+    enable_dynamic_field: bool
+    has_meta_access: bool
+
+
 # ---------------------------------------------------------------------------
 # Internal: recursive type checker
 # ---------------------------------------------------------------------------
 
-def _check_node(
-    node: Expr,
-    schema_fields: Dict[str, FieldSchema],
-    field_names: List[str],
-    fields_used: Dict[str, FieldInfo],
-    source: str,
-) -> str:
+def _check_node(node: Expr, ctx: "_CompileCtx") -> str:
     """Recursively check a node and return its semantic type."""
 
     # ── Literals ────────────────────────────────────────────────
@@ -190,44 +215,40 @@ def _check_node(
 
     # ── ListLit (only used inside InOp; pure-form is rare) ──────
     if isinstance(node, ListLit):
-        # Returns the common element type, or "empty" sentinel.
-        # Empty list is allowed but defers type-check to InOp.
         if not node.elements:
             return "empty"
-        elem_types = [_check_node(e, schema_fields, field_names, fields_used, source)
-                      for e in node.elements]
+        elem_types = [_check_node(e, ctx) for e in node.elements]
         first = elem_types[0]
         for t in elem_types[1:]:
             if not _types_compatible(first, t):
                 raise FilterTypeError(
                     f"list elements must be of compatible types, "
                     f"got {first} and {t}",
-                    source, node.pos,
+                    ctx.source, node.pos,
                 )
         return _common_type(first, first) or first
 
     # ── FieldRef ────────────────────────────────────────────────
     if isinstance(node, FieldRef):
-        # Reserved fields are rejected outright.
         if node.name in _RESERVED_FIELDS:
             raise FilterFieldError(
                 f"reserved field {node.name!r} cannot be used in filter expressions",
-                source, node.pos, node.name, available_fields=field_names,
+                ctx.source, node.pos, node.name, available_fields=ctx.field_names,
             )
-        if node.name not in schema_fields:
+        if node.name not in ctx.schema_fields:
             raise FilterFieldError(
                 f"unknown field {node.name!r}",
-                source, node.pos, node.name, available_fields=field_names,
+                ctx.source, node.pos, node.name, available_fields=ctx.field_names,
             )
-        field = schema_fields[node.name]
+        field = ctx.schema_fields[node.name]
         sem = _datatype_to_sem(field.dtype)
         if sem is None:
             raise FilterTypeError(
                 f"field {node.name!r} of type {field.dtype.value} cannot be used "
                 f"in scalar filter expressions",
-                source, node.pos, span=len(node.name),
+                ctx.source, node.pos, span=len(node.name),
             )
-        fields_used[node.name] = FieldInfo(
+        ctx.fields_used[node.name] = FieldInfo(
             name=node.name,
             dtype=field.dtype,
             sem_type=sem,
@@ -237,98 +258,105 @@ def _check_node(
 
     # ── CmpOp ───────────────────────────────────────────────────
     if isinstance(node, CmpOp):
-        left_type = _check_node(node.left, schema_fields, field_names, fields_used, source)
-        right_type = _check_node(node.right, schema_fields, field_names, fields_used, source)
+        left_type = _check_node(node.left, ctx)
+        right_type = _check_node(node.right, ctx)
         if not _types_compatible(left_type, right_type):
             left_desc = _describe_operand(node.left, left_type)
             right_desc = _describe_operand(node.right, right_type)
             raise FilterTypeError(
                 f"comparison '{node.op}' between incompatible types",
-                source, node.pos, span=len(node.op),
+                ctx.source, node.pos, span=len(node.op),
                 left_desc=left_desc, right_desc=right_desc,
             )
         return SEM_BOOL
 
     # ── InOp ────────────────────────────────────────────────────
     if isinstance(node, InOp):
-        field_type = _check_node(node.field, schema_fields, field_names, fields_used, source)
+        field_type = _check_node(node.field, ctx)
         if node.values.elements:
-            list_type = _check_node(node.values, schema_fields, field_names, fields_used, source)
+            list_type = _check_node(node.values, ctx)
             if list_type != "empty" and not _types_compatible(field_type, list_type):
                 raise FilterTypeError(
                     f"'in' list elements ({list_type}) incompatible with "
                     f"field {node.field.name!r} ({field_type})",
-                    source, node.pos, span=2,
+                    ctx.source, node.pos, span=2,
                 )
         return SEM_BOOL
 
     # ── And / Or ────────────────────────────────────────────────
     if isinstance(node, And) or isinstance(node, Or):
         for op in node.operands:
-            t = _check_node(op, schema_fields, field_names, fields_used, source)
+            t = _check_node(op, ctx)
             if t != SEM_BOOL:
                 op_name = "and" if isinstance(node, And) else "or"
                 raise FilterTypeError(
                     f"operands of '{op_name}' must be boolean, got {t}",
-                    source, getattr(op, "pos", node.pos),
+                    ctx.source, getattr(op, "pos", node.pos),
                 )
         return SEM_BOOL
 
     # ── Not ─────────────────────────────────────────────────────
     if isinstance(node, Not):
-        t = _check_node(node.operand, schema_fields, field_names, fields_used, source)
+        t = _check_node(node.operand, ctx)
         if t != SEM_BOOL:
             raise FilterTypeError(
                 f"operand of 'not' must be boolean, got {t}",
-                source, node.pos,
+                ctx.source, node.pos,
             )
         return SEM_BOOL
 
     # ── ArithOp (Phase F2a) ─────────────────────────────────────
     if isinstance(node, ArithOp):
-        left_type = _check_node(node.left, schema_fields, field_names, fields_used, source)
-        right_type = _check_node(node.right, schema_fields, field_names, fields_used, source)
-        if left_type not in (SEM_INT, SEM_FLOAT):
-            raise FilterTypeError(
-                f"arithmetic '{node.op}' requires numeric operands, "
-                f"left side is {_describe_operand(node.left, left_type)}",
-                source, node.pos, span=len(node.op),
-                left_desc=_describe_operand(node.left, left_type),
-            )
-        if right_type not in (SEM_INT, SEM_FLOAT):
-            raise FilterTypeError(
-                f"arithmetic '{node.op}' requires numeric operands, "
-                f"right side is {_describe_operand(node.right, right_type)}",
-                source, node.pos, span=len(node.op),
-                right_desc=_describe_operand(node.right, right_type),
-            )
-        # Result type: float if either operand is float, else int.
-        # Division always promotes to float (matches Python semantics).
+        left_type = _check_node(node.left, ctx)
+        right_type = _check_node(node.right, ctx)
+        # Numeric (int/float) AND dynamic ($meta) are allowed.
+        for side, t in (("left", left_type), ("right", right_type)):
+            if t not in (SEM_INT, SEM_FLOAT, SEM_DYNAMIC):
+                operand = node.left if side == "left" else node.right
+                raise FilterTypeError(
+                    f"arithmetic '{node.op}' requires numeric operands, "
+                    f"{side} side is {_describe_operand(operand, t)}",
+                    ctx.source, node.pos, span=len(node.op),
+                    left_desc=_describe_operand(operand, t),
+                )
+        # Result type: dynamic if either is dynamic; else float for / or
+        # mixed; else int.
+        if SEM_DYNAMIC in (left_type, right_type):
+            return SEM_DYNAMIC
         if node.op == "/" or left_type == SEM_FLOAT or right_type == SEM_FLOAT:
             return SEM_FLOAT
         return SEM_INT
 
     # ── LikeOp (Phase F2a) ──────────────────────────────────────
     if isinstance(node, LikeOp):
-        value_type = _check_node(node.value, schema_fields, field_names, fields_used, source)
-        if value_type != SEM_STRING:
+        value_type = _check_node(node.value, ctx)
+        if value_type not in (SEM_STRING, SEM_DYNAMIC):
             raise FilterTypeError(
                 f"LIKE requires a string operand, got "
                 f"{_describe_operand(node.value, value_type)}",
-                source, node.pos,
+                ctx.source, node.pos,
                 left_desc=_describe_operand(node.value, value_type),
             )
-        # The pattern is always a StringLit (parser enforces this), no
-        # need to type-check it again.
         return SEM_BOOL
 
     # ── IsNullOp (Phase F2a) ────────────────────────────────────
     if isinstance(node, IsNullOp):
-        # The parser enforces that the operand is a FieldRef, so calling
-        # _check_node on it just resolves the field. We don't restrict
+        # The parser enforces FieldRef as the operand. We don't restrict
         # the field's type — IS NULL is meaningful for any field.
-        _check_node(node.field, schema_fields, field_names, fields_used, source)
+        _check_node(node.field, ctx)
         return SEM_BOOL
+
+    # ── MetaAccess (Phase F2b) ──────────────────────────────────
+    if isinstance(node, MetaAccess):
+        if not ctx.enable_dynamic_field:
+            raise FilterFieldError(
+                f"$meta access requires schema enable_dynamic_field=True",
+                ctx.source, node.pos,
+                field_name="$meta",
+                available_fields=ctx.field_names,
+            )
+        ctx.has_meta_access = True
+        return SEM_DYNAMIC
 
     raise TypeError(f"unknown AST node type: {type(node).__name__}")
 

@@ -68,6 +68,10 @@ class TokenKind(Enum):
     IS = "IS"
     NULL = "NULL"
 
+    # Dynamic-field marker (Phase F2b). The lexer emits META on `$meta`,
+    # the parser then expects '[' STRING ']' to form a MetaAccess node.
+    META = "META"
+
     # Sentinel
     EOF = "EOF"
 
@@ -216,6 +220,17 @@ def tokenize(source: str) -> List[Token]:
             tokens.append(tok)
             i += advance
             continue
+
+        # ── $meta dynamic-field marker (Phase F2b) ──────────────
+        if ch == "$":
+            if source[i:i + 5] == "$meta":
+                tokens.append(Token(TokenKind.META, "$meta", i))
+                i += 5
+                continue
+            raise FilterParseError(
+                f"unexpected character '$'", source, i,
+                hint="only '$meta' is supported as a dynamic-field marker",
+            )
 
         # ── Numeric literals ────────────────────────────────────
         if ch.isdigit():

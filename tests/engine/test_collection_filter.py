@@ -494,3 +494,171 @@ def test_query_like_on_int_rejected(col):
     _populate(col)
     with pytest.raises(FilterTypeError, match="string"):
         col.query("age like '1%'")
+
+
+# ===========================================================================
+# Phase F2b — $meta dynamic field through Collection
+# ===========================================================================
+
+@pytest.fixture
+def schema_dynamic():
+    return CollectionSchema(
+        fields=[
+            FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
+            FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+            FieldSchema(name="age", dtype=DataType.INT64),
+        ],
+        enable_dynamic_field=True,
+    )
+
+
+@pytest.fixture
+def col_dynamic(tmp_path, schema_dynamic):
+    c = Collection("c", str(tmp_path / "d"), schema_dynamic)
+    yield c
+    c.close()
+
+
+def _populate_dynamic(col):
+    col.insert([
+        {"id": "a", "vec": [1.0, 0.0, 0.0, 0.0], "age": 18,
+         "category": "tech", "priority": 1, "score": 0.5},
+        {"id": "b", "vec": [0.0, 1.0, 0.0, 0.0], "age": 25,
+         "category": "news", "priority": 5, "score": 0.7},
+        {"id": "c", "vec": [0.0, 0.0, 1.0, 0.0], "age": 30,
+         "category": "tech", "priority": 3, "score": 0.9},
+        {"id": "d", "vec": [0.0, 0.0, 0.0, 1.0], "age": 50,
+         "category": "blog", "priority": 2, "score": 0.3},
+    ])
+
+
+def test_query_meta_string_eq(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('$meta["category"] == "tech"')
+    ids = {r["id"] for r in out}
+    assert ids == {"a", "c"}
+
+
+def test_query_meta_int_compare(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('$meta["priority"] > 2')
+    ids = {r["id"] for r in out}
+    # b(5), c(3) match
+    assert ids == {"b", "c"}
+
+
+def test_query_meta_combined_with_regular(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('age > 20 and $meta["category"] == "tech"')
+    ids = {r["id"] for r in out}
+    # a fails on age, b is news, c matches, d is blog
+    assert ids == {"c"}
+
+
+def test_query_meta_after_flush(col_dynamic):
+    """Meta access works on segments too — JSON column survives flush."""
+    _populate_dynamic(col_dynamic)
+    col_dynamic.flush()
+    assert col_dynamic.count() == 0
+    out = col_dynamic.query('$meta["category"] == "tech"')
+    ids = {r["id"] for r in out}
+    assert ids == {"a", "c"}
+
+
+def test_query_meta_mixed_memtable_and_segment(col_dynamic):
+    """Half flushed, half in MemTable — meta filter must apply to both."""
+    col_dynamic.insert([
+        {"id": "a", "vec": [1.0, 0.0, 0.0, 0.0], "age": 18,
+         "category": "tech", "priority": 1},
+    ])
+    col_dynamic.flush()
+    col_dynamic.insert([
+        {"id": "b", "vec": [0.0, 1.0, 0.0, 0.0], "age": 25,
+         "category": "news", "priority": 5},
+    ])
+    out = col_dynamic.query('$meta["priority"] >= 1')
+    ids = {r["id"] for r in out}
+    assert ids == {"a", "b"}
+
+
+def test_search_with_meta_filter(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    results = col_dynamic.search(
+        [[1.0, 0.0, 0.0, 0.0]], top_k=10, metric_type="L2",
+        expr='$meta["category"] == "tech"',
+    )
+    [hits] = results
+    ids = {h["id"] for h in hits}
+    assert ids == {"a", "c"}
+
+
+def test_get_with_meta_filter(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.get(
+        ["a", "b", "c", "d"],
+        expr='$meta["priority"] > 2',
+    )
+    ids = {r["id"] for r in out}
+    assert ids == {"b", "c"}
+
+
+def test_query_meta_arithmetic(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('$meta["score"] * 2 > 1.0')
+    ids = {r["id"] for r in out}
+    # 0.5*2=1.0 (no), 0.7*2=1.4, 0.9*2=1.8, 0.3*2=0.6
+    assert ids == {"b", "c"}
+
+
+def test_query_meta_missing_key(col_dynamic):
+    """Querying a key that doesn't exist in any record — empty result."""
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('$meta["nonexistent"] == "x"')
+    assert out == []
+
+
+def test_query_meta_partial_records(col_dynamic):
+    """Some records have the key, others don't — only matching ones."""
+    col_dynamic.insert([
+        {"id": "with", "vec": [1.0, 0.0, 0.0, 0.0], "age": 18,
+         "extra_field": "value1"},
+        {"id": "without", "vec": [0.0, 1.0, 0.0, 0.0], "age": 25,
+         "other_field": "value2"},
+    ])
+    out = col_dynamic.query('$meta["extra_field"] == "value1"')
+    ids = {r["id"] for r in out}
+    assert ids == {"with"}
+
+
+def test_query_meta_persists_across_restart(tmp_path, schema_dynamic):
+    data_dir = str(tmp_path / "d")
+    col1 = Collection("c", data_dir, schema_dynamic)
+    col1.insert([
+        {"id": "a", "vec": [1.0, 0.0, 0.0, 0.0], "age": 18, "category": "tech"},
+        {"id": "b", "vec": [0.0, 1.0, 0.0, 0.0], "age": 25, "category": "news"},
+    ])
+    col1.close()  # flushes to segment
+
+    col2 = Collection("c", data_dir, schema_dynamic)
+    out = col2.query('$meta["category"] == "tech"')
+    assert len(out) == 1
+    assert out[0]["id"] == "a"
+    col2.close()
+
+
+def test_meta_without_dynamic_field_rejected(col):
+    """Schema without enable_dynamic_field → meta access fails at compile."""
+    _populate(col)
+    with pytest.raises(FilterFieldError, match="enable_dynamic_field"):
+        col.query('$meta["x"] == 1')
+
+
+def test_meta_complex_expression(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query(
+        '($meta["category"] == "tech" or $meta["category"] == "news") '
+        'and $meta["priority"] > 2'
+    )
+    ids = {r["id"] for r in out}
+    # b (news, prio 5), c (tech, prio 3)
+    assert ids == {"b", "c"}

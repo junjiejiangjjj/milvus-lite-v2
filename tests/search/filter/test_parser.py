@@ -14,6 +14,7 @@ from litevecdb.search.filter.ast import (
     IsNullOp,
     LikeOp,
     ListLit,
+    MetaAccess,
     Not,
     Or,
     StringLit,
@@ -472,3 +473,53 @@ def test_is_missing_null_keyword():
 def test_is_not_missing_null():
     with pytest.raises(FilterParseError, match="expected 'not null'"):
         parse_expr("title is not 5")
+
+
+# ---------------------------------------------------------------------------
+# Phase F2b — $meta access
+# ---------------------------------------------------------------------------
+
+def test_meta_access_simple():
+    e = parse_expr('$meta["category"] == "tech"')
+    assert isinstance(e, CmpOp)
+    assert isinstance(e.left, MetaAccess)
+    assert e.left.key == "category"
+
+
+def test_meta_access_int_key_rejected():
+    """Phase F2b only supports string keys."""
+    with pytest.raises(FilterParseError, match="string literal"):
+        parse_expr('$meta[0]')
+
+
+def test_meta_access_missing_close_bracket():
+    with pytest.raises(FilterParseError, match="expected '\\]'"):
+        parse_expr('$meta["key"')
+
+
+def test_meta_access_missing_open_bracket():
+    with pytest.raises(FilterParseError, match="expected '\\['"):
+        parse_expr('$meta')
+
+
+def test_meta_in_complex_expr():
+    e = parse_expr('$meta["priority"] > 5 and $meta["category"] == "tech"')
+    assert isinstance(e, And)
+    assert isinstance(e.operands[0], CmpOp)
+    assert isinstance(e.operands[0].left, MetaAccess)
+    assert isinstance(e.operands[1], CmpOp)
+    assert isinstance(e.operands[1].left, MetaAccess)
+
+
+def test_meta_with_arithmetic():
+    e = parse_expr('$meta["score"] * 2 > 1.0')
+    assert isinstance(e, CmpOp)
+    assert isinstance(e.left, ArithOp)
+    assert isinstance(e.left.left, MetaAccess)
+
+
+def test_meta_in_in_expression():
+    """`$meta["category"] in [...]` requires `in`'s LHS to be a field
+    ref, but $meta is not a FieldRef. Currently rejected by parser."""
+    with pytest.raises(FilterParseError, match="field reference"):
+        parse_expr('$meta["category"] in ["tech", "news"]')

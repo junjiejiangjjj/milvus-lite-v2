@@ -39,6 +39,7 @@ from litevecdb.search.filter.ast import (
     LikeOp,
     ListLit,
     Literal,
+    MetaAccess,
     Not,
     Or,
     StringLit,
@@ -195,6 +196,42 @@ class Parser:
             pos=like_tok.pos,
         )
 
+    def _parse_meta_access(self) -> Expr:
+        """Parse `$meta["key"]`. Caller hasn't consumed the META token.
+
+        Phase F2b only supports string keys (`$meta["category"]`).
+        Integer indexing (`$meta[0]`) is deferred to F3 and rejected
+        with a hint.
+        """
+        meta_tok = self._consume()  # META
+        if self._peek().kind != TokenKind.LBRACKET:
+            tok = self._peek()
+            raise FilterParseError(
+                f"expected '[' after '$meta', got {tok.text!r}",
+                self.source, tok.pos,
+                hint="example: $meta[\"category\"]",
+            )
+        self._consume()  # [
+
+        key_tok = self._peek()
+        if key_tok.kind != TokenKind.STRING:
+            raise FilterParseError(
+                f"$meta key must be a string literal, got {key_tok.text!r}",
+                self.source, key_tok.pos,
+                hint="example: $meta[\"category\"]",
+            )
+        self._consume()
+
+        if self._peek().kind != TokenKind.RBRACKET:
+            tok = self._peek()
+            raise FilterParseError(
+                f"expected ']' after $meta key, got {tok.text!r}",
+                self.source, tok.pos,
+            )
+        self._consume()  # ]
+
+        return MetaAccess(key=key_tok.value, pos=meta_tok.pos)
+
     def _parse_is_null_tail(self, left: Expr) -> Expr:
         """`<field> IS NULL` or `<field> IS NOT NULL`.
 
@@ -293,6 +330,9 @@ class Parser:
                     hint="json_contains / array_length / etc. land in Phase F3",
                 )
             return FieldRef(name=tok.text, pos=tok.pos)
+
+        if tok.kind == TokenKind.META:
+            return self._parse_meta_access()
 
         if tok.kind == TokenKind.LPAREN:
             self._consume()

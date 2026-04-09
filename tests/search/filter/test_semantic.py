@@ -347,3 +347,74 @@ def test_is_null_reserved_field(schema):
 def test_is_null_vector_field(schema):
     with pytest.raises(FilterTypeError, match="float_vector"):
         compile_str("vec is null", schema)
+
+
+# ---------------------------------------------------------------------------
+# Phase F2b — $meta dynamic field
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def schema_dynamic():
+    return CollectionSchema(
+        fields=[
+            FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
+            FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+            FieldSchema(name="age", dtype=DataType.INT64),
+        ],
+        enable_dynamic_field=True,
+    )
+
+
+def test_meta_access_with_dynamic_field(schema_dynamic):
+    c = compile_str('$meta["category"] == "tech"', schema_dynamic)
+    # Backend should be python because of $meta access
+    assert c.backend == "python"
+
+
+def test_meta_without_dynamic_field_rejected(schema):
+    """Schema doesn't have enable_dynamic_field=True → reject."""
+    with pytest.raises(FilterFieldError, match="enable_dynamic_field"):
+        compile_str('$meta["x"] == 1', schema)
+
+
+def test_meta_compared_with_int(schema_dynamic):
+    """$meta has dynamic type, can be compared with int (runtime decides)."""
+    c = compile_str('$meta["priority"] > 5', schema_dynamic)
+    assert c.backend == "python"
+
+
+def test_meta_compared_with_float(schema_dynamic):
+    c = compile_str('$meta["score"] > 0.5', schema_dynamic)
+    assert c.backend == "python"
+
+
+def test_meta_compared_with_string(schema_dynamic):
+    c = compile_str('$meta["category"] == "tech"', schema_dynamic)
+    assert c.backend == "python"
+
+
+def test_meta_in_arithmetic(schema_dynamic):
+    """$meta in arithmetic — type is dynamic, allowed."""
+    c = compile_str('$meta["score"] * 2 > 1.0', schema_dynamic)
+    assert c.backend == "python"
+
+
+def test_meta_in_complex_expression(schema_dynamic):
+    c = compile_str(
+        'age > 18 and $meta["category"] == "tech"',
+        schema_dynamic,
+    )
+    # Mixed: age is regular field, $meta is dynamic — backend goes python
+    assert c.backend == "python"
+    assert "age" in c.fields  # regular field still recorded
+
+
+def test_normal_expression_still_arrow(schema_dynamic):
+    """Even with dynamic-field schema, expressions without $meta stay arrow."""
+    c = compile_str("age > 18", schema_dynamic)
+    assert c.backend == "arrow"
+
+
+def test_meta_with_like(schema_dynamic):
+    c = compile_str('$meta["title"] like "AI%"', schema_dynamic)
+    assert c.backend == "python"

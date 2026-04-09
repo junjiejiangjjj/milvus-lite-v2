@@ -11,6 +11,7 @@ BooleanArray with no null entries.
 
 from __future__ import annotations
 
+import json
 import operator
 import re
 from typing import TYPE_CHECKING, Any, Optional, Union
@@ -29,6 +30,7 @@ from litevecdb.search.filter.ast import (
     IsNullOp,
     LikeOp,
     ListLit,
+    MetaAccess,
     Not,
     Or,
     StringLit,
@@ -208,5 +210,24 @@ def _eval_row(node, row: dict) -> Any:
         val = row.get(node.field.name)
         is_null = val is None
         return (not is_null) if node.negate else is_null
+
+    # ── Phase F2b: $meta dynamic field access ───────────────────
+    if isinstance(node, MetaAccess):
+        meta_str = row.get("$meta")
+        if meta_str is None:
+            return None
+        # The $meta column may be a pre-parsed dict (in test fixtures)
+        # or a JSON string (the production wal/parquet representation).
+        if isinstance(meta_str, dict):
+            return meta_str.get(node.key)
+        if not isinstance(meta_str, str):
+            return None
+        try:
+            d = json.loads(meta_str)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return None
+        if not isinstance(d, dict):
+            return None
+        return d.get(node.key)
 
     raise TypeError(f"unknown AST node: {type(node).__name__}")

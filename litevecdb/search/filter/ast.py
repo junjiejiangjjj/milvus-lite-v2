@@ -162,6 +162,23 @@ class IsNullOp:
     pos: int
 
 
+# ── Phase F2b: dynamic field access ─────────────────────────────────────────
+
+@dataclass(frozen=True)
+class MetaAccess:
+    """`$meta["key"]` — dynamic-field value lookup.
+
+    The schema must have ``enable_dynamic_field=True`` for this node to
+    be allowed. The result type is "dynamic" (not known until runtime),
+    and any expression containing a MetaAccess forces backend selection
+    to "python" — pyarrow.compute has no built-in JSON path kernel, so
+    arrow_backend cannot evaluate this without per-batch JSON parsing.
+    Per-batch preprocessing is a Phase F3+ optimization.
+    """
+    key: str
+    pos: int
+
+
 # ── Type alias for the union of all node types ──────────────────────────────
 
 Expr = Union[
@@ -170,4 +187,5 @@ Expr = Union[
     FieldRef,
     CmpOp, InOp, And, Or, Not,
     ArithOp, LikeOp, IsNullOp,
+    MetaAccess,
 ]

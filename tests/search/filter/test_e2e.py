@@ -341,3 +341,137 @@ def test_dispatcher_unknown_backend(sample_table, schema):
     bad = replace(compile_str("age > 25", schema), backend="quantum")
     with pytest.raises(ValueError, match="unknown filter backend"):
         evaluate(bad, sample_table)
+
+
+# ===========================================================================
+# Phase F2b — $meta dynamic field access (python_backend only)
+# ===========================================================================
+
+@pytest.fixture
+def schema_dynamic():
+    return CollectionSchema(
+        fields=[
+            FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
+            FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=2),
+            FieldSchema(name="age", dtype=DataType.INT64),
+        ],
+        enable_dynamic_field=True,
+    )
+
+
+@pytest.fixture
+def meta_table():
+    """Sample table with $meta column holding JSON strings."""
+    return pa.table({
+        "id": ["a", "b", "c", "d", "e"],
+        "age": [10, 25, 30, 50, 70],
+        "$meta": [
+            '{"category": "tech", "priority": 1, "score": 0.5}',
+            '{"category": "news", "priority": 5, "score": 0.7}',
+            '{"category": "tech", "priority": 3, "score": 0.9}',
+            None,                                        # null $meta
+            '{"category": "blog", "score": 0.2}',         # missing 'priority'
+        ],
+    })
+
+
+def test_meta_string_eq(meta_table, schema_dynamic):
+    compiled = compile_expr(
+        parse_expr('$meta["category"] == "tech"'),
+        schema_dynamic,
+        source='$meta["category"] == "tech"',
+    )
+    assert compiled.backend == "python"
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    assert result.to_pylist() == [True, False, True, False, False]
+
+
+def test_meta_int_compare(meta_table, schema_dynamic):
+    compiled = compile_expr(
+        parse_expr('$meta["priority"] > 2'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    # a (1, no), b (5, yes), c (3, yes), d (null), e (missing)
+    assert result.to_pylist() == [False, True, True, False, False]
+
+
+def test_meta_float_compare(meta_table, schema_dynamic):
+    compiled = compile_expr(
+        parse_expr('$meta["score"] > 0.5'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    # a (0.5, no — strictly >), b (0.7), c (0.9), d (null), e (0.2)
+    assert result.to_pylist() == [False, True, True, False, False]
+
+
+def test_meta_combined_with_regular_field(meta_table, schema_dynamic):
+    compiled = compile_expr(
+        parse_expr('age > 20 and $meta["category"] == "tech"'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    # a (10, fail), b (25, news), c (30, tech), d (null), e (70, blog)
+    assert result.to_pylist() == [False, False, True, False, False]
+
+
+def test_meta_arithmetic(meta_table, schema_dynamic):
+    compiled = compile_expr(
+        parse_expr('$meta["score"] * 2 > 1.0'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    # 0.5*2=1.0 (no, strict >), 0.7*2=1.4 (yes), 0.9*2=1.8, null, 0.2*2=0.4
+    assert result.to_pylist() == [False, True, True, False, False]
+
+
+def test_meta_null_meta_column(meta_table, schema_dynamic):
+    """Row with $meta=null should never match any expression."""
+    compiled = compile_expr(
+        parse_expr('$meta["anything"] == "x"'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    # d has $meta=null → False
+    assert result.to_pylist()[3] is False
+
+
+def test_meta_missing_key(meta_table, schema_dynamic):
+    """$meta exists but the key is absent → False."""
+    compiled = compile_expr(
+        parse_expr('$meta["nonexistent"] == "x"'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    assert all(v is False for v in result.to_pylist())
+
+
+def test_meta_in_or(meta_table, schema_dynamic):
+    compiled = compile_expr(
+        parse_expr('$meta["category"] == "tech" or $meta["category"] == "news"'),
+        schema_dynamic,
+    )
+    from litevecdb.search.filter.eval import evaluate
+    result = evaluate(compiled, meta_table)
+    # tech, news, tech, null, blog
+    assert result.to_pylist() == [True, True, True, False, False]
+
+
+def test_arrow_backend_rejects_meta(meta_table, schema_dynamic):
+    """Force arrow backend on a $meta expression — should fail loudly."""
+    from litevecdb.search.filter.eval.arrow_backend import evaluate_arrow
+    compiled = compile_expr(
+        parse_expr('$meta["category"] == "tech"'),
+        schema_dynamic,
+    )
+    forced = replace(compiled, backend="arrow")
+    with pytest.raises(NotImplementedError, match="\\$meta"):
+        evaluate_arrow(forced, meta_table)

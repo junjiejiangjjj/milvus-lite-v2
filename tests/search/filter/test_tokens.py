@@ -410,3 +410,42 @@ def test_arithmetic_token_positions():
     assert tokens[0].pos == 0  # a
     assert tokens[1].pos == 2  # +
     assert tokens[3].pos == 6  # *
+
+
+# ---------------------------------------------------------------------------
+# Phase F2b — $meta marker
+# ---------------------------------------------------------------------------
+
+def test_meta_token():
+    tokens = tokenize("$meta")
+    assert tokens[0].kind == TokenKind.META
+    assert tokens[0].text == "$meta"
+
+
+def test_meta_with_brackets():
+    """`$meta[\"key\"]` is META + LBRACKET + STRING + RBRACKET (parser combines)."""
+    assert kinds('$meta["key"]') == [
+        TokenKind.META,
+        TokenKind.LBRACKET,
+        TokenKind.STRING,
+        TokenKind.RBRACKET,
+        TokenKind.EOF,
+    ]
+
+
+def test_meta_in_expression():
+    assert kinds('$meta["age"] > 18') == [
+        TokenKind.META, TokenKind.LBRACKET, TokenKind.STRING, TokenKind.RBRACKET,
+        TokenKind.GT, TokenKind.INT,
+        TokenKind.EOF,
+    ]
+
+
+def test_dollar_alone_rejected():
+    with pytest.raises(FilterParseError, match="\\$meta"):
+        tokenize("$")
+
+
+def test_dollar_other_rejected():
+    with pytest.raises(FilterParseError, match="\\$meta"):
+        tokenize("$other")

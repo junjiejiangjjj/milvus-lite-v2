@@ -30,6 +30,7 @@ from litevecdb.search.filter.ast import (
     IsNullOp,
     LikeOp,
     ListLit,
+    MetaAccess,
     Not,
     Or,
     StringLit,
@@ -187,5 +188,15 @@ def _eval(node, table):
         col = _eval(node.field, table)
         result = pc.is_null(col)
         return pc.invert(result) if node.negate else result
+
+    if isinstance(node, MetaAccess):
+        # Defensive: compile_expr should never select arrow_backend for
+        # an expression containing MetaAccess (that's the whole point of
+        # the backend dispatcher). If we hit this, the dispatcher is
+        # broken — fail loudly.
+        raise NotImplementedError(
+            "arrow_backend cannot evaluate $meta access; expressions with "
+            "MetaAccess must be routed to python_backend by compile_expr"
+        )
 
     raise TypeError(f"unknown AST node: {type(node).__name__}")
