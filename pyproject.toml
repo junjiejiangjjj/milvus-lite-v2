@@ -20,3 +20,6 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: long-running tests that exercise resource boundedness over many ops",
+]

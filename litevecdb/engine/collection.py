@@ -32,6 +32,7 @@ import numpy as np
 import pyarrow as pa
 
 from litevecdb.constants import ALL_PARTITIONS, DEFAULT_PARTITION, MEMTABLE_SIZE_LIMIT
+from litevecdb.engine.compaction import CompactionManager
 from litevecdb.engine.flush import execute_flush
 from litevecdb.engine.operation import DeleteOp, InsertOp, Operation
 from litevecdb.engine.recovery import execute_recovery
@@ -127,6 +128,9 @@ class Collection:
         # set of immutable segments.
         self._segment_cache: Dict[_SegmentKey, Segment] = {}
         self._refresh_segment_cache()
+
+        # ── 5. compaction manager ───────────────────────────────
+        self._compaction_mgr = CompactionManager(data_dir, schema)
 
     # ── public API ──────────────────────────────────────────────
 
@@ -390,9 +394,15 @@ class Collection:
             new_wal_number=new_wal_number,
         )
 
-        # ── post-flush: refresh segment cache ───────────────────
-        # Newly written Parquet files become immediately visible to
-        # subsequent search/get calls.
+        # ── post-flush: maybe trigger compaction per partition ──
+        # maybe_compact() is a no-op for partitions below the trigger
+        # threshold, so we can call it on all known partitions cheaply.
+        for partition in self._manifest.list_partitions():
+            self._compaction_mgr.maybe_compact(
+                partition, self._manifest, self._delta_index
+            )
+
+        # ── refresh segment cache (picks up flushed + compacted) ─
         self._refresh_segment_cache()
 
     def _refresh_segment_cache(self) -> None:
