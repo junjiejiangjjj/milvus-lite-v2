@@ -300,6 +300,15 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             partition_names = list(request.partition_names) or None
             output_fields = list(request.output_fields) or None
 
+            # Extract limit from query_params KV list (pymilvus packs it there).
+            limit = None
+            for kv in request.query_params:
+                if kv.key == "limit":
+                    try:
+                        limit = int(kv.value)
+                    except (ValueError, TypeError):
+                        pass
+
             pks = self._extract_pks_from_expr(request.expr, col)
             if pks is not None:
                 rows = col.get(pks, partition_names=partition_names)
@@ -308,6 +317,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     request.expr,
                     output_fields=output_fields,
                     partition_names=partition_names,
+                    limit=limit,
                 )
 
             return milvus_pb2.QueryResults(

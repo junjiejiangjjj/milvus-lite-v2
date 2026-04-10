@@ -114,6 +114,13 @@ def _extract_column(fd, num_rows: int) -> List[Any]:
 
     Handles the scalar/vector dispatch, validates length, and
     overlays valid_data nulls if present.
+
+    Nullable encoding (pymilvus convention):
+        pymilvus sends nullable fields in COMPACT form — the scalar
+        data array contains ONLY the non-null values (length = count
+        of True in valid_data), while valid_data has full num_rows
+        length. We expand the compact array back to full length by
+        inserting None at positions where valid_data is False.
     """
     dtype_int = int(fd.type)
 
@@ -126,21 +133,40 @@ def _extract_column(fd, num_rows: int) -> List[Any]:
             f"FieldData {fd.field_name!r} has neither scalars nor vectors"
         )
 
-    if len(column) != num_rows:
-        raise SchemaValidationError(
-            f"FieldData {fd.field_name!r} has {len(column)} rows, "
-            f"expected {num_rows}"
-        )
-
     # Apply valid_data null mask if present (nullable fields).
-    if list(fd.valid_data):
-        valid = list(fd.valid_data)
-        if len(valid) != num_rows:
+    valid_list = list(fd.valid_data)
+    if valid_list:
+        if len(valid_list) != num_rows:
             raise SchemaValidationError(
                 f"FieldData {fd.field_name!r} valid_data length "
-                f"{len(valid)} != num_rows {num_rows}"
+                f"{len(valid_list)} != num_rows {num_rows}"
             )
-        column = [v if valid[i] else None for i, v in enumerate(column)]
+        n_valid = sum(1 for v in valid_list if v)
+        if len(column) == n_valid:
+            # Compact form: expand by interleaving Nones.
+            expanded: List[Any] = []
+            val_iter = iter(column)
+            for v in valid_list:
+                if v:
+                    expanded.append(next(val_iter))
+                else:
+                    expanded.append(None)
+            column = expanded
+        elif len(column) == num_rows:
+            # Full form: overlay nulls on existing values.
+            column = [v if valid_list[i] else None for i, v in enumerate(column)]
+        else:
+            raise SchemaValidationError(
+                f"FieldData {fd.field_name!r} has {len(column)} values "
+                f"but valid_data expects {n_valid} non-null or {num_rows} total"
+            )
+    else:
+        # No valid_data — column must have full num_rows length.
+        if len(column) != num_rows:
+            raise SchemaValidationError(
+                f"FieldData {fd.field_name!r} has {len(column)} rows, "
+                f"expected {num_rows}"
+            )
 
     return column
 
