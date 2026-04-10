@@ -103,6 +103,28 @@ def fields_data_to_records(
 
     for fd in fields_data:
         column = _extract_column(fd, num_rows)
+
+        # Dynamic field handling: pymilvus packs dynamic fields into a
+        # single FieldData with is_dynamic=True (or field_name="$meta")
+        # and type=JSON. The JSON value is a dict like {"level": 5}.
+        # We unpack those keys into the top-level record so the
+        # engine's separate_dynamic_fields can re-pack them into $meta
+        # without double-nesting.
+        if fd.is_dynamic or fd.field_name == "$meta":
+            for i in range(num_rows):
+                val = column[i]
+                if isinstance(val, dict):
+                    records[i].update(val)
+                # If it's a string (pre-serialized JSON), try to parse it.
+                elif isinstance(val, str):
+                    try:
+                        parsed = __import__("json").loads(val)
+                        if isinstance(parsed, dict):
+                            records[i].update(parsed)
+                    except (ValueError, TypeError):
+                        pass
+            continue
+
         for i in range(num_rows):
             records[i][fd.field_name] = column[i]
 
