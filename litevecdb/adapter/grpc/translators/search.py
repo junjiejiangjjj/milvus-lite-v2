@@ -71,6 +71,20 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
     partition_names = list(request.partition_names) or None
     output_fields = list(request.output_fields) or None
 
+    # anns_field: which vector field to search on.
+    # pymilvus puts it in search_params as "anns_field" (JSON string).
+    raw_params: dict = {}
+    for kv in request.search_params:
+        try:
+            raw_params[kv.key] = json.loads(kv.value)
+        except (json.JSONDecodeError, ValueError):
+            raw_params[kv.key] = kv.value
+    anns_field = raw_params.get("anns_field")
+    if isinstance(anns_field, str) and anns_field:
+        pass  # use it
+    else:
+        anns_field = None  # let engine default
+
     return {
         "query_vectors": query_vectors,
         "top_k": top_k,
@@ -79,6 +93,7 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
         "partition_names": partition_names,
         "output_fields": output_fields,
         "search_params": search_params,
+        "anns_field": anns_field,
     }
 
 

@@ -374,13 +374,15 @@ class Collection:
         partition_names: Optional[List[str]] = None,
         expr: Optional[str] = None,
         output_fields: Optional[List[str]] = None,
+        anns_field: Optional[str] = None,
     ) -> List[List[dict]]:
         """Vector top-k search.
 
         Args:
-            query_vectors: list of length nq, each item a list of length dim.
+            query_vectors: list of length nq, each item a list of length dim
+                (for FLOAT_VECTOR) or list of dict (for SPARSE_FLOAT_VECTOR).
             top_k: requested k.
-            metric_type: "COSINE" / "L2" / "IP".
+            metric_type: "COSINE" / "L2" / "IP" / "BM25".
             partition_names: optional partition filter.
             expr: optional Milvus-style scalar filter expression. Hits
                 that don't match are excluded before top-k selection.
@@ -390,6 +392,8 @@ class Collection:
                   - []    → empty entity (only id + distance)
                   - list  → exactly those fields (pk always surfaced as
                             "id"; vector included only if listed)
+            anns_field: name of the vector field to search on. None defaults
+                to the first FLOAT_VECTOR field (backward compatible).
 
         Returns:
             List of length nq. Each inner list has up to top_k dicts of
@@ -405,7 +409,22 @@ class Collection:
 
         self._require_loaded()
 
-        # Convert to numpy (nq, dim).
+        # Resolve the target vector field
+        vector_field = self._resolve_anns_field(anns_field)
+        field_schema = next(f for f in self._schema.fields if f.name == vector_field)
+
+        if field_schema.dtype == DataType.SPARSE_FLOAT_VECTOR:
+            return self._search_sparse(
+                query_vectors=query_vectors,
+                vector_field=vector_field,
+                top_k=top_k,
+                metric_type=metric_type,
+                partition_names=partition_names,
+                expr=expr,
+                output_fields=output_fields,
+            )
+
+        # Dense float vector search (existing path)
         q_arr = np.asarray(query_vectors, dtype=np.float32)
         if q_arr.ndim != 2:
             raise ValueError(
@@ -414,13 +433,6 @@ class Collection:
 
         compiled_filter = self._compile_filter(expr) if expr else None
 
-        # Phase 9.2: index-aware path. Each segment uses its attached
-        # VectorIndex if present, else an ad-hoc BruteForceIndex; the
-        # memtable always uses brute force; results are merged across
-        # sources at the end. The differential test in
-        # tests/search/test_executor_with_index.py validates that this
-        # produces the same top-k as the legacy execute_search path
-        # for any (records, expr, partition) combination.
         return execute_search_with_index(
             query_vectors=q_arr,
             segments=self._segment_cache.values(),
@@ -429,10 +441,53 @@ class Collection:
             top_k=top_k,
             metric_type=metric_type,
             pk_field=self._pk_name,
-            vector_field=self._vector_name,
+            vector_field=vector_field,
             partition_names=partition_names,
             compiled_filter=compiled_filter,
             output_fields=output_fields,
+        )
+
+    def _resolve_anns_field(self, anns_field: Optional[str]) -> str:
+        """Resolve the anns_field parameter to a concrete field name.
+
+        Returns the first FLOAT_VECTOR field if anns_field is None.
+        Validates that the field exists and is a vector type.
+        """
+        if anns_field is None:
+            return self._vector_name
+
+        field = next((f for f in self._schema.fields if f.name == anns_field), None)
+        if field is None:
+            raise SchemaValidationError(
+                f"anns_field {anns_field!r} not found in schema"
+            )
+        if field.dtype not in (DataType.FLOAT_VECTOR, DataType.SPARSE_FLOAT_VECTOR):
+            raise SchemaValidationError(
+                f"anns_field {anns_field!r} is not a vector field "
+                f"(dtype={field.dtype.name})"
+            )
+        return anns_field
+
+    def _search_sparse(
+        self,
+        query_vectors: List,
+        vector_field: str,
+        top_k: int,
+        metric_type: str,
+        partition_names: Optional[List[str]],
+        expr: Optional[str],
+        output_fields: Optional[List[str]],
+    ) -> List[List[dict]]:
+        """Sparse vector search (BM25 or sparse IP).
+
+        This is a stub that will be fully implemented in Phase 11.5
+        when SparseInvertedIndex is available. For now it raises
+        NotImplementedError.
+        """
+        raise NotImplementedError(
+            f"Sparse vector search on field {vector_field!r} is not yet "
+            f"implemented (coming in Phase 11.5). Use a FLOAT_VECTOR "
+            f"field for search until then."
         )
 
     def query(

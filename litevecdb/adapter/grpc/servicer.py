@@ -368,6 +368,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 partition_names=parsed["partition_names"],
                 expr=parsed["expr"],
                 output_fields=parsed["output_fields"],
+                anns_field=parsed.get("anns_field"),
             )
 
             result_data = build_search_result_data(
