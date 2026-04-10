@@ -724,7 +724,7 @@ class Collection:
 
     def query(
         self,
-        expr: str,
+        expr: Optional[str] = None,
         output_fields: Optional[List[str]] = None,
         partition_names: Optional[List[str]] = None,
         limit: Optional[int] = None,
@@ -736,7 +736,8 @@ class Collection:
         by their scalar attributes.
 
         Args:
-            expr: required Milvus-style filter expression
+            expr: Milvus-style filter expression. None or empty string
+                means "return all records" (used by query_iterator).
             output_fields: subset of fields to include in returned dicts.
                 None means all schema fields (with _seq / _partition stripped).
                 The pk field is always included.
@@ -748,12 +749,12 @@ class Collection:
             "segments first, then MemTable" — within each source, the
             order is the underlying iteration order. No top-k sort.
         """
-        if not isinstance(expr, str) or not expr:
-            raise TypeError("query() requires a non-empty filter expression")
+        if expr is not None and not isinstance(expr, str):
+            raise TypeError("query() expr must be a string or None")
 
         self._require_loaded()
 
-        compiled_filter = self._compile_filter(expr)
+        compiled_filter = self._compile_filter(expr) if expr else None
 
         all_pks, all_seqs, _all_vectors, all_records, filter_mask = assemble_candidates(
             segments=self._segment_cache.values(),

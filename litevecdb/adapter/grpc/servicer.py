@@ -309,12 +309,13 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     except (ValueError, TypeError):
                         pass
 
-            pks = self._extract_pks_from_expr(request.expr, col)
+            expr = request.expr if request.expr else None
+            pks = self._extract_pks_from_expr(expr, col) if expr else None
             if pks is not None:
                 rows = col.get(pks, partition_names=partition_names)
             else:
                 rows = col.query(
-                    request.expr,
+                    expr,
                     output_fields=output_fields,
                     partition_names=partition_names,
                     limit=limit,

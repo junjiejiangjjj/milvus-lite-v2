@@ -315,11 +315,17 @@ def test_query_after_delete(col):
     assert ids == {"e"}
 
 
-def test_query_required_expr(col):
-    with pytest.raises(TypeError, match="non-empty"):
-        col.query("")
-    with pytest.raises(TypeError, match="non-empty"):
-        col.query(None)
+def test_query_accepts_empty_expr(col):
+    """query() with empty or None expr returns all records (no error)."""
+    results_empty = col.query("")
+    results_none = col.query(None)
+    assert isinstance(results_empty, list)
+    assert isinstance(results_none, list)
+    assert len(results_empty) == len(results_none)
+
+def test_query_rejects_non_string_expr(col):
+    with pytest.raises(TypeError, match="string or None"):
+        col.query(123)
 
 
 # ---------------------------------------------------------------------------
