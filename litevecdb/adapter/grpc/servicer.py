@@ -551,7 +551,128 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
             )
 
-    # ── Helpers (used by Phase 10.2+ implementations) ───────────
+    # ── Partition + Flush + Stats (Phase 10.5) ─────────────────
+
+    def CreatePartition(self, request, context):
+        try:
+            col = self._db.get_collection(request.collection_name)
+            col.create_partition(request.partition_name)
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("CreatePartition failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def DropPartition(self, request, context):
+        try:
+            col = self._db.get_collection(request.collection_name)
+            col.drop_partition(request.partition_name)
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("DropPartition failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def HasPartition(self, request, context):
+        try:
+            col = self._db.get_collection(request.collection_name)
+            exists = col.has_partition(request.partition_name)
+            return milvus_pb2.BoolResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                value=exists,
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.BoolResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+                value=False,
+            )
+        except Exception as e:
+            logger.exception("HasPartition failed: %s", e)
+            return milvus_pb2.BoolResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+                value=False,
+            )
+
+    def ShowPartitions(self, request, context):
+        try:
+            col = self._db.get_collection(request.collection_name)
+            names = col.list_partitions()
+            return milvus_pb2.ShowPartitionsResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                partition_names=names,
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.ShowPartitionsResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("ShowPartitions failed: %s", e)
+            return milvus_pb2.ShowPartitionsResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    def Flush(self, request, context):
+        """Flush all named collections. pymilvus sends the collection
+        name(s) in request.collection_names (plural)."""
+        try:
+            for cname in request.collection_names:
+                if self._db.has_collection(cname):
+                    col = self._db.get_collection(cname)
+                    col.flush()
+            return milvus_pb2.FlushResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.FlushResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("Flush failed: %s", e)
+            return milvus_pb2.FlushResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    def GetFlushState(self, request, context):
+        """pymilvus polls this after Flush. Phase 9 flush is synchronous
+        so the answer is always True (flushed)."""
+        return milvus_pb2.GetFlushStateResponse(
+            status=common_pb2.Status(**success_status_kwargs()),
+            flushed=True,
+        )
+
+    def GetCollectionStatistics(self, request, context):
+        """Return row_count as a KeyValuePair list. pymilvus's
+        get_collection_stats parses these pairs into a dict."""
+        try:
+            stats = self._db.get_collection_stats(request.collection_name)
+            kv_pairs = [
+                common_pb2.KeyValuePair(key=str(k), value=str(v))
+                for k, v in stats.items()
+            ]
+            return milvus_pb2.GetCollectionStatisticsResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                stats=kv_pairs,
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.GetCollectionStatisticsResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("GetCollectionStatistics failed: %s", e)
+            return milvus_pb2.GetCollectionStatisticsResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    def ListDatabases(self, request, context):
+        """LiteVecDB has no database concept; return a single default."""
+        return milvus_pb2.ListDatabasesResponse(
+            status=common_pb2.Status(**success_status_kwargs()),
+            db_names=["default"],
+        )
+
+    # ── Helpers ─────────────────────────────────────────────────
 
     def _build_ids_proto(self, pks, col):
         """Construct an ``IDs`` proto from a list of pk values.
