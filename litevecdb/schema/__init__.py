@@ -1,4 +1,10 @@
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from litevecdb.schema.types import (
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    Function,
+    FunctionType,
+)
 from litevecdb.schema.validation import (
     separate_dynamic_fields,
     validate_record,
@@ -10,6 +16,8 @@ __all__ = [
     "CollectionSchema",
     "DataType",
     "FieldSchema",
+    "Function",
+    "FunctionType",
     "validate_schema",
     "validate_record",
     "separate_dynamic_fields",

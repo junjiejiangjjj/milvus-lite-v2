@@ -22,9 +22,12 @@ def get_primary_field(schema: CollectionSchema) -> FieldSchema:
 
 
 def get_vector_field(schema: CollectionSchema) -> FieldSchema:
-    """Return the vector FieldSchema."""
+    """Return the first vector FieldSchema (FLOAT_VECTOR preferred)."""
     for f in schema.fields:
         if f.dtype == DataType.FLOAT_VECTOR:
+            return f
+    for f in schema.fields:
+        if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
             return f
     raise ValueError("Schema has no vector field")
 
@@ -35,6 +38,8 @@ def _arrow_type(field: FieldSchema) -> pa.DataType:
         if field.dim is None:
             raise ValueError(f"FLOAT_VECTOR field '{field.name}' requires dim")
         return pa.list_(pa.float32(), field.dim)
+    if field.dtype == DataType.SPARSE_FLOAT_VECTOR:
+        return pa.binary()
     return TYPE_MAP[field.dtype]
 
 

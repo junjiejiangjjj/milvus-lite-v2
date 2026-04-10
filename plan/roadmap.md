@@ -570,7 +570,7 @@ def test_pymilvus_quickstart(grpc_server):
 - Hybrid search（多向量） → Future
 - Search iterator / pagination → Future
 - Database 多实例 → Future（永远 default）
-- Sparse / Binary vector 类型 → Future
+- Binary vector 类型 → Future
 
 ### 完成标志
 
@@ -579,6 +579,61 @@ def test_pymilvus_quickstart(grpc_server):
 - recall parity 测试：grpc search 与 engine 直接 search 的 top-k 完全一致
 - 所有不支持 RPC 返回 `UNIMPLEMENTED` + 友好消息（不 silent fail）
 - m10 demo 通过
+
+---
+
+## Phase 11 — 全文检索（Full Text Search）
+
+**目标**：支持 Milvus 兼容的 BM25 全文检索 + text_match 过滤，pymilvus 用户可直接使用 `Function(type=BM25)` 进行文本搜索。
+
+**前置依赖**：Phase 10 完成。gRPC 适配层提供 FunctionSchema / SparseFloatArray 的 proto 基础设施。
+
+**深度设计文档**：`plan/fts-design.md`
+
+### 核心架构
+
+```
+Insert: text → Analyzer 分词 → BM25 Function → {term_hash: TF} → 稀疏向量列
+Load:   稀疏向量 → 构建倒排索引 + segment 内统计量 (docCount, avgdl, df)
+Search: query text → 分词 → 倒排索引查找 → BM25 评分 → top-k
+```
+
+### 任务分解
+
+| 编号 | 任务 | 交付物 |
+|---|---|---|
+| 11.1 | Schema 扩展 ✅ | DataType.SPARSE_FLOAT_VECTOR, Function/FunctionType, FieldSchema 新属性, 校验, persistence |
+| 11.2 | Analyzer 分词子系统 | `analyzer/` 包：StandardAnalyzer（正则）+ JiebaAnalyzer（可选）+ factory + hash |
+| 11.3 | 稀疏向量存储 | sparse_to_bytes/bytes_to_sparse 编解码；WAL/Parquet 稀疏向量列支持 |
+| 11.4 | BM25 Function 引擎 | insert 时自动分词 → 生成 TF 稀疏向量；engine search 支持 anns_field |
+| 11.5 | 稀疏倒排索引 + BM25 搜索 | SparseInvertedIndex：build/search/save/load；集成到 segment 状态机 |
+| 11.6 | text_match 过滤器 | filter 子系统新增 text_match 函数；三个后端实现 |
+| 11.7 | gRPC 适配层扩展 | FunctionSchema 翻译；SparseFloatArray 编解码；BM25 搜索请求处理 |
+| 11.8 | 集成测试 | pymilvus 端到端 BM25 搜索 + text_match + 混合场景测试 |
+
+### 关键设计决策
+
+- **Per-segment 倒排索引**：与 Phase 9 的 VectorIndex 1:1 绑定一致，segment 不可变 → 索引不可变
+- **BM25 查询时计算**：insert 存 TF，search 时基于段内统计量实时计算 IDF + BM25 score
+- **term ID = hash**：MurmurHash3 映射 term → uint32，无需全局词表
+- **距离约定**：distance = -bm25_score（取负，与 VectorIndex 协议一致）
+- **anns_field 参数**：search API 支持指定搜索向量字段，打破单向量限制
+
+### 不在 Phase 11 范围
+
+- Multi-Analyzer（多语言动态选择）→ Future
+- phrase_match（短语匹配 + slop）→ Future
+- LexicalHighlighter（结果高亮）→ Future
+- TextEmbedding Function → Future
+- Hybrid Search RPC → Future
+
+### 完成标志
+
+- pymilvus BM25 全文检索端到端通过
+- text_match 过滤器与向量搜索组合使用
+- Flush / Compaction 后 BM25 索引正确重建
+- Load / Release 状态机覆盖 BM25 索引
+- 所有已有测试不回归
 
 ---
 

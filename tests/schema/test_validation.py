@@ -105,14 +105,14 @@ def test_primary_key_nullable():
 
 
 def test_no_vector_field():
-    with pytest.raises(SchemaValidationError, match="no FLOAT_VECTOR"):
+    with pytest.raises(SchemaValidationError, match="no vector field"):
         validate_schema(CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
         ]))
 
 
 def test_multiple_vector_fields():
-    with pytest.raises(SchemaValidationError, match="exactly one FLOAT_VECTOR"):
+    with pytest.raises(SchemaValidationError, match="at most one FLOAT_VECTOR"):
         validate_schema(CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
             FieldSchema(name="v1", dtype=DataType.FLOAT_VECTOR, dim=4),

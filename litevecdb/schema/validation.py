@@ -6,7 +6,13 @@ import json
 from typing import Any, Optional, Tuple
 
 from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from litevecdb.schema.types import (
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    Function,
+    FunctionType,
+)
 
 # Reserved column names — users may not name fields these.
 RESERVED_FIELD_NAMES = frozenset({"_seq", "_partition", "$meta"})
@@ -38,18 +44,23 @@ def validate_schema(schema: CollectionSchema) -> None:
 
     Rules:
     - exactly one is_primary=True field; dtype is VARCHAR or INT64
-    - exactly one FLOAT_VECTOR field (MVP limitation)
-    - vector field must have dim > 0
+    - at least one vector field (FLOAT_VECTOR or SPARSE_FLOAT_VECTOR)
+    - at most one FLOAT_VECTOR field
+    - FLOAT_VECTOR field must have dim > 0
     - primary key field must not be nullable
     - field names must be unique
     - field names must not collide with reserved names (_seq, _partition, $meta)
+    - BM25 function: input must be VARCHAR with enable_analyzer,
+      output must be SPARSE_FLOAT_VECTOR
     """
     if not schema.fields:
         raise SchemaValidationError("schema has no fields")
 
     seen_names: set[str] = set()
     pk_fields: list[FieldSchema] = []
-    vector_fields: list[FieldSchema] = []
+    float_vector_fields: list[FieldSchema] = []
+    all_vector_fields: list[FieldSchema] = []
+    field_by_name: dict[str, FieldSchema] = {}
 
     for f in schema.fields:
         if not f.name:
@@ -61,15 +72,19 @@ def validate_schema(schema: CollectionSchema) -> None:
         if f.name in seen_names:
             raise SchemaValidationError(f"duplicate field name: {f.name!r}")
         seen_names.add(f.name)
+        field_by_name[f.name] = f
 
         if f.is_primary:
             pk_fields.append(f)
         if f.dtype == DataType.FLOAT_VECTOR:
-            vector_fields.append(f)
+            float_vector_fields.append(f)
+            all_vector_fields.append(f)
             if f.dim is None or f.dim <= 0:
                 raise SchemaValidationError(
                     f"vector field {f.name!r} requires dim > 0, got {f.dim}"
                 )
+        if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
+            all_vector_fields.append(f)
 
     if len(pk_fields) == 0:
         raise SchemaValidationError("schema has no primary key field")
@@ -88,12 +103,69 @@ def validate_schema(schema: CollectionSchema) -> None:
             f"primary key {pk.name!r} must not be nullable"
         )
 
-    if len(vector_fields) == 0:
-        raise SchemaValidationError("schema has no FLOAT_VECTOR field")
-    if len(vector_fields) > 1:
-        names = [f.name for f in vector_fields]
+    if len(all_vector_fields) == 0:
         raise SchemaValidationError(
-            f"MVP supports exactly one FLOAT_VECTOR field, got {names}"
+            "schema has no vector field (FLOAT_VECTOR or SPARSE_FLOAT_VECTOR)"
+        )
+    if len(float_vector_fields) > 1:
+        names = [f.name for f in float_vector_fields]
+        raise SchemaValidationError(
+            f"at most one FLOAT_VECTOR field allowed, got {names}"
+        )
+
+    # Validate functions
+    for func in schema.functions:
+        _validate_function(func, field_by_name)
+
+
+# ---------------------------------------------------------------------------
+# Function validation
+# ---------------------------------------------------------------------------
+
+def _validate_function(func: Function, field_by_name: dict[str, FieldSchema]) -> None:
+    """Validate a single Function definition against its schema fields."""
+    if func.function_type == FunctionType.BM25:
+        # Input: exactly one VARCHAR field with enable_analyzer=True
+        if len(func.input_field_names) != 1:
+            raise SchemaValidationError(
+                f"BM25 function {func.name!r} requires exactly one input field"
+            )
+        in_name = func.input_field_names[0]
+        in_field = field_by_name.get(in_name)
+        if in_field is None:
+            raise SchemaValidationError(
+                f"BM25 function {func.name!r} input field {in_name!r} not found in schema"
+            )
+        if in_field.dtype != DataType.VARCHAR:
+            raise SchemaValidationError(
+                f"BM25 function {func.name!r} input field {in_name!r} must be VARCHAR, "
+                f"got {in_field.dtype.name}"
+            )
+        if not in_field.enable_analyzer:
+            raise SchemaValidationError(
+                f"BM25 function {func.name!r} input field {in_name!r} "
+                f"must have enable_analyzer=True"
+            )
+
+        # Output: exactly one SPARSE_FLOAT_VECTOR field
+        if len(func.output_field_names) != 1:
+            raise SchemaValidationError(
+                f"BM25 function {func.name!r} requires exactly one output field"
+            )
+        out_name = func.output_field_names[0]
+        out_field = field_by_name.get(out_name)
+        if out_field is None:
+            raise SchemaValidationError(
+                f"BM25 function {func.name!r} output field {out_name!r} not found in schema"
+            )
+        if out_field.dtype != DataType.SPARSE_FLOAT_VECTOR:
+            raise SchemaValidationError(
+                f"BM25 function {func.name!r} output field {out_name!r} must be "
+                f"SPARSE_FLOAT_VECTOR, got {out_field.dtype.name}"
+            )
+    else:
+        raise SchemaValidationError(
+            f"unknown function type {func.function_type!r} for function {func.name!r}"
         )
 
 
@@ -101,12 +173,26 @@ def validate_schema(schema: CollectionSchema) -> None:
 # Record validation
 # ---------------------------------------------------------------------------
 
+def _function_output_field_names(schema: CollectionSchema) -> frozenset[str]:
+    """Return the set of field names that are auto-generated by functions."""
+    names: set[str] = set()
+    for func in schema.functions:
+        names.update(func.output_field_names)
+    # Also include fields explicitly marked
+    for f in schema.fields:
+        if f.is_function_output:
+            names.add(f.name)
+    return frozenset(names)
+
+
 def validate_record(record: dict, schema: CollectionSchema) -> None:
     """Validate a single record dict against the schema.
 
     Rules:
     - pk field present and non-None
-    - vector field present and len(vector) == field.dim, every element numeric
+    - FLOAT_VECTOR field present and len(vector) == field.dim, every element numeric
+    - SPARSE_FLOAT_VECTOR fields that are function outputs are skipped
+      (auto-generated by engine); user-provided sparse vectors are validated
     - declared field values match their dtype
     - non-nullable fields are not None
     - if enable_dynamic_field=False, no fields outside the schema
@@ -118,7 +204,7 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
 
     schema_field_names = {f.name for f in schema.fields}
     pk = _find_pk(schema)
-    vec = _find_vector(schema)
+    func_output_names = _function_output_field_names(schema)
 
     # pk presence
     if pk.name not in record or record[pk.name] is None:
@@ -126,32 +212,52 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
             f"primary key {pk.name!r} missing or None"
         )
 
-    # vector presence + shape
-    if vec.name not in record or record[vec.name] is None:
-        raise SchemaValidationError(
-            f"vector field {vec.name!r} missing or None"
-        )
-    vector_value = record[vec.name]
-    if not isinstance(vector_value, (list, tuple)):
-        raise SchemaValidationError(
-            f"vector field {vec.name!r} must be list/tuple, got {type(vector_value).__name__}"
-        )
-    if len(vector_value) != vec.dim:
-        raise SchemaValidationError(
-            f"vector field {vec.name!r} expected dim {vec.dim}, got {len(vector_value)}"
-        )
-    for i, x in enumerate(vector_value):
-        if not isinstance(x, (int, float)) or isinstance(x, bool):
+    # FLOAT_VECTOR presence + shape
+    float_vec = _find_float_vector(schema)
+    if float_vec is not None:
+        if float_vec.name not in record or record[float_vec.name] is None:
             raise SchemaValidationError(
-                f"vector field {vec.name!r}[{i}] must be numeric, got {type(x).__name__}"
+                f"vector field {float_vec.name!r} missing or None"
             )
+        vector_value = record[float_vec.name]
+        if not isinstance(vector_value, (list, tuple)):
+            raise SchemaValidationError(
+                f"vector field {float_vec.name!r} must be list/tuple, "
+                f"got {type(vector_value).__name__}"
+            )
+        if len(vector_value) != float_vec.dim:
+            raise SchemaValidationError(
+                f"vector field {float_vec.name!r} expected dim {float_vec.dim}, "
+                f"got {len(vector_value)}"
+            )
+        for i, x in enumerate(vector_value):
+            if not isinstance(x, (int, float)) or isinstance(x, bool):
+                raise SchemaValidationError(
+                    f"vector field {float_vec.name!r}[{i}] must be numeric, "
+                    f"got {type(x).__name__}"
+                )
 
     # per-field type / nullability
     for f in schema.fields:
         if f.dtype == DataType.FLOAT_VECTOR:
-            continue  # already checked
+            continue  # already checked above
+        if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
+            # Function output fields: skip — engine auto-generates them.
+            if f.name in func_output_names:
+                continue
+            # User-provided sparse vectors: validate if present.
+            if f.name in record and record[f.name] is not None:
+                _validate_sparse_vector(f.name, record[f.name])
+            elif not f.nullable and f.default_value is None:
+                raise SchemaValidationError(
+                    f"sparse vector field {f.name!r} missing and not nullable / no default"
+                )
+            continue
         if f.name not in record:
             if f.nullable or f.default_value is not None:
+                continue
+            # Function output fields can be absent
+            if f.name in func_output_names:
                 continue
             raise SchemaValidationError(
                 f"field {f.name!r} missing and not nullable / no default"
@@ -243,8 +349,53 @@ def _find_pk(schema: CollectionSchema) -> FieldSchema:
     raise SchemaValidationError("schema has no primary key field")
 
 
-def _find_vector(schema: CollectionSchema) -> FieldSchema:
+def _find_float_vector(schema: CollectionSchema) -> Optional[FieldSchema]:
+    """Return the FLOAT_VECTOR field, or None if only sparse vectors exist."""
     for f in schema.fields:
         if f.dtype == DataType.FLOAT_VECTOR:
             return f
-    raise SchemaValidationError("schema has no FLOAT_VECTOR field")
+    return None
+
+
+def _find_vector(schema: CollectionSchema) -> FieldSchema:
+    """Return the first vector field (FLOAT_VECTOR preferred, then SPARSE).
+
+    Kept for backward compatibility with callers that expect exactly one
+    vector field.
+    """
+    for f in schema.fields:
+        if f.dtype == DataType.FLOAT_VECTOR:
+            return f
+    for f in schema.fields:
+        if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
+            return f
+    raise SchemaValidationError(
+        "schema has no vector field (FLOAT_VECTOR or SPARSE_FLOAT_VECTOR)"
+    )
+
+
+def _validate_sparse_vector(field_name: str, value: Any) -> None:
+    """Validate a user-provided sparse vector value.
+
+    Expected format: dict[int, float] where keys are non-negative integers
+    (term IDs) and values are float scores.
+    """
+    if not isinstance(value, dict):
+        raise SchemaValidationError(
+            f"sparse vector field {field_name!r} must be a dict, "
+            f"got {type(value).__name__}"
+        )
+    for k, v in value.items():
+        if not isinstance(k, int) or isinstance(k, bool):
+            raise SchemaValidationError(
+                f"sparse vector field {field_name!r} key {k!r} must be int"
+            )
+        if k < 0:
+            raise SchemaValidationError(
+                f"sparse vector field {field_name!r} key {k} must be non-negative"
+            )
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            raise SchemaValidationError(
+                f"sparse vector field {field_name!r} value for key {k} "
+                f"must be numeric, got {type(v).__name__}"
+            )

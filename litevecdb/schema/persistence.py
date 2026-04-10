@@ -30,10 +30,16 @@ import os
 from typing import Any, Tuple
 
 from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from litevecdb.schema.types import (
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    Function,
+    FunctionType,
+)
 
 
-SCHEMA_FORMAT_VERSION = 1
+SCHEMA_FORMAT_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -46,13 +52,15 @@ def save_schema(
     path: str,
 ) -> None:
     """Serialize *schema* to *path* atomically (write-tmp + rename)."""
-    payload = {
+    payload: dict[str, Any] = {
         "collection_name": collection_name,
         "schema_format_version": SCHEMA_FORMAT_VERSION,
         "version": schema.version,
         "enable_dynamic_field": schema.enable_dynamic_field,
         "fields": [_field_to_dict(f) for f in schema.fields],
     }
+    if schema.functions:
+        payload["functions"] = [_function_to_dict(fn) for fn in schema.functions]
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
     tmp_path = path + ".tmp"
@@ -102,10 +110,16 @@ def load_schema(path: str) -> Tuple[str, CollectionSchema]:
         )
 
     fields = [_field_from_dict(d, path) for d in fields_raw]
+
+    # Functions (v2+)
+    functions_raw = payload.get("functions", [])
+    functions = [_function_from_dict(fd, path) for fd in functions_raw]
+
     schema = CollectionSchema(
         fields=fields,
         version=int(version),
         enable_dynamic_field=bool(enable_dynamic),
+        functions=functions,
     )
     return str(collection_name), schema
 
@@ -115,7 +129,7 @@ def load_schema(path: str) -> Tuple[str, CollectionSchema]:
 # ---------------------------------------------------------------------------
 
 def _field_to_dict(f: FieldSchema) -> dict:
-    return {
+    d: dict[str, Any] = {
         "name": f.name,
         "dtype": f.dtype.value,
         "is_primary": f.is_primary,
@@ -124,6 +138,16 @@ def _field_to_dict(f: FieldSchema) -> dict:
         "nullable": f.nullable,
         "default_value": f.default_value,
     }
+    # Only persist FTS attributes when non-default to keep v1 compat
+    if f.enable_analyzer:
+        d["enable_analyzer"] = True
+    if f.analyzer_params:
+        d["analyzer_params"] = f.analyzer_params
+    if f.enable_match:
+        d["enable_match"] = True
+    if f.is_function_output:
+        d["is_function_output"] = True
+    return d
 
 
 def _field_from_dict(d: Any, source: str) -> FieldSchema:
@@ -154,4 +178,45 @@ def _field_from_dict(d: Any, source: str) -> FieldSchema:
         max_length=d.get("max_length"),
         nullable=bool(d.get("nullable", False)),
         default_value=d.get("default_value"),
+        enable_analyzer=bool(d.get("enable_analyzer", False)),
+        analyzer_params=d.get("analyzer_params"),
+        enable_match=bool(d.get("enable_match", False)),
+        is_function_output=bool(d.get("is_function_output", False)),
+    )
+
+
+def _function_to_dict(fn: Function) -> dict:
+    return {
+        "name": fn.name,
+        "function_type": int(fn.function_type),
+        "input_field_names": fn.input_field_names,
+        "output_field_names": fn.output_field_names,
+        "params": fn.params,
+    }
+
+
+def _function_from_dict(d: Any, source: str) -> Function:
+    if not isinstance(d, dict):
+        raise SchemaValidationError(
+            f"schema file {source!r} function entry must be an object"
+        )
+    try:
+        name = d["name"]
+        ft_int = d["function_type"]
+    except KeyError as e:
+        raise SchemaValidationError(
+            f"schema file {source!r} function missing key {e.args[0]!r}"
+        ) from e
+    try:
+        ft = FunctionType(int(ft_int))
+    except ValueError as e:
+        raise SchemaValidationError(
+            f"schema file {source!r} unknown function_type {ft_int!r}"
+        ) from e
+    return Function(
+        name=str(name),
+        function_type=ft,
+        input_field_names=list(d.get("input_field_names", [])),
+        output_field_names=list(d.get("output_field_names", [])),
+        params=dict(d.get("params", {})),
     )

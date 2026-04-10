@@ -8,14 +8,15 @@ LiteVecDB — a local embedded vector database, designed as a **local version of
 
 ## Repository Layout
 
-- **Design docs** (root-level, written in Chinese): `MVP.md`, `write-pipeline.md`, `research.md`, `modules.md`, `wal-design.md`, `filter-design.md`, `index-design.md`, `grpc-adapter-design.md`, `roadmap.md`
+- **Design docs** (root-level, written in Chinese): `MVP.md`, `write-pipeline.md`, `research.md`, `modules.md`, `wal-design.md`, `filter-design.md`, `index-design.md`, `grpc-adapter-design.md`, `fts-design.md`, `roadmap.md`
 - **Code repo**: `milvus-lite-v2/` (git root) — design docs are also copied into `milvus-lite-v2/plan/`
 - **`modules.md`**: Authoritative module design — file-by-file breakdown with per-class/function signatures. Consult before implementing any module. §9.19-9.28 cover Phase 8 filter, §10 covers Phase 9 index, §11 covers Phase 10 gRPC adapter.
 - **`wal-design.md`**: Deep-dive on WAL (Arrow IPC Streaming), segment architecture, and search pipeline.
 - **`filter-design.md`**: Deep-dive on the Phase 8 scalar filter subsystem (grammar, AST, three-stage compilation, three backends arrow/hybrid/python).
 - **`index-design.md`**: Deep-dive on the Phase 9 vector index subsystem (FAISS HNSW, segment-level binding, load/release state machine, recall validation).
 - **`grpc-adapter-design.md`**: Deep-dive on the Phase 10 gRPC adapter (proto cropping, RPC mapping, FieldData transposition, error code translation).
-- **`roadmap.md`**: Phased implementation plan. Phases 0-8 are landed (Phase 8 has F1/F2a/F2b/F2c/F3+ done); Phase 9 (vector index) and Phase 10 (gRPC adapter) are next.
+- **`fts-design.md`**: Deep-dive on the Phase 11 full text search subsystem (BM25, Analyzer, SparseInvertedIndex, text_match filter).
+- **`roadmap.md`**: Phased implementation plan. Phases 0-10 are landed; Phase 11 (full text search) is current.
 
 ## Development Commands
 
@@ -47,14 +48,15 @@ Build system: Hatchling. Dependencies: `pyarrow>=15.0`, `numpy>=1.24`. Dev: `pyt
 
 ## Code Structure (`litevecdb/`)
 
-Six packages, layered bottom-up:
+Seven packages, layered bottom-up:
 
-1. **`schema/`** — Data model & type system. `DataType` enum, `FieldSchema`, `CollectionSchema`, record validation, Arrow schema builders (4 variants: data/delta/wal_data/wal_delta), schema.json persistence.
+1. **`schema/`** — Data model & type system. `DataType` enum (incl. `SPARSE_FLOAT_VECTOR`), `FieldSchema`, `CollectionSchema`, `Function`/`FunctionType`, record validation, Arrow schema builders (4 variants: data/delta/wal_data/wal_delta), schema.json persistence.
 2. **`storage/`** — Persistence layer. WAL (Arrow IPC Streaming, dual-file), MemTable (RecordBatch list + pk_index + delete_index, seq-aware), DataFile / DeltaFile (Parquet IO), DeltaIndex (in-memory tombstone map + gc_below), Segment (immutable Parquet cache + optional VectorIndex), Manifest (JSON + .prev backup, atomic via tmp+rename, Phase 9.3 adds index_spec field).
 3. **`engine/`** — Core logic orchestration. `Collection` class (entry point, `_seq` allocation, insert/delete/get/search/query, _apply orchestration, Phase 9.3 adds create_index/drop_index/load/release + load_state machine), Operation abstraction, Flush pipeline (7+1 steps, sync, Phase 9.4 adds index hook), Recovery (5+1 steps, Phase 9.4 adds orphan .idx cleanup), Compaction (Size-Tiered + tombstone GC + Phase 9.4 index lifecycle).
 4. **`search/`** — Vector retrieval. Bitmap pipeline (dedup + delete + scalar filter), distance functions (cosine/L2/IP via NumPy), assembler (segments + memtable → numpy + filter mask), executor (top-k; Phase 9.2 adds `execute_search_with_index` path). **`search/filter/`** subpackage (Phase 8): tokenizer + Pratt parser + semantic check + three backends (arrow/hybrid/python) for Milvus-style scalar expressions.
 5. **`index/`** (Phase 9) — Vector index abstraction. `VectorIndex` ABC, `IndexSpec`, `BruteForceIndex` (NumPy, fallback + differential baseline), `FaissHnswIndex` (FAISS HNSW + IDSelectorBitmap), factory with try-import faiss degradation. Bound to segments 1:1 via `.idx` files.
-6. **`adapter/`** (Phase 10) — Protocol translation. `adapter/grpc/` provides `MilvusServicer` mapping pymilvus RPCs to engine API. Translators handle Milvus FieldData ↔ records transposition, schema, search, results, expressions, index params. proto stubs generated from milvus-io/milvus-proto and committed to repo.
+6. **`analyzer/`** (Phase 11) — Text analysis for full text search. `Analyzer` ABC, `StandardAnalyzer` (regex tokenizer), `JiebaAnalyzer` (optional Chinese), `create_analyzer` factory, `term_to_id` hash function.
+7. **`adapter/`** (Phase 10) — Protocol translation. `adapter/grpc/` provides `MilvusServicer` mapping pymilvus RPCs to engine API. Translators handle Milvus FieldData ↔ records transposition, schema, search, results, expressions, index params. proto stubs generated from milvus-io/milvus-proto and committed to repo.
 
 Top-level: `db.py` (`LiteVecDB` — multi-collection lifecycle), `constants.py`, `exceptions.py`.
 

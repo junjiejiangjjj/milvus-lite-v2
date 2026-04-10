@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, IntEnum
 from typing import Any, Dict, List, Optional
 
 import pyarrow as pa
@@ -20,6 +20,26 @@ class DataType(Enum):
     VARCHAR = "varchar"
     JSON = "json"
     FLOAT_VECTOR = "float_vector"
+    SPARSE_FLOAT_VECTOR = "sparse_float_vector"
+
+
+class FunctionType(IntEnum):
+    """Function types that can be attached to a CollectionSchema."""
+    BM25 = 1
+
+
+@dataclass
+class Function:
+    """A schema-level function that auto-generates output fields from input fields.
+
+    For BM25: input is a VARCHAR field (with enable_analyzer=True),
+    output is a SPARSE_FLOAT_VECTOR field.
+    """
+    name: str
+    function_type: FunctionType
+    input_field_names: List[str]
+    output_field_names: List[str]
+    params: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -31,6 +51,11 @@ class FieldSchema:
     max_length: Optional[int] = None
     nullable: bool = False
     default_value: Any = None
+    # Full text search attributes (Phase 11)
+    enable_analyzer: bool = False
+    analyzer_params: Optional[Dict[str, Any]] = None
+    enable_match: bool = False
+    is_function_output: bool = False
 
 
 @dataclass
@@ -38,10 +63,12 @@ class CollectionSchema:
     fields: List[FieldSchema]
     version: int = 1
     enable_dynamic_field: bool = False
+    functions: List[Function] = field(default_factory=list)
 
 
 # DataType -> PyArrow type mapping.
 # FLOAT_VECTOR is None here; at runtime use pa.list_(pa.float32(), dim).
+# SPARSE_FLOAT_VECTOR uses pa.binary() (packed uint32+float32 pairs).
 TYPE_MAP: Dict[DataType, Any] = {
     DataType.BOOL: pa.bool_(),
     DataType.INT8: pa.int8(),
@@ -53,4 +80,5 @@ TYPE_MAP: Dict[DataType, Any] = {
     DataType.VARCHAR: pa.string(),
     DataType.JSON: pa.string(),
     DataType.FLOAT_VECTOR: None,
+    DataType.SPARSE_FLOAT_VECTOR: pa.binary(),
 }

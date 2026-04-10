@@ -50,7 +50,7 @@ from litevecdb.exceptions import (
 )
 from litevecdb.index.brute_force import BruteForceIndex
 from litevecdb.index.spec import IndexSpec
-from litevecdb.schema.types import DataType
+from litevecdb.schema.types import DataType, FunctionType
 from litevecdb.schema.arrow_builder import (
     build_wal_data_schema,
     build_wal_delta_schema,
@@ -183,6 +183,22 @@ class Collection:
         self._index_spec: Optional[IndexSpec] = self._manifest.index_spec
         self._load_state: str = "loaded" if self._index_spec is None else "released"
 
+        # ── 8. BM25 function analyzers (Phase 11) ─────────────────
+        # Pre-build an Analyzer for each BM25 function so insert()
+        # can auto-generate sparse vector fields from text input.
+        # _bm25_functions: list of (input_field_name, output_field_name, Analyzer)
+        self._bm25_functions: List[Tuple[str, str, Any]] = []
+        if schema.functions:
+            from litevecdb.analyzer.factory import create_analyzer
+            field_by_name = {f.name: f for f in schema.fields}
+            for func in schema.functions:
+                if func.function_type == FunctionType.BM25:
+                    in_name = func.input_field_names[0]
+                    out_name = func.output_field_names[0]
+                    in_field = field_by_name[in_name]
+                    analyzer = create_analyzer(in_field.analyzer_params)
+                    self._bm25_functions.append((in_name, out_name, analyzer))
+
     # ── public API ──────────────────────────────────────────────
 
     def insert(
@@ -205,23 +221,27 @@ class Collection:
         if not self._manifest.has_partition(partition_name):
             raise PartitionNotFoundError(partition_name)
 
-        # 1. validate every record up-front
+        # 1. auto-generate BM25 function output fields
+        if self._bm25_functions:
+            self._apply_bm25_functions(records)
+
+        # 2. validate every record up-front
         for r in records:
             validate_record(r, self._schema)
 
-        # 2. allocate seqs
+        # 3. allocate seqs
         seq_start = self._next_seq
         self._next_seq += len(records)
         seqs = list(range(seq_start, seq_start + len(records)))
 
-        # 3. build wal_data RecordBatch
+        # 4. build wal_data RecordBatch
         batch = self._build_wal_data_batch(records, partition_name, seqs)
 
-        # 4. construct Operation and dispatch
+        # 5. construct Operation and dispatch
         op = InsertOp(partition=partition_name, batch=batch)
         self._apply(op)
 
-        # 5. trigger flush if we hit the size limit
+        # 6. trigger flush if we hit the size limit
         if self._memtable.size() >= MEMTABLE_SIZE_LIMIT:
             self._trigger_flush()
 
@@ -1040,6 +1060,29 @@ class Collection:
             if key not in current_keys:
                 del self._segment_cache[key]
 
+    # ── BM25 function auto-generation ────────────────────────────
+
+    def _apply_bm25_functions(self, records: List[dict]) -> None:
+        """Auto-generate sparse vector fields for BM25 functions.
+
+        For each BM25 function, tokenize the input text field and compute
+        term frequencies, then inject the resulting sparse vector dict
+        into each record under the output field name.
+
+        Modifies *records* in place.
+        """
+        from litevecdb.analyzer.sparse import compute_tf
+
+        for in_name, out_name, analyzer in self._bm25_functions:
+            for r in records:
+                text = r.get(in_name)
+                if text is None or not isinstance(text, str):
+                    # Nullable text → empty sparse vector
+                    r[out_name] = {}
+                else:
+                    term_ids = analyzer.analyze(text)
+                    r[out_name] = compute_tf(term_ids)
+
     # ── batch builders ──────────────────────────────────────────
 
     def _build_wal_data_batch(
@@ -1074,6 +1117,15 @@ class Collection:
 
         if meta_col is not None:
             cols["$meta"] = meta_col
+
+        # Serialize SPARSE_FLOAT_VECTOR columns: dict → packed bytes
+        for f in self._schema.fields:
+            if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
+                from litevecdb.analyzer.sparse import sparse_to_bytes
+                cols[f.name] = [
+                    sparse_to_bytes(v) if isinstance(v, dict) else (v or b"")
+                    for v in cols[f.name]
+                ]
 
         return pa.RecordBatch.from_pydict(cols, schema=self._wal_data_schema)
 
