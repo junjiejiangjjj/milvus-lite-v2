@@ -625,14 +625,79 @@ Search: query text → 分词 → 倒排索引查找 → BM25 评分 → top-k
 - phrase_match（短语匹配 + slop）→ Future
 - LexicalHighlighter（结果高亮）→ Future
 - TextEmbedding Function → Future
-- Hybrid Search RPC → Future
-
 ### 完成标志
 
 - pymilvus BM25 全文检索端到端通过
 - text_match 过滤器与向量搜索组合使用
 - Flush / Compaction 后 BM25 索引正确重建
 - Load / Release 状态机覆盖 BM25 索引
+- 所有已有测试不回归
+
+---
+
+## Phase 12 — Hybrid Search（多路向量融合检索）
+
+**目标**：支持 pymilvus `hybrid_search()` API，允许同时执行多路 ANN 搜索（如 dense COSINE + BM25 sparse）并通过 Reranker 合并结果。
+
+**前置依赖**：Phase 11 完成。BM25 搜索 + 密集向量搜索 + `anns_field` 路由已就绪。
+
+### 核心架构
+
+```
+pymilvus.hybrid_search(reqs=[dense_req, bm25_req], ranker=WeightedRanker(0.6, 0.4))
+  ↓
+HybridSearchRequest proto (多个 SearchRequest + rank_params)
+  ↓
+servicer.HybridSearch:
+  1. 解析每个子 SearchRequest → (query_vectors, anns_field, metric, filter, limit)
+  2. 对每路分别调用 Collection.search() → List[List[dict]]
+  3. 应用 Reranker 合并结果 → 统一 top-k
+  4. 构建 SearchResults 响应
+```
+
+### 任务分解
+
+| 编号 | 任务 | 交付物 |
+|---|---|---|
+| 12.1 | Reranker 实现 | `adapter/grpc/reranker.py`：WeightedRanker（加权分数归一化合并）+ RRFRanker（Reciprocal Rank Fusion） |
+| 12.2 | HybridSearch RPC 实现 | `servicer.py`：解析 HybridSearchRequest → 多路 search → rerank → SearchResults |
+| 12.3 | 集成测试 | pymilvus `hybrid_search()` 端到端：dense+BM25、多 dense、filter、output_fields |
+
+### 关键设计决策
+
+**Reranker 策略**：
+
+| 策略 | 公式 | 说明 |
+|---|---|---|
+| **WeightedRanker** | `final_score = Σ(weight_i × normalize(score_i))` | 各路分数归一化到 [0,1] 后加权求和 |
+| **RRFRanker** | `final_score = Σ 1/(k + rank_i)` | 基于排名融合，k 默认 60，不依赖分数量纲 |
+
+**分数归一化**（WeightedRanker 需要）：
+- 各路搜索的距离量纲不同（dense COSINE ∈ [0,2]，BM25 score ∈ (-∞,0]）
+- 归一化方式：per-query min-max → [0,1]，然后 `1 - normalized`（统一为越大越好）
+
+**HybridSearchRequest 解析**：
+- `requests`：repeated SearchRequest，每个子请求有独立的 placeholder_group、anns_field、search_params、dsl（filter）
+- `rank_params`：KeyValuePair list，包含 strategy（"weighted"/"rrf"）、params（weights/k）、limit、offset
+- `output_fields`：全局输出字段，所有子搜索共享
+
+**结果合并**：
+- 各路搜索返回 `List[List[dict]]`（nq × top_k_per_route）
+- Reranker 按 pk 去重 + 合并分数 → 全局 top-k
+- 同一 pk 出现在多路结果中时，合并策略由 Reranker 决定
+
+### 不在 Phase 12 范围
+
+- FunctionScore reranker（外部函数重排序）→ Future
+- group_by 分组重排序 → Future
+- 异步并行执行多路搜索 → Future（MVP 串行足够）
+
+### 完成标志
+
+- pymilvus `hybrid_search(reqs=[dense, bm25], ranker=WeightedRanker(...))` 端到端通过
+- pymilvus `hybrid_search(reqs=[...], ranker=RRFRanker(...))` 端到端通过
+- 各子搜索可带独立 filter 表达式
+- 结果按 reranker 分数正确排序
 - 所有已有测试不回归
 
 ---

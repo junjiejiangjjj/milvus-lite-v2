@@ -16,7 +16,7 @@ LiteVecDB — a local embedded vector database, designed as a **local version of
 - **`index-design.md`**: Deep-dive on the Phase 9 vector index subsystem (FAISS HNSW, segment-level binding, load/release state machine, recall validation).
 - **`grpc-adapter-design.md`**: Deep-dive on the Phase 10 gRPC adapter (proto cropping, RPC mapping, FieldData transposition, error code translation).
 - **`fts-design.md`**: Deep-dive on the Phase 11 full text search subsystem (BM25, Analyzer, SparseInvertedIndex, text_match filter).
-- **`roadmap.md`**: Phased implementation plan. Phases 0-10 are landed; Phase 11 (full text search) is current.
+- **`roadmap.md`**: Phased implementation plan. Phases 0-11 are landed; Phase 12 (hybrid search) is next.
 
 ## Development Commands
 

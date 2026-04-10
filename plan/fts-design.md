@@ -526,7 +526,7 @@ jieba 作为可选依赖，不影响基础安装。StandardAnalyzer 零额外依
 - TextEmbedding Function（调用外部 embedding 模型）→ Future
 - ICU tokenizer → Future
 - BM25 全局 IDF 统计（跨 segment 合并 IDF）→ Future
-- Hybrid Search RPC（多路 ANN 重排序）→ Future
+- **Hybrid Search RPC（多路 ANN 重排序）→ Phase 12**（见 roadmap.md）
 
 ---
 
