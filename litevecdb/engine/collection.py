@@ -183,7 +183,16 @@ class Collection:
         self._index_spec: Optional[IndexSpec] = self._manifest.index_spec
         self._load_state: str = "loaded" if self._index_spec is None else "released"
 
-        # ── 8. BM25 function analyzers (Phase 11) ─────────────────
+        # ── 8. auto_id support (Phase 15) ──────────────────────────
+        pk_field = get_primary_field(schema)
+        self._auto_id: bool = pk_field.auto_id
+        # _next_auto_id tracks the next ID to assign. We initialize it
+        # from the manifest's current_seq to ensure monotonic growth
+        # across restarts. This is safe because _seq is always >= any
+        # previously assigned auto_id.
+        self._next_auto_id: int = self._next_seq
+
+        # ── 9. BM25 function analyzers (Phase 11) ─────────────────
         # Pre-build an Analyzer for each BM25 function so insert()
         # can auto-generate sparse vector fields from text input.
         # _bm25_functions: list of (input_field_name, output_field_name, Analyzer)
@@ -221,15 +230,23 @@ class Collection:
         if not self._manifest.has_partition(partition_name):
             raise PartitionNotFoundError(partition_name)
 
-        # 1. auto-generate BM25 function output fields
+        # 1. auto-generate primary key IDs if auto_id is enabled
+        if self._auto_id:
+            id_start = self._next_auto_id
+            self._next_auto_id += len(records)
+            for i, r in enumerate(records):
+                if self._pk_name not in r or r[self._pk_name] is None:
+                    r[self._pk_name] = id_start + i
+
+        # 2. auto-generate BM25 function output fields
         if self._bm25_functions:
             self._apply_bm25_functions(records)
 
-        # 2. validate every record up-front
+        # 3. validate every record up-front
         for r in records:
             validate_record(r, self._schema)
 
-        # 3. allocate seqs
+        # 4. allocate seqs
         seq_start = self._next_seq
         self._next_seq += len(records)
         seqs = list(range(seq_start, seq_start + len(records)))

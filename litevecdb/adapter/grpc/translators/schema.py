@@ -128,6 +128,12 @@ def milvus_to_litevecdb_schema(
         if f.name in func_output_names:
             f.is_function_output = True
 
+    # Apply autoID from schema level to primary key field
+    if proto_schema.autoID:
+        for f in fields:
+            if f.is_primary:
+                f.auto_id = True
+
     return CollectionSchema(
         fields=fields,
         enable_dynamic_field=proto_schema.enable_dynamic_field,
@@ -198,10 +204,13 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
         except (json.JSONDecodeError, ValueError):
             pass
 
+    auto_id = bool(getattr(proto_field, 'autoID', False))
+
     return FieldSchema(
         name=proto_field.name,
         dtype=dtype,
         is_primary=bool(proto_field.is_primary_key),
+        auto_id=auto_id,
         dim=dim,
         max_length=max_length,
         nullable=bool(proto_field.nullable),
@@ -256,6 +265,12 @@ def litevecdb_to_milvus_schema(
     proto.name = name
     proto.enable_dynamic_field = schema.enable_dynamic_field
 
+    # Set autoID at schema level if any field has auto_id
+    for f in schema.fields:
+        if f.is_primary and f.auto_id:
+            proto.autoID = True
+            break
+
     for f in schema.fields:
         if f.dtype not in _LITEVECDB_TO_MILVUS:
             raise SchemaValidationError(
@@ -266,6 +281,7 @@ def litevecdb_to_milvus_schema(
         pf.name = f.name
         pf.data_type = _LITEVECDB_TO_MILVUS[f.dtype]
         pf.is_primary_key = bool(f.is_primary)
+        pf.autoID = bool(f.auto_id)
         pf.nullable = bool(f.nullable)
 
         if f.dtype == DataType.FLOAT_VECTOR:

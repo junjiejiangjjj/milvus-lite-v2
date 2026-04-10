@@ -102,6 +102,10 @@ def validate_schema(schema: CollectionSchema) -> None:
         raise SchemaValidationError(
             f"primary key {pk.name!r} must not be nullable"
         )
+    if pk.auto_id and pk.dtype != DataType.INT64:
+        raise SchemaValidationError(
+            f"auto_id primary key {pk.name!r} must be INT64, got {pk.dtype.name}"
+        )
 
     if len(all_vector_fields) == 0:
         raise SchemaValidationError(
@@ -206,11 +210,12 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
     pk = _find_pk(schema)
     func_output_names = _function_output_field_names(schema)
 
-    # pk presence
-    if pk.name not in record or record[pk.name] is None:
-        raise SchemaValidationError(
-            f"primary key {pk.name!r} missing or None"
-        )
+    # pk presence (skip check when auto_id — engine generates it)
+    if not pk.auto_id:
+        if pk.name not in record or record[pk.name] is None:
+            raise SchemaValidationError(
+                f"primary key {pk.name!r} missing or None"
+            )
 
     # FLOAT_VECTOR presence + shape
     float_vec = _find_float_vector(schema)

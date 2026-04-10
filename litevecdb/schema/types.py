@@ -47,6 +47,7 @@ class FieldSchema:
     name: str
     dtype: DataType
     is_primary: bool = False
+    auto_id: bool = False
     dim: Optional[int] = None
     max_length: Optional[int] = None
     nullable: bool = False
