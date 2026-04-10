@@ -225,11 +225,14 @@ def _extract_scalar_column(fd, dtype_int: int) -> List[Any]:
 def _extract_vector_column(fd, dtype_int: int, num_rows: int) -> List[Any]:
     vectors = fd.vectors
 
-    if dtype_int != 101:  # FloatVector — the only vector we support
+    if dtype_int == 104:  # SparseFloatVector
+        return _extract_sparse_vector_column(fd, num_rows)
+
+    if dtype_int != 101:  # FloatVector
         raise SchemaValidationError(
             f"FieldData {fd.field_name!r} uses vector type "
             f"{_milvus_type_name(dtype_int)} which LiteVecDB does not "
-            f"support (Phase 10.3 supports FloatVector only)"
+            f"support (supported: FloatVector, SparseFloatVector)"
         )
 
     if not vectors.HasField("float_vector"):
@@ -255,6 +258,30 @@ def _extract_vector_column(fd, dtype_int: int, num_rows: int) -> List[Any]:
 
     # Slice into per-row lists.
     return [flat[i * dim:(i + 1) * dim] for i in range(num_rows)]
+
+
+def _extract_sparse_vector_column(fd, num_rows: int) -> List[Any]:
+    """Extract SparseFloatVector column as list of dict[int, float]."""
+    from litevecdb.analyzer.sparse import bytes_to_sparse
+
+    vectors = fd.vectors
+    if not vectors.HasField("sparse_float_vector"):
+        raise SchemaValidationError(
+            f"FieldData {fd.field_name!r} declared SparseFloatVector but no "
+            f"sparse_float_vector data is set"
+        )
+
+    sfa = vectors.sparse_float_vector
+    column: List[Any] = []
+    for content_bytes in sfa.contents:
+        column.append(bytes_to_sparse(content_bytes))
+
+    if len(column) != num_rows:
+        raise SchemaValidationError(
+            f"FieldData {fd.field_name!r} sparse_float_vector has "
+            f"{len(column)} rows, expected {num_rows}"
+        )
+    return column
 
 
 # ── records → Milvus (Query / Get / Search response path) ───────────
@@ -344,6 +371,27 @@ def _build_field_data(name, fschema, column):
         fd.vectors.float_vector.data.extend(flat)
         return fd
 
+    if dtype == DataType.SPARSE_FLOAT_VECTOR:
+        from litevecdb.analyzer.sparse import sparse_to_bytes, bytes_to_sparse
+        fd.type = 104  # SparseFloatVector
+        max_dim = 0
+        for v in column:
+            if v is None:
+                fd.vectors.sparse_float_vector.contents.append(b"")
+            elif isinstance(v, bytes):
+                fd.vectors.sparse_float_vector.contents.append(v)
+                sv = bytes_to_sparse(v)
+                if sv:
+                    max_dim = max(max_dim, max(sv.keys()) + 1)
+            elif isinstance(v, dict):
+                fd.vectors.sparse_float_vector.contents.append(sparse_to_bytes(v))
+                if v:
+                    max_dim = max(max_dim, max(v.keys()) + 1)
+            else:
+                fd.vectors.sparse_float_vector.contents.append(b"")
+        fd.vectors.sparse_float_vector.dim = max_dim
+        return fd
+
     # Scalar types
     milvus_type_int = _LITEVECDB_TO_MILVUS_INT.get(dtype)
     if milvus_type_int is None:
@@ -393,6 +441,7 @@ _LITEVECDB_TO_MILVUS_INT: Dict[DataType, int] = {
     DataType.VARCHAR: 21,
     DataType.JSON:    23,
     DataType.FLOAT_VECTOR: 101,
+    DataType.SPARSE_FLOAT_VECTOR: 104,
 }
 
 

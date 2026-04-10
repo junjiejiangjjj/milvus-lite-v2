@@ -36,6 +36,8 @@ from litevecdb.exceptions import SchemaValidationError
 
 # PlaceholderType enum values from common.proto
 _PH_FLOAT_VECTOR = 101
+_PH_SPARSE_FLOAT_VECTOR = 104
+_PH_VARCHAR = 21
 
 
 def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
@@ -111,29 +113,47 @@ def _decode_placeholder_group(placeholder_group_bytes: bytes) -> List[List[float
     # We only handle the first PlaceholderValue (single anns_field).
     pv = pg.placeholders[0]
 
-    if pv.type != _PH_FLOAT_VECTOR:
-        raise SchemaValidationError(
-            f"PlaceholderValue type {pv.type} not supported "
-            f"(LiteVecDB Phase 10.4 supports FloatVector only)"
-        )
+    if pv.type == _PH_FLOAT_VECTOR:
+        # Each value is a packed float buffer for one query vector.
+        out: List = []
+        for blob in pv.values:
+            if not blob:
+                continue
+            n_floats = len(blob) // 4
+            if n_floats * 4 != len(blob):
+                raise SchemaValidationError(
+                    f"PlaceholderValue blob is not a multiple of 4 bytes "
+                    f"({len(blob)})"
+                )
+            out.append(list(struct.unpack(f"{n_floats}f", blob)))
+        if not out:
+            raise SchemaValidationError("PlaceholderGroup has no query vectors")
+        return out
 
-    # Each value is a packed float buffer for one query vector.
-    out: List[List[float]] = []
-    for blob in pv.values:
-        if not blob:
-            continue
-        n_floats = len(blob) // 4
-        if n_floats * 4 != len(blob):
-            raise SchemaValidationError(
-                f"PlaceholderValue blob is not a multiple of 4 bytes "
-                f"({len(blob)})"
-            )
-        out.append(list(struct.unpack(f"{n_floats}f", blob)))
+    if pv.type == _PH_SPARSE_FLOAT_VECTOR:
+        # Sparse vectors: each value is SparseFloatArray-format bytes
+        from litevecdb.analyzer.sparse import bytes_to_sparse
+        out = []
+        for blob in pv.values:
+            out.append(bytes_to_sparse(blob) if blob else {})
+        if not out:
+            raise SchemaValidationError("PlaceholderGroup has no query vectors")
+        return out
 
-    if not out:
-        raise SchemaValidationError("PlaceholderGroup has no query vectors")
+    if pv.type == _PH_VARCHAR:
+        # Text queries: each value is UTF-8 encoded string
+        out = []
+        for blob in pv.values:
+            if blob:
+                out.append(blob.decode("utf-8"))
+        if not out:
+            raise SchemaValidationError("PlaceholderGroup has no query vectors")
+        return out
 
-    return out
+    raise SchemaValidationError(
+        f"PlaceholderValue type {pv.type} not supported "
+        f"(supported: FloatVector=101, SparseFloatVector=104, VarChar=21)"
+    )
 
 
 def _decode_search_params(

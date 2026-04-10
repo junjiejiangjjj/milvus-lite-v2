@@ -39,7 +39,13 @@ from typing import TYPE_CHECKING
 from pymilvus.grpc_gen import schema_pb2
 
 from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from litevecdb.schema.types import (
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    Function,
+    FunctionType,
+)
 
 if TYPE_CHECKING:
     pass
@@ -59,7 +65,8 @@ _MILVUS_TO_LITEVECDB: dict[int, DataType] = {
     11: DataType.DOUBLE,         # Double
     21: DataType.VARCHAR,        # VarChar
     23: DataType.JSON,           # JSON
-    101: DataType.FLOAT_VECTOR,  # FloatVector
+    101: DataType.FLOAT_VECTOR,          # FloatVector
+    104: DataType.SPARSE_FLOAT_VECTOR,  # SparseFloatVector
 }
 
 # Inverse — LiteVecDB → Milvus enum int.
@@ -108,9 +115,23 @@ def milvus_to_litevecdb_schema(
     for f in proto_schema.fields:
         fields.append(_decode_field(f))
 
+    # Decode functions (e.g. BM25)
+    functions: list[Function] = []
+    for fn in proto_schema.functions:
+        functions.append(_decode_function(fn))
+
+    # Mark function output fields
+    func_output_names: set[str] = set()
+    for fn in functions:
+        func_output_names.update(fn.output_field_names)
+    for f in fields:
+        if f.name in func_output_names:
+            f.is_function_output = True
+
     return CollectionSchema(
         fields=fields,
         enable_dynamic_field=proto_schema.enable_dynamic_field,
+        functions=functions,
     )
 
 
@@ -165,6 +186,18 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
                     f"max_length {max_length_str!r}"
                 ) from e
 
+    # FTS attributes from type_params
+    enable_analyzer = params.get("enable_analyzer", "").lower() == "true"
+    enable_match = params.get("enable_match", "").lower() == "true"
+    analyzer_params_str = params.get("analyzer_params")
+    analyzer_params = None
+    if analyzer_params_str:
+        import json
+        try:
+            analyzer_params = json.loads(analyzer_params_str)
+        except (json.JSONDecodeError, ValueError):
+            pass
+
     return FieldSchema(
         name=proto_field.name,
         dtype=dtype,
@@ -172,6 +205,39 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
         dim=dim,
         max_length=max_length,
         nullable=bool(proto_field.nullable),
+        enable_analyzer=enable_analyzer,
+        analyzer_params=analyzer_params,
+        enable_match=enable_match,
+        is_function_output=bool(getattr(proto_field, 'is_function_output', False)),
+    )
+
+
+_MILVUS_FUNCTION_TYPE_MAP = {
+    1: FunctionType.BM25,
+}
+_LITEVECDB_FUNCTION_TYPE_MAP = {v: k for k, v in _MILVUS_FUNCTION_TYPE_MAP.items()}
+
+
+def _decode_function(proto_fn) -> Function:
+    """Decode a FunctionSchema proto into a litevecdb Function."""
+    import json
+    ft_int = int(proto_fn.type)
+    if ft_int not in _MILVUS_FUNCTION_TYPE_MAP:
+        raise SchemaValidationError(
+            f"function {proto_fn.name!r} uses unsupported type {ft_int}"
+        )
+    params: dict = {}
+    for kv in proto_fn.params:
+        try:
+            params[kv.key] = json.loads(kv.value)
+        except (json.JSONDecodeError, ValueError):
+            params[kv.key] = kv.value
+    return Function(
+        name=proto_fn.name,
+        function_type=_MILVUS_FUNCTION_TYPE_MAP[ft_int],
+        input_field_names=list(proto_fn.input_field_names),
+        output_field_names=list(proto_fn.output_field_names),
+        params=params,
     )
 
 
@@ -215,5 +281,35 @@ def litevecdb_to_milvus_schema(
             kv = pf.type_params.add()
             kv.key = "max_length"
             kv.value = str(f.max_length)
+
+        # FTS attributes
+        if f.enable_analyzer:
+            kv = pf.type_params.add()
+            kv.key = "enable_analyzer"
+            kv.value = "true"
+        if f.enable_match:
+            kv = pf.type_params.add()
+            kv.key = "enable_match"
+            kv.value = "true"
+        if f.analyzer_params:
+            import json as _json
+            kv = pf.type_params.add()
+            kv.key = "analyzer_params"
+            kv.value = _json.dumps(f.analyzer_params)
+        if f.is_function_output:
+            pf.is_function_output = True
+
+    # Encode functions
+    for fn in schema.functions:
+        import json as _json
+        pfn = proto.functions.add()
+        pfn.name = fn.name
+        pfn.type = _LITEVECDB_FUNCTION_TYPE_MAP.get(fn.function_type, 0)
+        pfn.input_field_names.extend(fn.input_field_names)
+        pfn.output_field_names.extend(fn.output_field_names)
+        for k, v in fn.params.items():
+            kv = pfn.params.add()
+            kv.key = k
+            kv.value = _json.dumps(v) if not isinstance(v, str) else v
 
     return proto
