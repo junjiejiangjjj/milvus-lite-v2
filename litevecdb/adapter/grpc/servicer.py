@@ -376,6 +376,8 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 group_by_field=group_by_field,
                 group_size=group_size,
                 strict_group_size=strict,
+                radius=parsed.get("radius"),
+                range_filter=parsed.get("range_filter"),
             )
 
             result_data = build_search_result_data(

@@ -87,6 +87,26 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
     else:
         anns_field = None  # let engine default
 
+    # range search parameters (inside "params" dict or top-level)
+    # pymilvus puts them in params: {"radius": ..., "range_filter": ...}
+    inner_params = raw_params.get("params", {})
+    if isinstance(inner_params, dict):
+        radius = inner_params.get("radius")
+        range_filter_val = inner_params.get("range_filter")
+    else:
+        radius = None
+        range_filter_val = None
+    # Also check top-level (pymilvus supports both locations)
+    if radius is None:
+        radius = raw_params.get("radius")
+    if range_filter_val is None:
+        range_filter_val = raw_params.get("range_filter")
+    # Convert to float if present
+    if radius is not None:
+        radius = float(radius)
+    if range_filter_val is not None:
+        range_filter_val = float(range_filter_val)
+
     # group_by parameters
     group_by_field = raw_params.get("group_by_field")
     if isinstance(group_by_field, str) and group_by_field:
@@ -112,6 +132,8 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
         "group_by_field": group_by_field,
         "group_size": group_size,
         "group_size_strict": strict_group_size,
+        "radius": radius,
+        "range_filter": range_filter_val,
     }
 
 

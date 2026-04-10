@@ -378,6 +378,8 @@ class Collection:
         group_by_field: Optional[str] = None,
         group_size: int = 1,
         strict_group_size: bool = False,
+        radius: Optional[float] = None,
+        range_filter: Optional[float] = None,
     ) -> List[List[dict]]:
         """Vector top-k search.
 
@@ -391,11 +393,13 @@ class Collection:
             output_fields: optional whitelist of fields to include in entity.
             anns_field: name of the vector field to search on.
             group_by_field: optional scalar field to group results by.
-                When set, returns up to top_k groups, each with up to
-                group_size results.
             group_size: number of results per group (default 1).
             strict_group_size: if True, discard groups with fewer than
                 group_size results.
+            radius: optional distance lower bound (exclusive). Only results
+                with distance > radius are returned.
+            range_filter: optional distance upper bound (inclusive). Only
+                results with distance <= range_filter are returned.
 
         Returns:
             List of length nq. Each inner list has dicts of shape
@@ -429,10 +433,12 @@ class Collection:
                     f"which is not supported for group_by"
                 )
 
-        # Over-fetch when group_by is active to ensure enough candidates
+        # Over-fetch when group_by or range search is active
         effective_top_k = top_k
         if group_by_field is not None:
             effective_top_k = max(top_k * group_size * 3, top_k * 10)
+        if radius is not None or range_filter is not None:
+            effective_top_k = max(effective_top_k, top_k * 5)
 
         # Resolve the target vector field
         vector_field = self._resolve_anns_field(anns_field)
@@ -469,6 +475,10 @@ class Collection:
             compiled_filter=compiled_filter,
             output_fields=output_fields,
         )
+
+        # Apply range filter (before group_by)
+        if radius is not None or range_filter is not None:
+            raw_results = _apply_range_filter(raw_results, radius, range_filter, top_k)
 
         # Apply group_by post-processing
         if group_by_field is not None:
@@ -1510,4 +1520,30 @@ def _apply_group_by(
 
         out.append(flattened)
 
+    return out
+
+
+def _apply_range_filter(
+    results: List[List[dict]],
+    radius: Optional[float],
+    range_filter: Optional[float],
+    limit: int,
+) -> List[List[dict]]:
+    """Filter search results by distance range.
+
+    Keeps hits where ``radius < distance <= range_filter``.
+    Either bound can be None (no bound on that side).
+    After filtering, truncates to *limit* hits per query.
+    """
+    out: List[List[dict]] = []
+    for query_hits in results:
+        filtered = []
+        for hit in query_hits:
+            d = hit["distance"]
+            if radius is not None and not (d > radius):
+                continue
+            if range_filter is not None and not (d <= range_filter):
+                continue
+            filtered.append(hit)
+        out.append(filtered[:limit])
     return out
