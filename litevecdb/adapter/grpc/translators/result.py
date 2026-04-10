@@ -35,6 +35,7 @@ def build_search_result_data(
     top_k: int,
     pk_name: str,
     output_fields: Optional[List[str]] = None,
+    group_by_field: Optional[str] = None,
 ) -> schema_pb2.SearchResultData:
     """Flatten the engine's per-query results into one SearchResultData.
 
@@ -97,7 +98,7 @@ def build_search_result_data(
         # surfaced via "id" anyway)
         emitted = [f for f in output_fields if f != pk_name]
 
-    return schema_pb2.SearchResultData(
+    result = schema_pb2.SearchResultData(
         num_queries=nq,
         top_k=top_k,
         fields_data=fields_data,
@@ -107,3 +108,21 @@ def build_search_result_data(
         output_fields=emitted,
         primary_field_name=pk_name,
     )
+
+    # Build group_by_field_value if group_by was used
+    if group_by_field is not None:
+        gb_field = next((f for f in schema.fields if f.name == group_by_field), None)
+        if gb_field is not None:
+            group_values = []
+            for query_hits in results:
+                for hit in query_hits:
+                    gval = hit.get("_group_by_value")
+                    if gval is None:
+                        gval = (hit.get("entity") or {}).get(group_by_field)
+                    group_values.append(gval)
+            if group_values:
+                from litevecdb.adapter.grpc.translators.records import _build_field_data
+                gb_fd = _build_field_data(group_by_field, gb_field, group_values)
+                result.group_by_field_value.CopyFrom(gb_fd)
+
+    return result

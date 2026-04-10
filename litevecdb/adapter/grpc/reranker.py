@@ -29,11 +29,22 @@ def parse_rank_params(kv_pairs) -> dict:
         except (json.JSONDecodeError, ValueError):
             raw[kv.key] = kv.value
 
+    group_by_field = raw.get("group_by_field")
+    if isinstance(group_by_field, str) and group_by_field:
+        pass
+    else:
+        group_by_field = None
+    group_size = raw.get("group_size")
+    strict_group_size = raw.get("strict_group_size")
+
     return {
         "strategy": raw.get("strategy", "rrf"),
         "params": raw.get("params", {}),
         "limit": int(raw.get("limit", 10)),
         "offset": int(raw.get("offset", 0)),
+        "group_by_field": group_by_field,
+        "group_size": int(group_size) if group_size is not None else None,
+        "strict_group_size": bool(strict_group_size) if strict_group_size is not None else None,
     }
 
 

@@ -87,6 +87,19 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
     else:
         anns_field = None  # let engine default
 
+    # group_by parameters
+    group_by_field = raw_params.get("group_by_field")
+    if isinstance(group_by_field, str) and group_by_field:
+        pass
+    else:
+        group_by_field = None
+    group_size = raw_params.get("group_size")
+    if group_size is not None:
+        group_size = int(group_size)
+    strict_group_size = raw_params.get("strict_group_size")
+    if strict_group_size is not None:
+        strict_group_size = bool(strict_group_size)
+
     return {
         "query_vectors": query_vectors,
         "top_k": top_k,
@@ -96,6 +109,9 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
         "output_fields": output_fields,
         "search_params": search_params,
         "anns_field": anns_field,
+        "group_by_field": group_by_field,
+        "group_size": group_size,
+        "group_size_strict": strict_group_size,
     }
 
 

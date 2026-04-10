@@ -361,6 +361,10 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             default_metric = spec.metric_type if spec else "COSINE"
             parsed = parse_search_request(request, default_metric_type=default_metric)
 
+            group_by_field = parsed.get("group_by_field")
+            group_size = parsed.get("group_size") or 1
+            strict = parsed.get("group_size_strict") or False
+
             results = col.search(
                 query_vectors=parsed["query_vectors"],
                 top_k=parsed["top_k"],
@@ -369,6 +373,9 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 expr=parsed["expr"],
                 output_fields=parsed["output_fields"],
                 anns_field=parsed.get("anns_field"),
+                group_by_field=group_by_field,
+                group_size=group_size,
+                strict_group_size=strict,
             )
 
             result_data = build_search_result_data(
@@ -377,6 +384,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 top_k=parsed["top_k"],
                 pk_name=col._pk_name,  # noqa: SLF001
                 output_fields=parsed["output_fields"],
+                group_by_field=group_by_field,
             )
 
             return milvus_pb2.SearchResults(
@@ -735,6 +743,14 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 offset=rp["offset"],
             )
 
+            # Apply group_by if specified in rank_params
+            gb_field = rp.get("group_by_field")
+            if gb_field is not None:
+                from litevecdb.engine.collection import _apply_group_by
+                gb_size = rp.get("group_size") or 1
+                gb_strict = rp.get("strict_group_size") or False
+                merged = _apply_group_by(merged, gb_field, rp["limit"], gb_size, gb_strict)
+
             # Build response
             output_fields = list(request.output_fields) or None
             result_data = build_search_result_data(
@@ -743,6 +759,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 top_k=rp["limit"],
                 pk_name=col._pk_name,  # noqa: SLF001
                 output_fields=output_fields,
+                group_by_field=gb_field,
             )
 
             return milvus_pb2.SearchResults(

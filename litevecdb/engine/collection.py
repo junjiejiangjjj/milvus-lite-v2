@@ -375,30 +375,33 @@ class Collection:
         expr: Optional[str] = None,
         output_fields: Optional[List[str]] = None,
         anns_field: Optional[str] = None,
+        group_by_field: Optional[str] = None,
+        group_size: int = 1,
+        strict_group_size: bool = False,
     ) -> List[List[dict]]:
         """Vector top-k search.
 
         Args:
             query_vectors: list of length nq, each item a list of length dim
                 (for FLOAT_VECTOR) or list of dict (for SPARSE_FLOAT_VECTOR).
-            top_k: requested k.
+            top_k: requested k (number of groups when group_by_field is set).
             metric_type: "COSINE" / "L2" / "IP" / "BM25".
             partition_names: optional partition filter.
-            expr: optional Milvus-style scalar filter expression. Hits
-                that don't match are excluded before top-k selection.
-            output_fields: optional whitelist of fields to include in
-                result ``entity``. Phase 9.1 semantics:
-                  - None  → all fields except pk and vector (legacy default)
-                  - []    → empty entity (only id + distance)
-                  - list  → exactly those fields (pk always surfaced as
-                            "id"; vector included only if listed)
-            anns_field: name of the vector field to search on. None defaults
-                to the first FLOAT_VECTOR field (backward compatible).
+            expr: optional Milvus-style scalar filter expression.
+            output_fields: optional whitelist of fields to include in entity.
+            anns_field: name of the vector field to search on.
+            group_by_field: optional scalar field to group results by.
+                When set, returns up to top_k groups, each with up to
+                group_size results.
+            group_size: number of results per group (default 1).
+            strict_group_size: if True, discard groups with fewer than
+                group_size results.
 
         Returns:
-            List of length nq. Each inner list has up to top_k dicts of
-            shape ``{"id": pk, "distance": float, "entity": {field: value, ...}}``,
-            sorted by ascending distance.
+            List of length nq. Each inner list has dicts of shape
+            ``{"id": pk, "distance": float, "entity": {field: value, ...}}``.
+            When group_by_field is set, results are grouped and flattened
+            (up to top_k * group_size total hits per query).
         """
         if not isinstance(query_vectors, list):
             raise TypeError(
@@ -409,36 +412,56 @@ class Collection:
 
         self._require_loaded()
 
+        # Validate group_by_field
+        if group_by_field is not None:
+            gf = next((f for f in self._schema.fields if f.name == group_by_field), None)
+            if gf is None:
+                raise SchemaValidationError(
+                    f"group_by_field {group_by_field!r} not found in schema"
+                )
+            _GROUP_BY_ALLOWED = (
+                DataType.INT8, DataType.INT16, DataType.INT32, DataType.INT64,
+                DataType.BOOL, DataType.VARCHAR,
+            )
+            if gf.dtype not in _GROUP_BY_ALLOWED:
+                raise SchemaValidationError(
+                    f"group_by_field {group_by_field!r} has type {gf.dtype.name} "
+                    f"which is not supported for group_by"
+                )
+
+        # Over-fetch when group_by is active to ensure enough candidates
+        effective_top_k = top_k
+        if group_by_field is not None:
+            effective_top_k = max(top_k * group_size * 3, top_k * 10)
+
         # Resolve the target vector field
         vector_field = self._resolve_anns_field(anns_field)
         field_schema = next(f for f in self._schema.fields if f.name == vector_field)
 
         if field_schema.dtype == DataType.SPARSE_FLOAT_VECTOR:
-            return self._search_sparse(
+            raw_results = self._search_sparse(
                 query_vectors=query_vectors,
                 vector_field=vector_field,
-                top_k=top_k,
+                top_k=effective_top_k,
                 metric_type=metric_type,
                 partition_names=partition_names,
                 expr=expr,
                 output_fields=output_fields,
             )
-
-        # Dense float vector search (existing path)
-        q_arr = np.asarray(query_vectors, dtype=np.float32)
-        if q_arr.ndim != 2:
-            raise ValueError(
-                f"query_vectors must be a 2-D list, got shape {q_arr.shape}"
-            )
-
-        compiled_filter = self._compile_filter(expr) if expr else None
-
-        return execute_search_with_index(
+        else:
+            # Dense float vector search (existing path)
+            q_arr = np.asarray(query_vectors, dtype=np.float32)
+            if q_arr.ndim != 2:
+                raise ValueError(
+                    f"query_vectors must be a 2-D list, got shape {q_arr.shape}"
+                )
+            compiled_filter = self._compile_filter(expr) if expr else None
+            raw_results = execute_search_with_index(
             query_vectors=q_arr,
             segments=self._segment_cache.values(),
             memtable=self._memtable,
             delta_index=self._delta_index,
-            top_k=top_k,
+            top_k=effective_top_k,
             metric_type=metric_type,
             pk_field=self._pk_name,
             vector_field=vector_field,
@@ -446,6 +469,14 @@ class Collection:
             compiled_filter=compiled_filter,
             output_fields=output_fields,
         )
+
+        # Apply group_by post-processing
+        if group_by_field is not None:
+            raw_results = _apply_group_by(
+                raw_results, group_by_field, top_k, group_size, strict_group_size,
+            )
+
+        return raw_results
 
     def _resolve_anns_field(self, anns_field: Optional[str]) -> str:
         """Resolve the anns_field parameter to a concrete field name.
@@ -1418,3 +1449,65 @@ class Collection:
         full collection count that includes flushed Parquet files.
         """
         return self._memtable.size()
+
+
+# ── Module-level helpers ──────────────────────────────────────────────
+
+def _apply_group_by(
+    results: List[List[dict]],
+    group_by_field: str,
+    limit: int,
+    group_size: int,
+    strict_group_size: bool,
+) -> List[List[dict]]:
+    """Post-process search results to group by a scalar field.
+
+    For each query:
+    1. Iterate hits in distance order (already sorted).
+    2. Group by group_by_field value.
+    3. Each group keeps up to group_size hits.
+    4. If strict_group_size, discard groups with < group_size hits.
+    5. Take the first `limit` groups.
+    6. Flatten groups back into a single list (groups ordered by their
+       best hit's distance).
+
+    Returns results in the same format as input but filtered/reordered.
+    Each hit gets an extra key ``_group_by_value`` for the gRPC layer
+    to build the group_by_field_value FieldData.
+    """
+    out: List[List[dict]] = []
+
+    for query_hits in results:
+        # group_key → list of hits (in distance order)
+        groups: dict = {}
+        group_order: list = []  # track first-seen order (= best distance)
+
+        for hit in query_hits:
+            gval = hit.get("entity", {}).get(group_by_field)
+            if gval is None:
+                # Try top-level (some code paths put fields at top level)
+                gval = hit.get(group_by_field)
+
+            if gval not in groups:
+                groups[gval] = []
+                group_order.append(gval)
+
+            if len(groups[gval]) < group_size:
+                # Attach group value to hit for gRPC layer
+                hit_copy = dict(hit)
+                hit_copy["_group_by_value"] = gval
+                groups[gval].append(hit_copy)
+
+        # Filter by strict_group_size
+        if strict_group_size:
+            group_order = [g for g in group_order if len(groups[g]) == group_size]
+
+        # Take first `limit` groups, flatten
+        selected_groups = group_order[:limit]
+        flattened: list = []
+        for gval in selected_groups:
+            flattened.extend(groups[gval])
+
+        out.append(flattened)
+
+    return out
