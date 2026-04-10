@@ -693,11 +693,72 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
     # being cryptic.
 
     def HybridSearch(self, request, context):
-        return self._unimplemented(
-            context, "HybridSearch",
-            "multi-vector search is not supported in LiteVecDB MVP; "
-            "use search() with a single vector field instead",
-        )
+        """Multi-route ANN search with reranking fusion.
+
+        Parses each sub-SearchRequest independently, dispatches to
+        Collection.search(), then merges results via WeightedRanker
+        or RRFRanker.
+        """
+        try:
+            from litevecdb.adapter.grpc.reranker import parse_rank_params, rerank
+
+            col = self._db.get_collection(request.collection_name)
+            spec = col._index_spec  # noqa: SLF001
+            default_metric = spec.metric_type if spec else "COSINE"
+
+            # Parse rank_params
+            rp = parse_rank_params(request.rank_params)
+
+            # Execute each sub-request independently
+            all_results = []
+            for sub_req in request.requests:
+                parsed = parse_search_request(sub_req, default_metric_type=default_metric)
+                results = col.search(
+                    query_vectors=parsed["query_vectors"],
+                    top_k=parsed["top_k"],
+                    metric_type=parsed["metric_type"],
+                    partition_names=parsed.get("partition_names") or (
+                        list(request.partition_names) or None
+                    ),
+                    expr=parsed["expr"],
+                    output_fields=list(request.output_fields) or None,
+                    anns_field=parsed.get("anns_field"),
+                )
+                all_results.append(results)
+
+            # Rerank
+            merged = rerank(
+                strategy=rp["strategy"],
+                params=rp["params"],
+                all_results=all_results,
+                limit=rp["limit"],
+                offset=rp["offset"],
+            )
+
+            # Build response
+            output_fields = list(request.output_fields) or None
+            result_data = build_search_result_data(
+                results=merged,
+                schema=col.schema,
+                top_k=rp["limit"],
+                pk_name=col._pk_name,  # noqa: SLF001
+                output_fields=output_fields,
+            )
+
+            return milvus_pb2.SearchResults(
+                status=common_pb2.Status(**success_status_kwargs()),
+                results=result_data,
+                collection_name=col.name,
+            )
+        except LiteVecDBError as e:
+            return milvus_pb2.SearchResults(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("HybridSearch failed: %s", e)
+            return milvus_pb2.SearchResults(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
 
     def RenameCollection(self, request, context):
         return self._unimplemented(

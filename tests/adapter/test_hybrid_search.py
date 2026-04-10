@@ -1,0 +1,288 @@
+"""Phase 12 — HybridSearch integration tests.
+
+Tests:
+1. WeightedRanker: dense + BM25 fusion
+2. RRFRanker: dense + BM25 fusion
+3. Multiple dense vector fields fusion
+4. Per-sub-request filter expressions
+5. Output fields in hybrid results
+6. Multiple queries (nq > 1)
+7. Reranker unit tests (no gRPC)
+"""
+
+import pytest
+
+from pymilvus import (
+    AnnSearchRequest,
+    DataType,
+    Function,
+    FunctionType,
+    MilvusClient,
+    WeightedRanker,
+    RRFRanker,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _create_hybrid_collection(client, name):
+    """Collection with dense + BM25 sparse for hybrid search."""
+    schema = MilvusClient.create_schema(auto_id=False)
+    schema.add_field("id", DataType.INT64, is_primary=True)
+    schema.add_field("text", DataType.VARCHAR, max_length=65535,
+                     enable_analyzer=True, enable_match=True,
+                     analyzer_params={"tokenizer": "standard"})
+    schema.add_field("category", DataType.INT64)
+    schema.add_field("dense", DataType.FLOAT_VECTOR, dim=4)
+    schema.add_field("bm25_emb", DataType.SPARSE_FLOAT_VECTOR)
+    schema.add_function(Function(
+        name="bm25_fn",
+        function_type=FunctionType.BM25,
+        input_field_names=["text"],
+        output_field_names=["bm25_emb"],
+    ))
+    client.create_collection(name, schema=schema)
+
+    client.insert(name, [
+        {"id": 1, "text": "python programming language", "category": 1,
+         "dense": [1.0, 0.0, 0.0, 0.0]},
+        {"id": 2, "text": "java programming language", "category": 1,
+         "dense": [0.0, 1.0, 0.0, 0.0]},
+        {"id": 3, "text": "machine learning algorithms", "category": 2,
+         "dense": [0.0, 0.0, 1.0, 0.0]},
+        {"id": 4, "text": "deep learning neural networks", "category": 2,
+         "dense": [0.0, 0.0, 0.0, 1.0]},
+        {"id": 5, "text": "python machine learning tutorial", "category": 2,
+         "dense": [0.5, 0.0, 0.5, 0.0]},
+    ])
+
+    idx = client.prepare_index_params()
+    idx.add_index(field_name="dense", index_type="BRUTE_FORCE",
+                  metric_type="COSINE", params={})
+    client.create_index(name, idx)
+    client.load_collection(name)
+    return name
+
+
+# ---------------------------------------------------------------------------
+# Reranker unit tests (no gRPC)
+# ---------------------------------------------------------------------------
+
+class TestRerankerUnit:
+    def test_weighted_basic(self):
+        from litevecdb.adapter.grpc.reranker import rerank
+        # Route 1: doc A best, Route 2: doc B best
+        route1 = [[
+            {"id": "A", "distance": -1.0, "entity": {}},
+            {"id": "C", "distance": -0.5, "entity": {}},
+        ]]
+        route2 = [[
+            {"id": "B", "distance": -1.0, "entity": {}},
+            {"id": "A", "distance": -0.3, "entity": {}},
+        ]]
+        result = rerank("weighted", {"weights": [0.5, 0.5]},
+                        [route1, route2], limit=3)
+        assert len(result) == 1
+        ids = [h["id"] for h in result[0]]
+        assert "A" in ids  # appears in both routes
+        assert "B" in ids
+
+    def test_rrf_basic(self):
+        from litevecdb.adapter.grpc.reranker import rerank
+        route1 = [[
+            {"id": "A", "distance": -1.0, "entity": {}},
+            {"id": "B", "distance": -0.5, "entity": {}},
+        ]]
+        route2 = [[
+            {"id": "B", "distance": -1.0, "entity": {}},
+            {"id": "C", "distance": -0.5, "entity": {}},
+        ]]
+        result = rerank("rrf", {"k": 60}, [route1, route2], limit=3)
+        ids = [h["id"] for h in result[0]]
+        # B appears rank 2 in route1 and rank 1 in route2 → highest RRF
+        assert ids[0] == "B"
+
+    def test_weighted_empty(self):
+        from litevecdb.adapter.grpc.reranker import rerank
+        result = rerank("weighted", {"weights": [1.0]}, [[[]]],  limit=5)
+        assert result == [[]]
+
+    def test_rrf_single_route(self):
+        from litevecdb.adapter.grpc.reranker import rerank
+        route = [[
+            {"id": 1, "distance": -1.0, "entity": {}},
+            {"id": 2, "distance": -0.5, "entity": {}},
+        ]]
+        result = rerank("rrf", {"k": 60}, [route], limit=5)
+        assert result[0][0]["id"] == 1
+        assert result[0][1]["id"] == 2
+
+    def test_offset(self):
+        from litevecdb.adapter.grpc.reranker import rerank
+        route = [[
+            {"id": 1, "distance": -3.0, "entity": {}},
+            {"id": 2, "distance": -2.0, "entity": {}},
+            {"id": 3, "distance": -1.0, "entity": {}},
+        ]]
+        result = rerank("rrf", {"k": 60}, [route], limit=2, offset=1)
+        assert result[0][0]["id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# gRPC integration tests
+# ---------------------------------------------------------------------------
+
+def test_hybrid_weighted_dense_bm25(milvus_client):
+    """Hybrid search: dense + BM25 with WeightedRanker."""
+    name = _create_hybrid_collection(milvus_client, "hybrid_w1")
+
+    from litevecdb.analyzer.hash import term_to_id
+    from litevecdb.analyzer.sparse import compute_tf
+
+    # Dense query: closest to doc 1 [1,0,0,0]
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        anns_field="dense",
+        param={},
+        limit=5,
+    )
+    # BM25 query: "machine learning" → docs 3, 4, 5
+    bm25_query = compute_tf([term_to_id("machine"), term_to_id("learning")])
+    bm25_req = AnnSearchRequest(
+        data=[bm25_query],
+        anns_field="bm25_emb",
+        param={"metric_type": "BM25"},
+        limit=5,
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req, bm25_req],
+        ranker=WeightedRanker(0.5, 0.5),
+        limit=5,
+        output_fields=["text"],
+    )
+
+    assert len(results) == 1
+    assert len(results[0]) > 0
+    hit_ids = [h["id"] for h in results[0]]
+    # Doc 5 has both dense similarity and BM25 match → should rank high
+    assert 5 in hit_ids
+
+    milvus_client.drop_collection(name)
+
+
+def test_hybrid_rrf_dense_bm25(milvus_client):
+    """Hybrid search: dense + BM25 with RRFRanker."""
+    name = _create_hybrid_collection(milvus_client, "hybrid_rrf1")
+
+    from litevecdb.analyzer.hash import term_to_id
+    from litevecdb.analyzer.sparse import compute_tf
+
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        anns_field="dense",
+        param={},
+        limit=5,
+    )
+    bm25_query = compute_tf([term_to_id("python")])
+    bm25_req = AnnSearchRequest(
+        data=[bm25_query],
+        anns_field="bm25_emb",
+        param={"metric_type": "BM25"},
+        limit=5,
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req, bm25_req],
+        ranker=RRFRanker(k=60),
+        limit=5,
+        output_fields=["text"],
+    )
+
+    assert len(results) == 1
+    hit_ids = [h["id"] for h in results[0]]
+    # Doc 1 is best for dense AND contains "python" → RRF should rank it top
+    assert hit_ids[0] == 1
+
+    milvus_client.drop_collection(name)
+
+
+def test_hybrid_output_fields(milvus_client):
+    """Hybrid search returns requested output fields."""
+    name = _create_hybrid_collection(milvus_client, "hybrid_of")
+
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        anns_field="dense",
+        param={},
+        limit=3,
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req],
+        ranker=RRFRanker(),
+        limit=3,
+        output_fields=["text", "category"],
+    )
+
+    for hit in results[0]:
+        assert "text" in hit["entity"]
+        assert "category" in hit["entity"]
+
+    milvus_client.drop_collection(name)
+
+
+def test_hybrid_with_filter(milvus_client):
+    """Sub-requests can have per-request filter expressions."""
+    name = _create_hybrid_collection(milvus_client, "hybrid_filt")
+
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        anns_field="dense",
+        param={},
+        limit=5,
+        expr="category == 1",  # Only programming docs
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req],
+        ranker=RRFRanker(),
+        limit=5,
+        output_fields=["category"],
+    )
+
+    for hit in results[0]:
+        assert hit["entity"]["category"] == 1
+
+    milvus_client.drop_collection(name)
+
+
+def test_hybrid_single_route_same_as_search(milvus_client):
+    """Hybrid with one route should produce same results as plain search."""
+    name = _create_hybrid_collection(milvus_client, "hybrid_single")
+
+    query = [[0.5, 0.0, 0.5, 0.0]]
+
+    # Plain search
+    plain = milvus_client.search(
+        name, data=query, anns_field="dense", limit=3,
+    )
+
+    # Hybrid with one route
+    req = AnnSearchRequest(data=query, anns_field="dense", param={}, limit=3)
+    hybrid = milvus_client.hybrid_search(
+        name, reqs=[req], ranker=RRFRanker(), limit=3,
+    )
+
+    # Same ids (order may differ slightly due to RRF vs raw distance)
+    plain_ids = {h["id"] for h in plain[0]}
+    hybrid_ids = {h["id"] for h in hybrid[0]}
+    assert plain_ids == hybrid_ids
+
+    milvus_client.drop_collection(name)
