@@ -478,17 +478,191 @@ class Collection:
         expr: Optional[str],
         output_fields: Optional[List[str]],
     ) -> List[List[dict]]:
-        """Sparse vector search (BM25 or sparse IP).
+        """Sparse vector search using BM25 scoring.
 
-        This is a stub that will be fully implemented in Phase 11.5
-        when SparseInvertedIndex is available. For now it raises
-        NotImplementedError.
+        Collects sparse vectors from all segments + memtable, builds
+        a SparseInvertedIndex on the fly, and returns BM25 top-k results.
+
+        For text search via BM25 Function: query_vectors should be
+        sparse dicts (term_hash → weight). The caller (gRPC adapter or
+        direct API) is responsible for tokenizing query text into
+        sparse vectors before calling search().
         """
-        raise NotImplementedError(
-            f"Sparse vector search on field {vector_field!r} is not yet "
-            f"implemented (coming in Phase 11.5). Use a FLOAT_VECTOR "
-            f"field for search until then."
-        )
+        from litevecdb.analyzer.sparse import bytes_to_sparse
+        from litevecdb.index.sparse_inverted import SparseInvertedIndex
+
+        # Partition filter
+        partition_filter: Optional[set] = None
+        if partition_names is not None:
+            partition_filter = set(partition_names)
+
+        # Collect all sparse vectors, pks, seqs, and records from segments
+        all_pks: list = []
+        all_seqs: list = []
+        all_sparse: list = []  # list of dict[int, float]
+        all_records: list = []
+
+        for seg in self._segment_cache.values():
+            if partition_filter is not None:
+                # Check if segment belongs to a valid partition
+                seg_partition = seg.partition_name if hasattr(seg, 'partition_name') else None
+                if seg_partition is not None and seg_partition not in partition_filter:
+                    continue
+
+            table = seg.table
+            if table is None or len(table) == 0:
+                continue
+
+            pk_col = table.column(self._pk_name)
+            seq_col = table.column("_seq")
+            sparse_col = table.column(vector_field)
+
+            for i in range(len(table)):
+                pk = pk_col[i].as_py()
+                seq = seq_col[i].as_py()
+                raw = sparse_col[i].as_py()
+                sv = bytes_to_sparse(raw) if isinstance(raw, bytes) else (raw or {})
+
+                all_pks.append(pk)
+                all_seqs.append(seq)
+                all_sparse.append(sv)
+                # Build record dict for result materialization
+                row = {}
+                for col_name in table.column_names:
+                    if col_name == "_seq":
+                        continue
+                    row[col_name] = table.column(col_name)[i].as_py()
+                all_records.append(row)
+
+        # Collect from memtable
+        mt = self._memtable
+        for pk, (batch_idx, row_idx, seq) in mt._pk_index.items():
+            batch = mt._insert_batches[batch_idx]
+            if partition_filter is not None:
+                part = batch.column("_partition")[row_idx].as_py()
+                if part not in partition_filter:
+                    continue
+
+            raw = batch.column(vector_field)[row_idx].as_py()
+            sv = bytes_to_sparse(raw) if isinstance(raw, bytes) else (raw or {})
+
+            all_pks.append(pk)
+            all_seqs.append(seq)
+            all_sparse.append(sv)
+            row = {}
+            for col_name in batch.column_names:
+                if col_name in ("_seq", "_partition"):
+                    continue
+                row[col_name] = batch.column(col_name)[row_idx].as_py()
+            all_records.append(row)
+
+        if not all_pks:
+            return [[] for _ in query_vectors]
+
+        # Build valid mask (dedup by max seq per pk + tombstone check)
+        pk_max_seq: Dict[Any, int] = {}
+        pk_last_idx: Dict[Any, int] = {}
+        for i, (pk, seq) in enumerate(zip(all_pks, all_seqs)):
+            if pk not in pk_max_seq or seq > pk_max_seq[pk]:
+                pk_max_seq[pk] = seq
+                pk_last_idx[pk] = i
+
+        n = len(all_pks)
+        valid_mask = np.zeros(n, dtype=bool)
+        for i in range(n):
+            pk = all_pks[i]
+            seq = all_seqs[i]
+            if seq == pk_max_seq[pk] and i == pk_last_idx[pk]:
+                # Check tombstone
+                if not self._delta_index.is_deleted(pk, seq):
+                    valid_mask[i] = True
+
+        # Apply scalar filter
+        compiled_filter = None
+        if expr:
+            compiled_filter = self._compile_filter(expr)
+        if compiled_filter is not None:
+            from litevecdb.search.filter.eval.python_backend import _eval_row
+            for i in range(n):
+                if valid_mask[i]:
+                    result = _eval_row(compiled_filter.ast, all_records[i])
+                    if not result:
+                        valid_mask[i] = False
+
+        # Build inverted index
+        bm25_k1 = 1.5
+        bm25_b = 0.75
+        # Check if there's a sparse IndexSpec with BM25 params
+        if self._index_spec and self._index_spec.index_type == "SPARSE_INVERTED_INDEX":
+            bm25_k1 = self._index_spec.build_params.get("bm25_k1", 1.5)
+            bm25_b = self._index_spec.build_params.get("bm25_b", 0.75)
+
+        idx = SparseInvertedIndex(k1=bm25_k1, b=bm25_b)
+        idx.build(all_sparse, valid_mask=valid_mask)
+
+        # Convert query vectors: if they're dicts, use directly
+        # If they're strings (text queries), tokenize them
+        query_sparse: List[Dict[int, float]] = []
+        for qv in query_vectors:
+            if isinstance(qv, dict):
+                query_sparse.append(qv)
+            elif isinstance(qv, str):
+                # Text query — tokenize using the BM25 function's analyzer
+                analyzer = self._bm25_functions[0][2] if self._bm25_functions else None
+                if analyzer is None:
+                    raise SchemaValidationError(
+                        "Text query requires a BM25 function with an analyzer"
+                    )
+                from litevecdb.analyzer.sparse import compute_tf
+                term_ids = analyzer.analyze(qv)
+                query_sparse.append(compute_tf(term_ids))
+            else:
+                raise SchemaValidationError(
+                    f"Sparse search query must be a dict or string, "
+                    f"got {type(qv).__name__}"
+                )
+
+        # Search
+        local_ids, distances = idx.search(query_sparse, top_k, valid_mask=None)
+        # Note: valid_mask was already applied in build, so no need to re-apply
+
+        # Materialize results
+        nq = len(query_vectors)
+        results: List[List[dict]] = []
+        for qi in range(nq):
+            hits: list = []
+            for j in range(top_k):
+                lid = int(local_ids[qi, j])
+                if lid < 0:
+                    break
+                dist = float(distances[qi, j])
+                pk = all_pks[lid]
+                rec = all_records[lid]
+
+                entity = {}
+                if output_fields is None:
+                    # All fields except pk and vector fields
+                    for k, v in rec.items():
+                        fschema = next((f for f in self._schema.fields if f.name == k), None)
+                        if fschema and (fschema.is_primary or fschema.dtype in (
+                            DataType.FLOAT_VECTOR, DataType.SPARSE_FLOAT_VECTOR
+                        )):
+                            continue
+                        entity[k] = v
+                elif output_fields:
+                    for fname in output_fields:
+                        if fname == self._pk_name:
+                            continue
+                        entity[fname] = rec.get(fname)
+
+                hits.append({
+                    "id": pk,
+                    "distance": dist,
+                    "entity": entity,
+                })
+            results.append(hits)
+
+        return results
 
     def query(
         self,

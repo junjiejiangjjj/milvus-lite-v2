@@ -83,17 +83,21 @@ class TestAnnsField:
             assert len(results) == 1
             assert len(results[0]) == 2
 
-    def test_sparse_raises_not_implemented(self):
-        """Searching on SPARSE_FLOAT_VECTOR raises NotImplementedError (Phase 11.5)."""
+    def test_sparse_search_works(self):
+        """Searching on SPARSE_FLOAT_VECTOR with BM25 works."""
         with tempfile.TemporaryDirectory() as d:
             col = _mixed_collection(d)
-            with pytest.raises(NotImplementedError, match="Sparse vector search"):
-                col.search(
-                    query_vectors=[{"hello": 1.0}],
-                    top_k=2,
-                    metric_type="BM25",
-                    anns_field="sparse",
-                )
+            # Use text query (auto-tokenized by BM25 function's analyzer)
+            results = col.search(
+                query_vectors=["hello"],
+                top_k=2,
+                metric_type="BM25",
+                anns_field="sparse",
+            )
+            assert len(results) == 1
+            # "hello" appears in docs 1 and 3
+            hit_ids = [h["id"] for h in results[0]]
+            assert len(hit_ids) > 0
 
     def test_invalid_field_name(self):
         """anns_field pointing to a non-existent field raises error."""
