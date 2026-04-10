@@ -53,6 +53,7 @@ from litevecdb.search.filter.ast import (
     Not,
     Or,
     StringLit,
+    TextMatchOp,
 )
 
 if TYPE_CHECKING:
@@ -79,9 +80,9 @@ def evaluate_hybrid(
         data = pa.Table.from_batches([data])
 
     keys = collect_meta_keys(compiled.ast)
-    if not keys:
+    if not keys and not _has_python_only_nodes(compiled.ast):
         # Defensive: dispatcher selected hybrid but the expression has
-        # no $meta. Just delegate to arrow_backend directly.
+        # no $meta or python-only nodes. Just delegate to arrow_backend.
         from litevecdb.search.filter.eval.arrow_backend import evaluate_arrow
         return evaluate_arrow(compiled, data)
 
@@ -150,6 +151,25 @@ def _collect(node: Expr, keys: Set[str]) -> None:
         return
     # Leaves: literals and FieldRef have no children with MetaAccess
     return
+
+
+def _has_python_only_nodes(node: Expr) -> bool:
+    """Check if the AST contains nodes that require python_backend."""
+    if isinstance(node, TextMatchOp):
+        return True
+    if isinstance(node, (CmpOp, ArithOp)):
+        return _has_python_only_nodes(node.left) or _has_python_only_nodes(node.right)
+    if isinstance(node, (And, Or)):
+        return any(_has_python_only_nodes(op) for op in node.operands)
+    if isinstance(node, Not):
+        return _has_python_only_nodes(node.operand)
+    if isinstance(node, InOp):
+        return _has_python_only_nodes(node.field)
+    if isinstance(node, LikeOp):
+        return _has_python_only_nodes(node.value)
+    if isinstance(node, IsNullOp):
+        return _has_python_only_nodes(node.field)
+    return False
 
 
 def _rewrite_meta_access(node: Expr, keys: Set[str]) -> Expr:

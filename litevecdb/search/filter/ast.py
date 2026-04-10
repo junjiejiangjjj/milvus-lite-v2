@@ -179,6 +179,21 @@ class MetaAccess:
     pos: int
 
 
+# ── Phase 11.6: text_match function ──────────────────────────────────────
+
+@dataclass(frozen=True)
+class TextMatchOp:
+    """``text_match(field_name, 'query tokens')``.
+
+    Tokenizes the query string using the field's analyzer, then checks
+    if any query token appears in the document's tokenized field value.
+    Multiple query tokens use OR logic (match any).
+    """
+    field: FieldRef
+    query: StringLit
+    pos: int
+
+
 # ── Type alias for the union of all node types ──────────────────────────────
 
 Expr = Union[
@@ -188,4 +203,5 @@ Expr = Union[
     CmpOp, InOp, And, Or, Not,
     ArithOp, LikeOp, IsNullOp,
     MetaAccess,
+    TextMatchOp,
 ]

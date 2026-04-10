@@ -35,6 +35,7 @@ from litevecdb.search.filter.ast import (
     Not,
     Or,
     StringLit,
+    TextMatchOp,
 )
 from litevecdb.search.filter.exceptions import (
     FilterFieldError,
@@ -360,6 +361,14 @@ def _check_node(node: Expr, ctx: "_CompileCtx") -> str:
             )
         ctx.has_meta_access = True
         return SEM_DYNAMIC
+
+    # ── TextMatchOp (Phase 11.6) ─────────────────────────────
+    if isinstance(node, TextMatchOp):
+        # Validate field exists and is VARCHAR
+        _check_node(node.field, ctx)
+        # Force python backend (text_match requires tokenization)
+        ctx.has_meta_access = True  # reuse flag to force python backend
+        return SEM_BOOL
 
     raise TypeError(f"unknown AST node type: {type(node).__name__}")
 

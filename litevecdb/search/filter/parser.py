@@ -43,6 +43,7 @@ from litevecdb.search.filter.ast import (
     Not,
     Or,
     StringLit,
+    TextMatchOp,
 )
 from litevecdb.search.filter.exceptions import FilterParseError
 from litevecdb.search.filter.tokens import Token, TokenKind, tokenize
@@ -260,6 +261,47 @@ class Parser:
         self._consume()  # NULL
         return IsNullOp(field=left, negate=negate, pos=is_tok.pos)
 
+    def _parse_text_match(self, func_tok: Token) -> Expr:
+        """``text_match(field_name, 'query tokens')``.
+
+        The IDENT "text_match" has already been consumed; we expect:
+            '(' IDENT ',' STRING ')'
+        """
+        self._consume()  # '('
+        # Field name
+        field_tok = self._peek()
+        if field_tok.kind != TokenKind.IDENT:
+            raise FilterParseError(
+                f"text_match: expected field name, got {field_tok.text!r}",
+                self.source, field_tok.pos,
+            )
+        self._consume()
+        field = FieldRef(name=field_tok.text, pos=field_tok.pos)
+        # Comma
+        if self._peek().kind != TokenKind.COMMA:
+            raise FilterParseError(
+                "text_match: expected ',' after field name",
+                self.source, self._peek().pos,
+            )
+        self._consume()
+        # Query string
+        query_tok = self._peek()
+        if query_tok.kind != TokenKind.STRING:
+            raise FilterParseError(
+                f"text_match: expected query string, got {query_tok.text!r}",
+                self.source, query_tok.pos,
+            )
+        self._consume()
+        query = StringLit(value=query_tok.value, pos=query_tok.pos)
+        # Close paren
+        if self._peek().kind != TokenKind.RPAREN:
+            raise FilterParseError(
+                "text_match: expected ')'",
+                self.source, self._peek().pos,
+            )
+        self._consume()
+        return TextMatchOp(field=field, query=query, pos=func_tok.pos)
+
     def _parse_in_tail(self, left: Expr, negate: bool) -> Expr:
         """Parse the `in [...]` tail. *left* must be a FieldRef."""
         in_tok = self._consume()  # IN
@@ -322,12 +364,14 @@ class Parser:
 
         if tok.kind == TokenKind.IDENT:
             self._consume()
-            # Reject function-call syntax — F3 will support it.
+            # Function-call syntax: text_match(field, 'query')
             if self._peek().kind == TokenKind.LPAREN:
+                if tok.text == "text_match":
+                    return self._parse_text_match(tok)
                 raise FilterParseError(
-                    f"function calls not supported in Phase F1 (saw {tok.text!r}'(')",
+                    f"unknown function {tok.text!r}",
                     self.source, tok.pos, span=len(tok.text),
-                    hint="json_contains / array_length / etc. land in Phase F3",
+                    hint="supported functions: text_match",
                 )
             return FieldRef(name=tok.text, pos=tok.pos)
 

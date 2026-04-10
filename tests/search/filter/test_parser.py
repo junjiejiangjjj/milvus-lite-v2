@@ -294,8 +294,8 @@ def test_dangling_operator():
         parse_expr("a > ")
 
 
-def test_function_call_rejected():
-    with pytest.raises(FilterParseError, match="Phase F1"):
+def test_unknown_function_call_rejected():
+    with pytest.raises(FilterParseError, match="unknown function"):
         parse_expr("json_contains(meta, 'x')")
 
 

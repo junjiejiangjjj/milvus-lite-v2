@@ -34,6 +34,7 @@ from litevecdb.search.filter.ast import (
     Not,
     Or,
     StringLit,
+    TextMatchOp,
 )
 
 if TYPE_CHECKING:
@@ -229,5 +230,20 @@ def _eval_row(node, row: dict) -> Any:
         if not isinstance(d, dict):
             return None
         return d.get(node.key)
+
+    # ── Phase 11.6: text_match ──────────────────────────────────
+    if isinstance(node, TextMatchOp):
+        field_val = row.get(node.field.name)
+        if field_val is None or not isinstance(field_val, str):
+            return False
+        # Tokenize both field value and query using StandardAnalyzer
+        from litevecdb.analyzer.standard import StandardAnalyzer
+        analyzer = StandardAnalyzer()
+        doc_tokens = set(analyzer.tokenize(field_val))
+        query_tokens = set(analyzer.tokenize(node.query.value))
+        if not query_tokens:
+            return False
+        # OR logic: match if any query token is in doc tokens
+        return bool(doc_tokens & query_tokens)
 
     raise TypeError(f"unknown AST node: {type(node).__name__}")
