@@ -672,6 +672,68 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             db_names=["default"],
         )
 
+    # ── Explicitly UNIMPLEMENTED stubs ─────────────────────────
+    #
+    # The base class returns UNIMPLEMENTED for every method we don't
+    # override, but those responses carry a generic "Method not
+    # implemented!" message. For high-frequency RPCs that pymilvus
+    # users might hit, we override with a friendlier explanation so
+    # error messages point the user in the right direction instead of
+    # being cryptic.
+
+    def HybridSearch(self, request, context):
+        return self._unimplemented(
+            context, "HybridSearch",
+            "multi-vector search is not supported in LiteVecDB MVP; "
+            "use search() with a single vector field instead",
+        )
+
+    def RenameCollection(self, request, context):
+        return self._unimplemented(
+            context, "RenameCollection",
+            "collection renaming is not supported in LiteVecDB MVP",
+        )
+
+    def CreateAlias(self, request, context):
+        return self._unimplemented(context, "CreateAlias", "aliases are not in MVP scope")
+
+    def DropAlias(self, request, context):
+        return self._unimplemented(context, "DropAlias", "aliases are not in MVP scope")
+
+    def AlterCollection(self, request, context):
+        return self._unimplemented(
+            context, "AlterCollection",
+            "schema is immutable in LiteVecDB — create a new collection instead",
+        )
+
+    def LoadPartitions(self, request, context):
+        return self._unimplemented(
+            context, "LoadPartitions",
+            "partition-level load is not supported; use load_collection instead",
+        )
+
+    def ReleasePartitions(self, request, context):
+        return self._unimplemented(
+            context, "ReleasePartitions",
+            "partition-level release is not supported; use release_collection instead",
+        )
+
+    def ManualCompaction(self, request, context):
+        """Compaction runs automatically after flush. pymilvus
+        exposes compact() → ManualCompaction, but the engine doesn't
+        have an on-demand trigger via the Collection API yet. Return
+        success so pymilvus clients don't crash — the effect is already
+        achieved by the automatic post-flush compaction."""
+        return milvus_pb2.ManualCompactionResponse(
+            status=common_pb2.Status(**success_status_kwargs()),
+        )
+
+    def GetCompactionState(self, request, context):
+        return milvus_pb2.GetCompactionStateResponse(
+            status=common_pb2.Status(**success_status_kwargs()),
+            state=common_pb2.CompactionState.Completed,
+        )
+
     # ── Helpers ─────────────────────────────────────────────────
 
     def _build_ids_proto(self, pks, col):
