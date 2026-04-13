@@ -139,7 +139,6 @@ def test_delete_with_filters(milvus_client):
 # ===================================================================
 
 
-@pytest.mark.skip(reason="Nullable vector field insert via gRPC not yet supported (FieldData encoding)")
 def test_delete_with_filters_nullable_vector_field(milvus_client):
     """Adapted from test_milvus_client_delete_with_filters_nullable_vector_field
     (test_milvus_client_delete.py:224).

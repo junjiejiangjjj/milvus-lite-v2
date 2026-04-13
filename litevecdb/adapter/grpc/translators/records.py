@@ -248,16 +248,34 @@ def _extract_vector_column(fd, dtype_int: int, num_rows: int) -> List[Any]:
         )
 
     flat = list(vectors.float_vector.data)
-    expected_total = num_rows * dim
-    if len(flat) != expected_total:
-        raise SchemaValidationError(
-            f"FieldData {fd.field_name!r} float_vector data has "
-            f"{len(flat)} elements, expected num_rows({num_rows}) * dim({dim}) "
-            f"= {expected_total}"
-        )
+    expected_full = num_rows * dim
 
-    # Slice into per-row lists.
-    return [flat[i * dim:(i + 1) * dim] for i in range(num_rows)]
+    if len(flat) == expected_full:
+        # Full form: all rows present.
+        return [flat[i * dim:(i + 1) * dim] for i in range(num_rows)]
+
+    # Compact form: nullable vector — flat contains only non-null rows.
+    # Check that len(flat) matches n_valid * dim.
+    valid_list = list(fd.valid_data)
+    if valid_list:
+        n_valid = sum(1 for v in valid_list if v)
+        if len(flat) == n_valid * dim:
+            # Expand by slicing non-null vectors and inserting None.
+            column: List[Any] = []
+            val_idx = 0
+            for v in valid_list:
+                if v:
+                    column.append(flat[val_idx * dim:(val_idx + 1) * dim])
+                    val_idx += 1
+                else:
+                    column.append(None)
+            return column
+
+    raise SchemaValidationError(
+        f"FieldData {fd.field_name!r} float_vector data has "
+        f"{len(flat)} elements, expected num_rows({num_rows}) * dim({dim}) "
+        f"= {expected_full}"
+    )
 
 
 def _extract_sparse_vector_column(fd, num_rows: int) -> List[Any]:

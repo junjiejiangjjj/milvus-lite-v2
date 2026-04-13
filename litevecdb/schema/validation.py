@@ -220,27 +220,30 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
     # FLOAT_VECTOR presence + shape
     float_vec = _find_float_vector(schema)
     if float_vec is not None:
-        if float_vec.name not in record or record[float_vec.name] is None:
-            raise SchemaValidationError(
-                f"vector field {float_vec.name!r} missing or None"
-            )
-        vector_value = record[float_vec.name]
-        if not isinstance(vector_value, (list, tuple)):
-            raise SchemaValidationError(
-                f"vector field {float_vec.name!r} must be list/tuple, "
-                f"got {type(vector_value).__name__}"
-            )
-        if len(vector_value) != float_vec.dim:
-            raise SchemaValidationError(
-                f"vector field {float_vec.name!r} expected dim {float_vec.dim}, "
-                f"got {len(vector_value)}"
-            )
-        for i, x in enumerate(vector_value):
-            if not isinstance(x, (int, float)) or isinstance(x, bool):
+        vec_val = record.get(float_vec.name)
+        if vec_val is None or float_vec.name not in record:
+            if not float_vec.nullable:
                 raise SchemaValidationError(
-                    f"vector field {float_vec.name!r}[{i}] must be numeric, "
-                    f"got {type(x).__name__}"
+                    f"vector field {float_vec.name!r} missing or None"
                 )
+            # nullable vector — None is valid, skip shape check
+        else:
+            if not isinstance(vec_val, (list, tuple)):
+                raise SchemaValidationError(
+                    f"vector field {float_vec.name!r} must be list/tuple, "
+                    f"got {type(vec_val).__name__}"
+                )
+            if len(vec_val) != float_vec.dim:
+                raise SchemaValidationError(
+                    f"vector field {float_vec.name!r} expected dim {float_vec.dim}, "
+                    f"got {len(vec_val)}"
+                )
+            for i, x in enumerate(vec_val):
+                if not isinstance(x, (int, float)) or isinstance(x, bool):
+                    raise SchemaValidationError(
+                        f"vector field {float_vec.name!r}[{i}] must be numeric, "
+                        f"got {type(x).__name__}"
+                    )
 
     # per-field type / nullability
     for f in schema.fields:

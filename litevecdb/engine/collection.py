@@ -1466,6 +1466,16 @@ class Collection:
                     for v in cols[f.name]
                 ]
 
+        # Replace None with zero vectors for nullable FLOAT_VECTOR fields
+        # (Arrow fixed-size list can't hold None directly)
+        for f in self._schema.fields:
+            if f.dtype == DataType.FLOAT_VECTOR and f.nullable and f.dim:
+                zero = [0.0] * f.dim
+                cols[f.name] = [
+                    v if v is not None else zero
+                    for v in cols[f.name]
+                ]
+
         return pa.RecordBatch.from_pydict(cols, schema=self._wal_data_schema)
 
     def _build_wal_delta_batch(
