@@ -34,6 +34,7 @@ from litevecdb.search.filter.ast import (
     Not,
     Or,
     StringLit,
+    JsonAccess,
     TextMatchOp,
 )
 
@@ -230,6 +231,21 @@ def _eval_row(node, row: dict) -> Any:
         if not isinstance(d, dict):
             return None
         return d.get(node.key)
+
+    # ── JSON field path access ─────────────────────────────────
+    if isinstance(node, JsonAccess):
+        field_val = row.get(node.field_name)
+        if field_val is None:
+            return None
+        # field_val may be a JSON string or already-parsed dict
+        if isinstance(field_val, str):
+            try:
+                field_val = json.loads(field_val)
+            except (json.JSONDecodeError, ValueError):
+                return None
+        if isinstance(field_val, dict):
+            return field_val.get(node.key)
+        return None
 
     # ── Phase 11.6: text_match ──────────────────────────────────
     if isinstance(node, TextMatchOp):

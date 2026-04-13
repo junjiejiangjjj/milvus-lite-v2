@@ -305,7 +305,6 @@ class TestPartitionPagination:
 # 4. JSON field query and search filters
 # ===========================================================================
 
-@pytest.mark.skip(reason="JSON path syntax field['key'] not supported; use $meta[\"key\"] for dynamic fields")
 class TestJsonFieldFilters:
     """Adapted from test_milvus_client_e2e query_cases with JSON."""
 

@@ -35,6 +35,7 @@ from litevecdb.search.filter.ast import (
     Not,
     Or,
     StringLit,
+    JsonAccess,
     TextMatchOp,
 )
 from litevecdb.search.filter.exceptions import (
@@ -362,12 +363,23 @@ def _check_node(node: Expr, ctx: "_CompileCtx") -> str:
         ctx.has_meta_access = True
         return SEM_DYNAMIC
 
+    # ── JsonAccess (JSON field path) ────────────────────────
+    if isinstance(node, JsonAccess):
+        # Validate field exists in schema
+        if node.field_name not in ctx.schema_fields:
+            raise FilterFieldError(
+                f"unknown field {node.field_name!r}",
+                ctx.source, node.pos,
+                field_name=node.field_name,
+                available_fields=ctx.field_names,
+            )
+        ctx.has_meta_access = True  # force python backend
+        return SEM_DYNAMIC
+
     # ── TextMatchOp (Phase 11.6) ─────────────────────────────
     if isinstance(node, TextMatchOp):
-        # Validate field exists and is VARCHAR
         _check_node(node.field, ctx)
-        # Force python backend (text_match requires tokenization)
-        ctx.has_meta_access = True  # reuse flag to force python backend
+        ctx.has_meta_access = True
         return SEM_BOOL
 
     raise TypeError(f"unknown AST node type: {type(node).__name__}")

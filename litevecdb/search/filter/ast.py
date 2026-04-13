@@ -179,6 +179,21 @@ class MetaAccess:
     pos: int
 
 
+# ── JSON field path access ────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class JsonAccess:
+    """``field_name["key"]`` — JSON field nested value lookup.
+
+    Unlike MetaAccess (which is specifically for ``$meta["key"]``),
+    JsonAccess works on any JSON-typed schema field. The result type
+    is dynamic (not known until runtime). Forces python backend.
+    """
+    field_name: str
+    key: str
+    pos: int
+
+
 # ── Phase 11.6: text_match function ──────────────────────────────────────
 
 @dataclass(frozen=True)
@@ -202,6 +217,6 @@ Expr = Union[
     FieldRef,
     CmpOp, InOp, And, Or, Not,
     ArithOp, LikeOp, IsNullOp,
-    MetaAccess,
+    MetaAccess, JsonAccess,
     TextMatchOp,
 ]

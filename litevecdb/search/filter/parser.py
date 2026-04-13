@@ -36,6 +36,7 @@ from litevecdb.search.filter.ast import (
     InOp,
     IntLit,
     IsNullOp,
+    JsonAccess,
     LikeOp,
     ListLit,
     Literal,
@@ -302,6 +303,31 @@ class Parser:
         self._consume()
         return TextMatchOp(field=field, query=query, pos=func_tok.pos)
 
+    def _parse_json_access(self, ident_tok: Token) -> Expr:
+        """``field_name["key"]`` or ``field_name['key']``.
+
+        The IDENT has already been consumed; we expect '[' STRING ']'.
+        """
+        self._consume()  # '['
+        key_tok = self._peek()
+        if key_tok.kind != TokenKind.STRING:
+            raise FilterParseError(
+                f"JSON access: expected string key, got {key_tok.text!r}",
+                self.source, key_tok.pos,
+            )
+        self._consume()
+        if self._peek().kind != TokenKind.RBRACKET:
+            raise FilterParseError(
+                "JSON access: expected ']'",
+                self.source, self._peek().pos,
+            )
+        self._consume()
+        return JsonAccess(
+            field_name=ident_tok.text,
+            key=key_tok.value,
+            pos=ident_tok.pos,
+        )
+
     def _parse_in_tail(self, left: Expr, negate: bool) -> Expr:
         """Parse the `in [...]` tail. *left* must be a FieldRef."""
         in_tok = self._consume()  # IN
@@ -373,6 +399,9 @@ class Parser:
                     self.source, tok.pos, span=len(tok.text),
                     hint="supported functions: text_match",
                 )
+            # JSON field access: field_name["key"] or field_name['key']
+            if self._peek().kind == TokenKind.LBRACKET:
+                return self._parse_json_access(tok)
             return FieldRef(name=tok.text, pos=tok.pos)
 
         if tok.kind == TokenKind.META:
