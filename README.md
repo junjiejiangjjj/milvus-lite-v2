@@ -40,10 +40,18 @@ This project is entirely **vibe coded** — designed, implemented, and tested th
 # Installation
 
 ```bash
-pip install litevecdb                  # core (BruteForce index only)
-pip install litevecdb[faiss]           # + FAISS HNSW vector index
-pip install litevecdb[faiss,grpc]      # + pymilvus-compatible gRPC server
+# Recommended: full features (FAISS index + pymilvus .db mode)
+pip install litevecdb[faiss,grpc]
+
+# Minimal: core engine only (BruteForce index, no gRPC)
+pip install litevecdb
 ```
+
+> **Note:** If you have the original `milvus-lite` installed, uninstall it first to avoid conflicts — both packages provide the `milvus_lite` Python module:
+> ```bash
+> pip uninstall milvus-lite -y
+> pip install litevecdb[faiss,grpc]
+> ```
 
 For development:
 
