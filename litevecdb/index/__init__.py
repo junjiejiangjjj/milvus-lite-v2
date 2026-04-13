@@ -38,4 +38,5 @@ __all__ = [
 
 if is_faiss_available():
     from litevecdb.index.faiss_hnsw import FaissHnswIndex  # noqa: F401
-    __all__.append("FaissHnswIndex")
+    from litevecdb.index.faiss_ivf_flat import FaissIvfFlatIndex  # noqa: F401
+    __all__.extend(["FaissHnswIndex", "FaissIvfFlatIndex"])

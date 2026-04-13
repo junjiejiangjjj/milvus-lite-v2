@@ -6,7 +6,8 @@ and handles the optional faiss-cpu dependency gracefully.
 Routing rules:
     BRUTE_FORCE → BruteForceIndex (no extra dependency)
     HNSW        → FaissHnswIndex (requires faiss-cpu)
-    IVF_*       → reserved for future phases (NotImplementedError)
+    IVF_FLAT    → FaissIvfFlatIndex (requires faiss-cpu)
+    IVF_SQ8/PQ  → reserved for future phases (NotImplementedError)
 
 When faiss-cpu is not installed, requesting an HNSW index raises
 ``IndexBackendUnavailableError`` with a clear "install with [faiss]
@@ -83,9 +84,12 @@ def build_index_from_spec(
         if index_type == "HNSW":
             from litevecdb.index.faiss_hnsw import FaissHnswIndex
             return FaissHnswIndex.build(vectors, spec.metric_type, spec.build_params)
+        if index_type == "IVF_FLAT":
+            from litevecdb.index.faiss_ivf_flat import FaissIvfFlatIndex
+            return FaissIvfFlatIndex.build(vectors, spec.metric_type, spec.build_params)
         raise NotImplementedError(
             f"index_type={index_type!r} is reserved for a future phase; "
-            f"only HNSW and BRUTE_FORCE are supported in Phase 9.5"
+            f"only HNSW, IVF_FLAT, and BRUTE_FORCE are supported"
         )
     raise ValueError(f"unknown index_type: {index_type!r}")
 
@@ -108,6 +112,9 @@ def load_index_from_spec(
         if index_type == "HNSW":
             from litevecdb.index.faiss_hnsw import FaissHnswIndex
             return FaissHnswIndex.load(path, spec.metric_type, dim)
+        if index_type == "IVF_FLAT":
+            from litevecdb.index.faiss_ivf_flat import FaissIvfFlatIndex
+            return FaissIvfFlatIndex.load(path, spec.metric_type, dim)
         raise NotImplementedError(
             f"index_type={index_type!r} is reserved for a future phase"
         )
