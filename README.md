@@ -4,7 +4,7 @@ A local embedded vector database — designed as a **local version of Milvus**, 
 
 LiteVecDB is an LSM-tree-style storage engine with PyArrow in-memory and Parquet on disk, per-segment FAISS HNSW indexing, BM25 full text search, and a Milvus-compatible gRPC adapter. pymilvus clients connect without code changes.
 
-> **Status**: pre-1.0. Phases 0–17 landed — storage, engine, scalar filter, vector index, gRPC adapter, full text search, hybrid search, group by, range search, auto ID, iterators, offset pagination. **1477 tests passing.**
+> **Status**: pre-1.0. Phases 0–18 landed — storage, engine, scalar filter, vector index, gRPC adapter, full text search, hybrid search, group by, range search, auto ID, iterators, offset pagination, multi-vector independent indexing. **1484 tests passing.**
 
 ---
 
@@ -14,7 +14,7 @@ LiteVecDB is an LSM-tree-style storage engine with PyArrow in-memory and Parquet
 - **Crash-safe** — atomic Manifest with `.prev` backup; WAL replay on every restart
 - **Milvus-style API** — `insert / delete / get / search / query`, partition CRUD, `_seq` global ordering, upsert semantics
 - **Scalar filter expressions** — `age > 18 and category in ['tech', 'news']` style; three backends (`arrow` / `hybrid` / `python`) with automatic dispatch
-- **FAISS HNSW vector index** — per-segment binding, `IDSelectorBitmap` pre-filter, optional via `[faiss]` extra
+- **FAISS HNSW vector index** — per-segment binding, `IDSelectorBitmap` pre-filter, optional via `[faiss]` extra; multi-vector independent indexing (dense + sparse each have their own index)
 - **BM25 full text search** — `Function(type=BM25)` auto-generates sparse vectors from text; inverted index with BM25 scoring
 - **text_match filter** — `text_match(field, 'tokens')` tokenized keyword matching with OR logic
 - **Hybrid search** — multi-vector fusion with `WeightedRanker` / `RRFRanker`
@@ -25,7 +25,7 @@ LiteVecDB is an LSM-tree-style storage engine with PyArrow in-memory and Parquet
 - **Offset pagination** — `search(offset=10, limit=10)` and `query(offset=...)`
 - **gRPC adapter** — `pymilvus.MilvusClient` fully compatible; embeddable + standalone server
 - **load / release state machine** — mirrors Milvus client behavior
-- **1477 tests**, including recall@10 differential tests and pymilvus end-to-end compatibility suites
+- **1484 tests**, including recall@10 differential tests and pymilvus end-to-end compatibility suites
 
 ---
 
@@ -273,7 +273,7 @@ Collection
 ## Testing
 
 ```bash
-pytest                              # 1477 default tests (~70s)
+pytest                              # 1484 default tests (~75s)
 pytest -m slow                      # long-running stress tests
 pytest --cov=litevecdb              # with coverage
 pytest tests/adapter/ -k fts        # specific tests
@@ -287,7 +287,7 @@ pytest tests/adapter/ -k fts        # specific tests
 | `tests/search/` | bitmap, distance, executor, filter (parser/semantic/backends), text_match |
 | `tests/index/` | BruteForceIndex, FaissHnswIndex, SparseInvertedIndex, recall differential |
 | `tests/analyzer/` | StandardAnalyzer, JiebaAnalyzer, sparse codec, BM25 auto-gen |
-| `tests/adapter/` | gRPC server, translators, pymilvus compat suites, hybrid search, group by, range search, FTS compat, auto ID, iterators, offset |
+| `tests/adapter/` | gRPC server, translators, pymilvus compat suites, hybrid search, group by, range search, FTS compat, auto ID, iterators, offset, multi-index |
 
 ---
 
@@ -306,6 +306,7 @@ pytest tests/adapter/ -k fts        # specific tests
 | **15** | Auto ID (automatic INT64 primary key generation) | done |
 | **16** | Iterators (query_iterator, search_iterator) | done |
 | **17** | Offset pagination (search + query) | done |
+| **18** | Multi-vector independent indexing (per-field IndexSpec) | done |
 
 For the full roadmap see `plan/roadmap.md`.
 
@@ -339,7 +340,7 @@ milvus-lite-v2/
 |   +-- analyzer/              # Analyzer, StandardAnalyzer, JiebaAnalyzer, sparse codec, hash
 |   +-- adapter/grpc/          # MilvusServicer, server, reranker, errors, translators/
 |
-+-- tests/                     # 1477 tests
++-- tests/                     # 1484 tests
 +-- examples/                  # m2_demo.py ... m10_demo.py
 +-- plan/                      # design docs (Chinese)
 ```
