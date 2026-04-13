@@ -29,7 +29,7 @@ This project is entirely **vibe coded** — designed, implemented, and tested th
 | Platform | Linux/macOS only, no Alpine/musl | Anywhere Python runs |
 | Debugging | Opaque C++ core, segfaults | Pure Python stack traces |
 | Extensibility | Requires rebuilding C++ | Standard Python, easy to fork and modify |
-| Index | FLAT, IVF_FLAT | HNSW (FAISS), FLAT, BM25 sparse inverted |
+| Index | FLAT, IVF_FLAT | HNSW, IVF_FLAT (FAISS), FLAT, BM25 sparse inverted |
 | Full text search | Tantivy (C++ binding) | Pure Python BM25 with pluggable analyzers |
 
 # Requirements
@@ -55,23 +55,16 @@ pip install -e ".[dev,faiss,grpc]"
 
 # Quick Start
 
-### Option 1: pymilvus client (drop-in replacement)
+### Option 1: Local .db file (simplest, just like milvus-lite)
 
-Start the gRPC server:
-
-```bash
-litevecdb-grpc --data-dir ./data --port 19530
-```
-
-Then use the standard pymilvus API — **no code changes needed**:
+Pass a `.db` path to `MilvusClient` — the server starts automatically in-process, no manual setup needed:
 
 ```python
 from pymilvus import MilvusClient
 
-# Just point to the Milvus Lite v2 server instead of Milvus Standalone
-client = MilvusClient(uri="http://localhost:19530")
+client = MilvusClient("./demo.db")
 
-# Everything works exactly like Milvus
+# Create collection, insert, search — exactly like milvus-lite
 client.create_collection("demo", dimension=384)
 
 data = [
@@ -96,7 +89,24 @@ client.delete("demo", ids=[0, 1, 2])
 client.drop_collection("demo")
 ```
 
-### Option 2: Embedded engine (no server)
+This is a **drop-in replacement** for milvus-lite — just `pip install litevecdb[faiss,grpc]` and your existing `MilvusClient("./xxx.db")` code works without changes.
+
+### Option 2: Standalone gRPC server
+
+For multi-client or long-running service scenarios, start the server explicitly:
+
+```bash
+litevecdb-grpc --data-dir ./data --port 19530
+```
+
+```python
+from pymilvus import MilvusClient
+
+client = MilvusClient(uri="http://localhost:19530")
+# Same API as above
+```
+
+### Option 3: Embedded engine (no server, no gRPC)
 
 ```python
 from litevecdb import LiteVecDB, CollectionSchema, FieldSchema, DataType
@@ -211,7 +221,7 @@ client.query("col", filter="scores[0] > 90", limit=10)
 | Feature | Details |
 |---|---|
 | Vector types | `FLOAT_VECTOR`, `SPARSE_FLOAT_VECTOR` |
-| Index types | `HNSW` (FAISS), `FLAT` / `BRUTE_FORCE` / `AUTOINDEX`, `SPARSE_INVERTED_INDEX` |
+| Index types | `HNSW`, `IVF_FLAT` (FAISS), `FLAT` / `BRUTE_FORCE` / `AUTOINDEX`, `SPARSE_INVERTED_INDEX` |
 | Metrics | `COSINE`, `L2`, `IP`, `BM25` |
 | Scalar types | `INT8/16/32/64`, `FLOAT`, `DOUBLE`, `VARCHAR`, `BOOL`, `JSON`, `ARRAY` |
 | Search | Dense ANN, sparse BM25, hybrid (multi-vector + reranker), range search, group-by |
