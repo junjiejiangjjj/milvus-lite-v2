@@ -311,6 +311,7 @@ class Collection:
         pks: List[Any],
         partition_names: Optional[List[str]] = None,
         expr: Optional[str] = None,
+        output_fields: Optional[List[str]] = None,
     ) -> List[dict]:
         """Point read across MemTable + segments.
 
@@ -375,7 +376,8 @@ class Collection:
             if compiled_filter is not None and not _row_matches_filter(rec, compiled_filter):
                 continue
 
-            out.append(rec)
+            out.append(self._project_record(rec, output_fields)
+                       if output_fields is not None else rec)
 
         return out
 

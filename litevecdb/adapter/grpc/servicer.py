@@ -264,8 +264,16 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             pks = self._extract_pks_from_expr(request.expr, col)
             if pks is None:
                 # Fall back: query to find matching pks, then delete.
-                # Requires the collection to be loaded.
-                hits = col.query(request.expr, output_fields=[col._pk_name])
+                # Temporarily ensure loaded state for the query, then
+                # restore — delete should not require explicit load().
+                was_loaded = col._load_state == "loaded"
+                if not was_loaded:
+                    col._load_state = "loaded"
+                try:
+                    hits = col.query(request.expr, output_fields=[col._pk_name])
+                finally:
+                    if not was_loaded:
+                        col._load_state = "released"
                 pks = [r[col._pk_name] for r in hits]
 
             count = col.delete(pks, partition_name=partition_name)
@@ -315,10 +323,35 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     except (ValueError, TypeError):
                         pass
 
+            # Expand output_fields=["*"] → all schema field names
+            if output_fields and "*" in output_fields:
+                output_fields = [f.name for f in col.schema.fields]
+
+            # Handle count(*) aggregation
+            if output_fields and "count(*)" in output_fields:
+                expr = request.expr if request.expr else None
+                if expr:
+                    rows = col.query(expr, partition_names=partition_names)
+                    count = len(rows)
+                else:
+                    count = col.num_entities
+                # Return count as a single-row result with count field
+                count_fd = schema_pb2.FieldData()
+                count_fd.field_name = "count(*)"
+                count_fd.type = 5  # INT64
+                count_fd.scalars.long_data.data.append(count)
+                return milvus_pb2.QueryResults(
+                    status=common_pb2.Status(**success_status_kwargs()),
+                    fields_data=[count_fd],
+                    collection_name=col.name,
+                    output_fields=["count(*)"],
+                )
+
             expr = request.expr if request.expr else None
             pks = self._extract_pks_from_expr(expr, col) if expr else None
             if pks is not None:
-                rows = col.get(pks, partition_names=partition_names)
+                rows = col.get(pks, partition_names=partition_names,
+                               output_fields=output_fields)
             else:
                 rows = col.query(
                     expr,
@@ -390,6 +423,13 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 range_filter=parsed.get("range_filter"),
                 offset=parsed.get("offset", 0),
             )
+
+            # Apply round_decimal to distance values
+            rd = parsed.get("round_decimal", -1)
+            if rd >= 0:
+                for query_hits in results:
+                    for hit in query_hits:
+                        hit["distance"] = round(hit["distance"], rd)
 
             result_data = build_search_result_data(
                 results=results,
