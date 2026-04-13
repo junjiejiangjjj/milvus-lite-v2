@@ -76,7 +76,7 @@ def build_index_from_spec(
         ValueError: index_type is unrecognized
     """
     index_type = spec.index_type
-    if index_type == "BRUTE_FORCE":
+    if index_type in ("BRUTE_FORCE", "FLAT", "AUTOINDEX"):
         return BruteForceIndex.build(vectors, spec.metric_type, spec.build_params)
     if index_type in _FAISS_INDEX_TYPES:
         _require_faiss(index_type)
@@ -101,7 +101,7 @@ def load_index_from_spec(
     error semantics.
     """
     index_type = spec.index_type
-    if index_type == "BRUTE_FORCE":
+    if index_type in ("BRUTE_FORCE", "FLAT", "AUTOINDEX"):
         return BruteForceIndex.load(path, spec.metric_type, dim)
     if index_type in _FAISS_INDEX_TYPES:
         _require_faiss(index_type)
