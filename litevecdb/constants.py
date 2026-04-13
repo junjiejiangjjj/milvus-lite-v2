@@ -6,7 +6,7 @@ MAX_DATA_FILES = 32
 COMPACTION_MIN_FILES_PER_BUCKET = 4
 COMPACTION_BUCKET_BOUNDARIES = [1_000_000, 10_000_000, 100_000_000]  # bytes
 
-# ── 文件命名 ──
+# ── File naming ──
 SEQ_FORMAT_WIDTH = 6
 DATA_FILE_TEMPLATE = "data_{min:0{w}d}_{max:0{w}d}.parquet"
 DELTA_FILE_TEMPLATE = "delta_{min:0{w}d}_{max:0{w}d}.parquet"

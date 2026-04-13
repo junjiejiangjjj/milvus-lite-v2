@@ -20,7 +20,7 @@ class JiebaAnalyzer(Analyzer):
               ``"exact"`` (cut with HMM, standard segmentation).
         stop_words: optional set of words to filter out.
         user_dict_words: optional list of custom dictionary entries
-            (each entry is a string like ``"深度学习"``).
+            (each entry is a Chinese word string, e.g. ``"deep learning"``).
     """
 
     def __init__(

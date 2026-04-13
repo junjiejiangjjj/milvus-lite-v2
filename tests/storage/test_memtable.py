@@ -1,7 +1,7 @@
 """Tests for storage/memtable.py — Phase 2.
 
 Critical: includes the seq-aware out-of-order reordering tests that
-固化 architectural invariant §1-2. These are the safety net for the
+solidify architectural invariant §1-2. These are the safety net for the
 Phase 0 design fix.
 """
 
