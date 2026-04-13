@@ -1454,6 +1454,16 @@ class Collection:
                     for v in cols[f.name]
                 ]
 
+        # Serialize JSON columns: dict/list → JSON string
+        import json as _json
+        for f in self._schema.fields:
+            if f.dtype == DataType.JSON:
+                cols[f.name] = [
+                    _json.dumps(v, ensure_ascii=False)
+                    if isinstance(v, (dict, list)) else v
+                    for v in cols[f.name]
+                ]
+
         return pa.RecordBatch.from_pydict(cols, schema=self._wal_data_schema)
 
     def _build_wal_delta_batch(
