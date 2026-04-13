@@ -39,17 +39,17 @@ def test_set_index_spec_then_save_load(tmp_path):
     m.set_index_spec(spec)
     m.save()
 
-    # On-disk JSON should now contain index_spec.
+    # On-disk JSON should now contain index_specs dict.
     with open(os.path.join(str(tmp_path), MANIFEST_FILENAME)) as f:
         payload = json.load(f)
     assert payload["manifest_format_version"] == 2
-    assert payload["index_spec"] is not None
-    assert payload["index_spec"]["index_type"] == "HNSW"
-    assert payload["index_spec"]["metric_type"] == "COSINE"
+    assert "vec" in payload["index_specs"]
+    assert payload["index_specs"]["vec"]["index_type"] == "HNSW"
+    assert payload["index_specs"]["vec"]["metric_type"] == "COSINE"
 
     # Reload and verify.
     m2 = Manifest.load(str(tmp_path))
-    assert m2.index_spec == spec
+    assert m2.index_specs["vec"] == spec
 
 
 def test_clear_index_spec_round_trip(tmp_path):
@@ -62,7 +62,7 @@ def test_clear_index_spec_round_trip(tmp_path):
     m.save()
 
     m2 = Manifest.load(str(tmp_path))
-    assert m2.index_spec is None
+    assert m2.index_specs == {}
 
 
 # ---------------------------------------------------------------------------
@@ -107,9 +107,9 @@ def test_v1_manifest_save_upgrades_to_v2(tmp_path):
     with open(os.path.join(str(tmp_path), MANIFEST_FILENAME)) as f:
         payload = json.load(f)
     assert payload["manifest_format_version"] == 2
-    # index_spec should be explicit None in v2.
-    assert "index_spec" in payload
-    assert payload["index_spec"] is None
+    # After upgrade, index_specs should be an empty dict.
+    assert "index_specs" in payload
+    assert payload["index_specs"] == {}
 
 
 def test_v1_manifest_save_then_set_index_spec(tmp_path):

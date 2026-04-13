@@ -315,10 +315,11 @@ def test_insert_delete_work_in_released_state(col):
 def test_describe_includes_load_state_and_index_spec(col):
     d = col.describe()
     assert d["load_state"] == "loaded"
-    assert d["index_spec"] is None
+    assert d["index_specs"] == {}
 
     col.create_index("vec", HNSW_PARAMS)
     d2 = col.describe()
     assert d2["load_state"] == "released"
-    assert d2["index_spec"]["index_type"] == "HNSW"
-    assert d2["index_spec"]["metric_type"] == "COSINE"
+    assert "vec" in d2["index_specs"]
+    assert d2["index_specs"]["vec"]["index_type"] == "HNSW"
+    assert d2["index_specs"]["vec"]["metric_type"] == "COSINE"

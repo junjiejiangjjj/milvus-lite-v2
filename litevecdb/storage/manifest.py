@@ -74,9 +74,10 @@ class Manifest:
         self._partitions: Dict[str, Dict[str, List[str]]] = {
             DEFAULT_PARTITION: {"data_files": [], "delta_files": []},
         }
-        # Phase 9.3: optional persisted IndexSpec. None = no create_index
-        # has been called yet for this Collection.
-        self._index_spec: Optional["IndexSpec"] = None
+        # Phase 9.3 / Phase 18: per-field IndexSpec dict.
+        # Keys are field_name strings, values are IndexSpec instances.
+        # Empty dict = no indexes created yet.
+        self._index_specs: Dict[str, "IndexSpec"] = {}
 
     # ── persistence ─────────────────────────────────────────────
 
@@ -194,15 +195,22 @@ class Manifest:
         if DEFAULT_PARTITION not in m._partitions:
             m._partitions[DEFAULT_PARTITION] = {"data_files": [], "delta_files": []}
 
-        # v1 → v2 backward compat: missing index_spec key → None.
-        # v1 manifests load fine and the next save() upgrades them in place.
-        spec_dict = payload.get("index_spec")
-        if spec_dict is not None:
-            # Local import to avoid circular: storage → index → search → ...
-            from litevecdb.index.spec import IndexSpec
-            m._index_spec = IndexSpec.from_dict(spec_dict)
+        # Load index_specs dict (Phase 18).
+        # Backward compat: old "index_spec" (singular) → migrate to dict.
+        from litevecdb.index.spec import IndexSpec
+        specs_dict = payload.get("index_specs")
+        if specs_dict and isinstance(specs_dict, dict):
+            m._index_specs = {
+                k: IndexSpec.from_dict(v) for k, v in specs_dict.items()
+            }
         else:
-            m._index_spec = None
+            # v1/v2 backward compat: singular "index_spec"
+            spec_dict = payload.get("index_spec")
+            if spec_dict is not None:
+                spec = IndexSpec.from_dict(spec_dict)
+                m._index_specs = {spec.field_name: spec}
+            else:
+                m._index_specs = {}
 
         return m
 
@@ -214,9 +222,9 @@ class Manifest:
             "schema_version": self._schema_version,
             "active_wal_number": self._active_wal_number,
             "partitions": self._partitions,
-            "index_spec": (
-                self._index_spec.to_dict() if self._index_spec is not None else None
-            ),
+            "index_specs": {
+                k: v.to_dict() for k, v in self._index_specs.items()
+            },
         }
 
     # ── partition CRUD ──────────────────────────────────────────
@@ -333,18 +341,32 @@ class Manifest:
     def data_dir(self) -> str:
         return self._data_dir
 
-    # ── index spec (Phase 9.3) ──────────────────────────────────
+    # ── index specs (Phase 9.3 / Phase 18) ─────────────────────
 
     @property
     def index_spec(self) -> Optional["IndexSpec"]:
-        """Currently persisted IndexSpec, or None if create_index has
-        never been called."""
-        return self._index_spec
+        """Backward-compat: return the first IndexSpec or None.
+        Prefer index_specs dict for multi-index code."""
+        if not self._index_specs:
+            return None
+        return next(iter(self._index_specs.values()))
+
+    @property
+    def index_specs(self) -> Dict[str, "IndexSpec"]:
+        """All persisted IndexSpecs, keyed by field_name."""
+        return self._index_specs
 
     def set_index_spec(self, spec: Optional["IndexSpec"]) -> None:
-        """Set or clear the IndexSpec. Caller must call save() to
-        persist. Phase 9.3."""
-        self._index_spec = spec
+        """Set or clear an IndexSpec by field_name.
+        Pass None to clear ALL specs. Caller must call save()."""
+        if spec is None:
+            self._index_specs = {}
+        else:
+            self._index_specs[spec.field_name] = spec
+
+    def remove_index_spec(self, field_name: str) -> None:
+        """Remove a single IndexSpec by field_name."""
+        self._index_specs.pop(field_name, None)
 
     @property
     def format_version(self) -> int:

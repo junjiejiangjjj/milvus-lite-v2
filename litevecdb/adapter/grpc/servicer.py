@@ -364,9 +364,11 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         """
         try:
             col = self._db.get_collection(request.collection_name)
-            # Pull the canonical metric from the IndexSpec if any.
-            spec = col._index_spec  # noqa: SLF001
-            default_metric = spec.metric_type if spec else "COSINE"
+            # Pull the canonical metric from the first IndexSpec if any.
+            first_spec = col._index_specs.get(col._vector_name) if col._index_specs else None  # noqa: SLF001
+            if first_spec is None and col._index_specs:
+                first_spec = next(iter(col._index_specs.values()))
+            default_metric = first_spec.metric_type if first_spec else "COSINE"
             parsed = parse_search_request(request, default_metric_type=default_metric)
 
             group_by_field = parsed.get("group_by_field")
@@ -440,7 +442,16 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
     def DropIndex(self, request, context):
         try:
             col = self._db.get_collection(request.collection_name)
-            col.drop_index(request.field_name or None)
+            field_name = request.field_name or None
+            # Resolve index_name → field_name if field_name not provided
+            if field_name is None and request.index_name:
+                # Our naming convention: "{field_name}_idx"
+                idx_name = request.index_name
+                for fn in col._index_specs:  # noqa: SLF001
+                    if f"{fn}_idx" == idx_name:
+                        field_name = fn
+                        break
+            col.drop_index(field_name)
             return common_pb2.Status(**success_status_kwargs())
         except LiteVecDBError as e:
             return common_pb2.Status(**to_status_kwargs(e))
@@ -463,32 +474,40 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             from litevecdb.exceptions import IndexNotFoundError as _INFE
 
             col = self._db.get_collection(request.collection_name)
-            spec = col._index_spec  # noqa: SLF001
+            all_specs = col._index_specs  # noqa: SLF001
 
-            if spec is None:
-                # No index at all → INDEX_NOT_FOUND so pymilvus returns None
+            if not all_specs:
                 raise _INFE(
                     f"no index on collection {request.collection_name!r}"
                 )
 
-            # If a specific field_name was requested, it must match.
-            if request.field_name and request.field_name != spec.field_name:
-                raise _INFE(
-                    f"no index on field {request.field_name!r} of "
-                    f"collection {request.collection_name!r}"
-                )
+            # Filter by field_name if requested.
+            if request.field_name:
+                spec = all_specs.get(request.field_name)
+                if spec is None:
+                    raise _INFE(
+                        f"no index on field {request.field_name!r} of "
+                        f"collection {request.collection_name!r}"
+                    )
+                specs_to_report = [spec]
+            else:
+                specs_to_report = list(all_specs.values())
 
-            desc = milvus_pb2.IndexDescription(
-                index_name="_default_idx",
-                field_name=spec.field_name,
-                params=index_spec_to_kv_pairs(spec),
-                state=common_pb2.IndexState.Finished,
-                indexed_rows=col.num_entities,
-                total_rows=col.num_entities,
-            )
+            num_ent = col.num_entities
+            descriptions = [
+                milvus_pb2.IndexDescription(
+                    index_name=f"{s.field_name}_idx",
+                    field_name=s.field_name,
+                    params=index_spec_to_kv_pairs(s),
+                    state=common_pb2.IndexState.Finished,
+                    indexed_rows=num_ent,
+                    total_rows=num_ent,
+                )
+                for s in specs_to_report
+            ]
             return milvus_pb2.DescribeIndexResponse(
                 status=common_pb2.Status(**success_status_kwargs()),
-                index_descriptions=[desc],
+                index_descriptions=descriptions,
             )
         except LiteVecDBError as e:
             return milvus_pb2.DescribeIndexResponse(
@@ -722,8 +741,8 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             from litevecdb.adapter.grpc.reranker import parse_rank_params, rerank
 
             col = self._db.get_collection(request.collection_name)
-            spec = col._index_spec  # noqa: SLF001
-            default_metric = spec.metric_type if spec else "COSINE"
+            first_spec = next(iter(col._index_specs.values()), None) if col._index_specs else None  # noqa: SLF001
+            default_metric = first_spec.metric_type if first_spec else "COSINE"
 
             # Parse rank_params
             rp = parse_rank_params(request.rank_params)

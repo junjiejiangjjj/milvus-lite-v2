@@ -172,16 +172,12 @@ class Collection:
         self._filter_cache: LRUCache = LRUCache(maxsize=FILTER_CACHE_SIZE)
 
         # ── 7. index state machine (Phase 9.3) ──────────────────
-        # _index_spec is mirrored from manifest so we don't reload on
-        # every access; it's also the canonical "is there an index?" flag.
+        # _index_specs mirrors manifest's per-field IndexSpec dict.
         # _load_state mirrors Milvus's loaded/released semantics:
-        #   - Collections WITHOUT an IndexSpec auto-load on construction
-        #     (there is nothing to build, and we don't want to break
-        #      backward compatibility for users who never call create_index)
-        #   - Collections WITH an IndexSpec start as released; the user
-        #     must call load() explicitly, mirroring pymilvus behavior
-        self._index_spec: Optional[IndexSpec] = self._manifest.index_spec
-        self._load_state: str = "loaded" if self._index_spec is None else "released"
+        #   - Collections WITHOUT any IndexSpec auto-load on construction
+        #   - Collections WITH IndexSpecs start as released; user must load()
+        self._index_specs: Dict[str, IndexSpec] = dict(self._manifest.index_specs)
+        self._load_state: str = "loaded" if not self._index_specs else "released"
 
         # ── 8. auto_id support (Phase 15) ──────────────────────────
         pk_field = get_primary_field(schema)
@@ -658,9 +654,10 @@ class Collection:
         bm25_k1 = 1.5
         bm25_b = 0.75
         # Check if there's a sparse IndexSpec with BM25 params
-        if self._index_spec and self._index_spec.index_type == "SPARSE_INVERTED_INDEX":
-            bm25_k1 = self._index_spec.build_params.get("bm25_k1", 1.5)
-            bm25_b = self._index_spec.build_params.get("bm25_b", 0.75)
+        sparse_spec = self._index_specs.get(vector_field)
+        if sparse_spec and sparse_spec.index_type == "SPARSE_INVERTED_INDEX":
+            bm25_k1 = sparse_spec.build_params.get("bm25_k1", 1.5)
+            bm25_b = sparse_spec.build_params.get("bm25_b", 0.75)
 
         idx = SparseInvertedIndex(k1=bm25_k1, b=bm25_b)
         idx.build(all_sparse, valid_mask=valid_mask)
@@ -960,9 +957,9 @@ class Collection:
         must call ``load()`` to actually build segment indexes and
         re-enable search.
         """
-        if self._index_spec is not None:
+        if field_name in self._index_specs:
             raise IndexAlreadyExistsError(
-                f"index already exists for field {self._index_spec.field_name!r}; "
+                f"index already exists for field {field_name!r}; "
                 f"call drop_index first"
             )
 
@@ -972,7 +969,7 @@ class Collection:
             raise SchemaValidationError(
                 f"unknown field {field_name!r} for create_index"
             )
-        if target.dtype != DataType.FLOAT_VECTOR:
+        if target.dtype not in (DataType.FLOAT_VECTOR, DataType.SPARSE_FLOAT_VECTOR):
             raise SchemaValidationError(
                 f"field {field_name!r} has type {target.dtype.name}; "
                 f"create_index only supports vector fields"
@@ -986,7 +983,7 @@ class Collection:
             search_params=dict(index_params.get("search_params") or {}),
         )
 
-        self._index_spec = spec
+        self._index_specs[field_name] = spec
         self._manifest.set_index_spec(spec)
         self._manifest.save()
 
@@ -1015,48 +1012,64 @@ class Collection:
         Other index_type files (if any — currently impossible since we
         only support one index per Collection) are left alone.
         """
-        if self._index_spec is None:
+        if not self._index_specs:
             raise IndexNotFoundError("no index to drop")
-        if field_name is not None and field_name != self._index_spec.field_name:
+        if field_name is not None and field_name not in self._index_specs:
             raise IndexNotFoundError(
                 f"no index on field {field_name!r}; "
-                f"current index is on {self._index_spec.field_name!r}"
+                f"indexed fields: {list(self._index_specs.keys())}"
             )
 
-        # Release in-memory indexes.
-        for seg in self._segment_cache.values():
-            seg.release_index()
+        # Determine which spec(s) to drop
+        if field_name is not None:
+            drop_specs = [self._index_specs[field_name]]
+        else:
+            drop_specs = list(self._index_specs.values())
 
-        # Phase 9.4: delete on-disk .idx files matching this index_type.
-        # We do this BEFORE clearing self._index_spec so we still know
-        # the index_type for the path computation.
-        suffix = f".{self._index_spec.index_type.lower()}.idx"
-        for partition in self._manifest.list_partitions():
-            index_dir = self._index_dir(partition)
-            if not os.path.exists(index_dir):
-                continue
-            for entry in os.listdir(index_dir):
-                if entry.endswith(suffix):
-                    try:
-                        os.remove(os.path.join(index_dir, entry))
-                    except OSError:
-                        pass  # best effort — drop_index should not fail
-                              # for filesystem hiccups
+        # Release in-memory indexes for the affected fields.
+        for spec in drop_specs:
+            for seg in self._segment_cache.values():
+                seg.release_index(field_name=spec.field_name)
 
-        self._index_spec = None
-        self._manifest.set_index_spec(None)
+        # Delete on-disk .idx files matching the dropped index_type(s).
+        for spec in drop_specs:
+            suffix = f".{spec.index_type.lower()}.idx"
+            for partition in self._manifest.list_partitions():
+                index_dir = self._index_dir(partition)
+                if not os.path.exists(index_dir):
+                    continue
+                for entry in os.listdir(index_dir):
+                    if entry.endswith(suffix):
+                        try:
+                            os.remove(os.path.join(index_dir, entry))
+                        except OSError:
+                            pass
+
+        # Remove from specs
+        for spec in drop_specs:
+            del self._index_specs[spec.field_name]
+            self._manifest.remove_index_spec(spec.field_name)
         self._manifest.save()
 
-        # No index → search no longer requires loaded state.
-        self._load_state = "loaded"
+        # If no indexes remain, auto-load (backward compat).
+        if not self._index_specs:
+            self._load_state = "loaded"
 
-    def has_index(self) -> bool:
-        """True iff create_index has been called and not dropped."""
-        return self._index_spec is not None
+    def has_index(self, field_name: Optional[str] = None) -> bool:
+        """True iff create_index has been called (and not dropped).
+        If field_name is given, checks that specific field."""
+        if field_name is not None:
+            return field_name in self._index_specs
+        return bool(self._index_specs)
 
-    def get_index_info(self) -> Optional[dict]:
-        """Return the IndexSpec as a dict, or None if no index exists."""
-        return self._index_spec.to_dict() if self._index_spec is not None else None
+    def get_index_info(self, field_name: Optional[str] = None) -> Optional[dict]:
+        """Return IndexSpec as dict. If field_name is None, returns first."""
+        if field_name is not None:
+            spec = self._index_specs.get(field_name)
+            return spec.to_dict() if spec else None
+        if not self._index_specs:
+            return None
+        return next(iter(self._index_specs.values())).to_dict()
 
     def load(self) -> None:
         """Move to the loaded state. Build or load a VectorIndex per
@@ -1077,12 +1090,12 @@ class Collection:
             return
         self._load_state = "loading"
         try:
-            if self._index_spec is not None:
+            for spec in self._index_specs.values():
                 for seg in self._segment_cache.values():
                     if seg.num_rows == 0:
                         continue
                     seg.build_or_load_index(
-                        self._index_spec, self._index_dir(seg.partition)
+                        spec, self._index_dir(seg.partition)
                     )
             self._load_state = "loaded"
         except Exception:
@@ -1096,7 +1109,7 @@ class Collection:
         No-op if there's no IndexSpec (such collections never enter
         the released state — see Collection.__init__ for the rationale).
         """
-        if self._index_spec is None:
+        if not self._index_specs:
             return
         for seg in self._segment_cache.values():
             seg.release_index()
@@ -1192,9 +1205,9 @@ class Collection:
             "partitions": self.list_partitions(),
             "num_entities": self.num_entities,
             "load_state": self._load_state,
-            "index_spec": (
-                self._index_spec.to_dict() if self._index_spec is not None else None
-            ),
+            "index_specs": {
+                k: v.to_dict() for k, v in self._index_specs.items()
+            },
         }
 
     # ── orchestration ───────────────────────────────────────────
@@ -1279,13 +1292,14 @@ class Collection:
               released, so we don't bring it back)
         Already-attached segments are skipped by build_or_load_index.
         """
-        if self._load_state != "loaded" or self._index_spec is None:
+        if self._load_state != "loaded" or not self._index_specs:
             return
-        for seg in self._segment_cache.values():
-            if seg.index is None and seg.num_rows > 0:
-                seg.build_or_load_index(
-                    self._index_spec, self._index_dir(seg.partition)
-                )
+        for spec in self._index_specs.values():
+            for seg in self._segment_cache.values():
+                if spec.field_name not in seg.indexes and seg.num_rows > 0:
+                    seg.build_or_load_index(
+                        spec, self._index_dir(seg.partition)
+                    )
 
     def _cleanup_orphan_index_files(self) -> None:
         """Phase 9.4: delete .idx files whose source segment is gone.
@@ -1299,13 +1313,13 @@ class Collection:
         This is the architectural safety net for invariant §11
         (index 1:1 bound to data; lifecycles strictly aligned).
         """
-        if not self._index_spec:
-            # Without an index spec we don't know what suffix to clean.
-            # Leftover files (e.g. from a previous create_index +
-            # drop_index) are handled by drop_index itself.
+        if not self._index_specs:
             return
 
-        suffix = f".{self._index_spec.index_type.lower()}.idx"
+        suffixes = {
+            f".{spec.index_type.lower()}.idx"
+            for spec in self._index_specs.values()
+        }
         for partition, data_files in self._manifest.get_all_data_files().items():
             index_dir = self._index_dir(partition)
             if not os.path.exists(index_dir):
@@ -1314,14 +1328,17 @@ class Collection:
                 os.path.splitext(os.path.basename(df))[0] for df in data_files
             }
             for entry in os.listdir(index_dir):
-                if not entry.endswith(suffix):
+                if not any(entry.endswith(s) for s in suffixes):
                     continue
-                stem = entry[: -len(suffix)]
-                if stem not in valid_stems:
-                    try:
-                        os.remove(os.path.join(index_dir, entry))
-                    except OSError:
-                        pass
+                for s in suffixes:
+                    if entry.endswith(s):
+                        stem = entry[: -len(s)]
+                        if stem not in valid_stems:
+                            try:
+                                os.remove(os.path.join(index_dir, entry))
+                            except OSError:
+                                pass
+                        break
 
     def _refresh_segment_cache(self) -> None:
         """Reconcile self._segment_cache with the manifest's data files.

@@ -60,6 +60,7 @@ class Segment:
         "table",
         "pk_to_row",
         "index",
+        "indexes",
         "_pk_field",
         "_vector_field",
     )
@@ -84,9 +85,11 @@ class Segment:
         self.vectors = vectors
         self.table = table
         self.pk_to_row: Dict[Any, int] = {pk: i for i, pk in enumerate(pks)}
-        # Phase 9.2: optional attached VectorIndex. None until Collection
-        # load() (or flush/compaction hooks) attaches one.
+        # Phase 9.2 / Phase 18: per-field attached indexes.
+        # self.index is backward-compat shortcut (first/only index).
+        # self.indexes maps field_name → VectorIndex.
         self.index: Optional["VectorIndex"] = None
+        self.indexes: Dict[str, "VectorIndex"] = {}
 
     # ── factory ─────────────────────────────────────────────────
 
@@ -134,23 +137,34 @@ class Segment:
 
     # ── index lifecycle (Phase 9.2 / 9.4) ───────────────────────
 
-    def attach_index(self, index: "VectorIndex") -> None:
+    def attach_index(self, index: "VectorIndex", field_name: Optional[str] = None) -> None:
         """Attach a built or loaded VectorIndex to this segment.
 
-        Idempotent — replaces any existing index. Used by:
-            - Collection.load() (Phase 9.3)
-            - flush.execute_flush() index hook (Phase 9.4)
-            - compaction.run_compaction() index hook (Phase 9.4)
+        Args:
+            index: the VectorIndex instance.
+            field_name: vector field this index covers. If None,
+                uses the segment's default _vector_field (backward compat).
         """
-        self.index = index
+        if field_name is None:
+            field_name = self._vector_field
+        self.indexes[field_name] = index
+        # Backward compat: self.index points to the default vector field's index
+        if field_name == self._vector_field:
+            self.index = index
 
-    def release_index(self) -> None:
-        """Drop the index reference. Memory is freed when GC collects.
+    def release_index(self, field_name: Optional[str] = None) -> None:
+        """Drop index reference(s). Memory freed when GC collects.
 
-        Called by Collection.release() and during drop_partition /
-        drop_index. Calling on a segment with no index is a no-op.
+        Args:
+            field_name: specific field to release. None = release ALL.
         """
-        self.index = None
+        if field_name is None:
+            self.index = None
+            self.indexes.clear()
+        else:
+            self.indexes.pop(field_name, None)
+            if field_name == self._vector_field:
+                self.index = None
 
     def index_file_path(self, index_dir: str, index_type: str) -> str:
         """Return the canonical .idx path for this segment.
@@ -175,22 +189,24 @@ class Segment:
         spec: "IndexSpec",  # type: ignore[name-defined]  # forward
         index_dir: str,
     ) -> None:
-        """Phase 9.4 / 9.5: ensure this segment has an attached index.
+        """Ensure this segment has an attached index for *spec.field_name*.
 
         - If a matching .idx file exists in *index_dir*, load it.
         - Else, build a fresh VectorIndex from the segment's vectors
           and persist it for next time.
 
-        Phase 9.5: routes via the factory so HNSW specs go through
-        FaissHnswIndex when faiss-cpu is installed (or raise
-        IndexBackendUnavailableError if not). BRUTE_FORCE always works.
-
-        Idempotent: if the segment already has an index attached, this
-        is a no-op (the on-disk file is assumed to be in sync).
+        Idempotent: if the segment already has an index for this field,
+        this is a no-op.
         """
-        if self.index is not None:
+        field_name = spec.field_name
+        if field_name in self.indexes:
             return
         if self.num_rows == 0:
+            return
+
+        # Sparse inverted indexes are built on-the-fly during search,
+        # not per-segment via the VectorIndex factory.
+        if spec.index_type == "SPARSE_INVERTED_INDEX":
             return
 
         import os
@@ -208,7 +224,7 @@ class Segment:
             os.makedirs(index_dir, exist_ok=True)
             idx.save(path)
 
-        self.attach_index(idx)
+        self.attach_index(idx, field_name=field_name)
 
     # ── introspection ───────────────────────────────────────────
 
