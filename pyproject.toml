@@ -64,6 +64,9 @@ grpc = [
 # Enabled when installed with the [grpc] extra.
 litevecdb-grpc = "litevecdb.adapter.grpc.cli:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["litevecdb", "milvus_lite"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
