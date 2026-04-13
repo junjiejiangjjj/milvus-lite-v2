@@ -1466,8 +1466,10 @@ class Collection:
                     for v in cols[f.name]
                 ]
 
-        # Replace None with zero vectors for nullable FLOAT_VECTOR fields
-        # (Arrow fixed-size list can't hold None directly)
+        # Replace None with zero vectors for nullable FLOAT_VECTOR fields.
+        # Arrow Parquet doesn't support null in FixedSizeList, so we store
+        # zeros and rely on the null info being tracked at read time by
+        # checking if the vector is all-zeros (or via valid_data on gRPC).
         for f in self._schema.fields:
             if f.dtype == DataType.FLOAT_VECTOR and f.nullable and f.dim:
                 zero = [0.0] * f.dim

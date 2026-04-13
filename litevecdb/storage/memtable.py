@@ -222,6 +222,12 @@ class MemTable:
 
         seqs_arr = np.asarray(seqs, dtype=np.uint64)
         if vecs:
+            # Handle nullable vectors: replace None with zero vectors
+            has_none = any(v is None for v in vecs)
+            if has_none:
+                dim = next(len(v) for v in vecs if v is not None)
+                zero = [0.0] * dim
+                vecs = [v if v is not None else zero for v in vecs]
             vectors_arr = np.asarray(vecs, dtype=np.float32)
         else:
             vectors_arr = np.zeros((0, 0), dtype=np.float32)

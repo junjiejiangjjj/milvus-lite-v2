@@ -57,6 +57,7 @@ class Segment:
         "pks",
         "seqs",
         "vectors",
+        "vector_null_mask",
         "table",
         "pk_to_row",
         "index",
@@ -75,6 +76,7 @@ class Segment:
         seqs: np.ndarray,
         vectors: np.ndarray,
         table: pa.Table,
+        vector_null_mask: Optional[np.ndarray] = None,
     ) -> None:
         self.file_path = file_path
         self.partition = partition
@@ -84,6 +86,9 @@ class Segment:
         self.seqs = seqs
         self.vectors = vectors
         self.table = table
+        # Boolean mask: True = vector is valid, False = null vector.
+        # None means all vectors are valid (no nullable vector field).
+        self.vector_null_mask = vector_null_mask
         self.pk_to_row: Dict[Any, int] = {pk: i for i, pk in enumerate(pks)}
         # Phase 9.2 / Phase 18: per-field attached indexes.
         # self.index is backward-compat shortcut (first/only index).
@@ -105,7 +110,7 @@ class Segment:
         table = read_data_file(file_path)
         pks = table.column(pk_field).to_pylist()
         seqs = np.asarray(table.column("_seq").to_pylist(), dtype=np.uint64)
-        vectors = _extract_vector_array(table.column(vector_field))
+        vectors, null_mask = _extract_vector_array(table.column(vector_field))
         return cls(
             file_path=file_path,
             partition=partition,
@@ -115,6 +120,7 @@ class Segment:
             seqs=seqs,
             vectors=vectors,
             table=table,
+            vector_null_mask=null_mask,
         )
 
     # ── point read ──────────────────────────────────────────────
@@ -241,16 +247,19 @@ class Segment:
 # helpers
 # ---------------------------------------------------------------------------
 
-def _extract_vector_array(arr: pa.ChunkedArray) -> np.ndarray:
-    """Convert a FixedSizeList<float32, dim> column to a (N, dim) numpy array.
+def _extract_vector_array(
+    arr: pa.ChunkedArray,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Convert a FixedSizeList<float32, dim> column to (N, dim) numpy array.
 
-    Handles ChunkedArray (multi-chunk) by concatenating, since pyarrow
-    parquet files may load with multiple chunks.
+    Returns:
+        (vectors, null_mask) where null_mask is a bool array (True=valid)
+        or None if no nulls. Null vectors are replaced with zero vectors
+        in the numpy array so the shape is always (N, dim).
     """
-    # Combine chunks if necessary.
     if isinstance(arr, pa.ChunkedArray):
         if arr.num_chunks == 0:
-            return np.zeros((0, 0), dtype=np.float32)
+            return np.zeros((0, 0), dtype=np.float32), None
         if arr.num_chunks == 1:
             arr = arr.chunk(0)
         else:
@@ -264,8 +273,19 @@ def _extract_vector_array(arr: pa.ChunkedArray) -> np.ndarray:
     n = len(arr)
     dim = arr.type.list_size
     if n == 0:
-        return np.zeros((0, dim), dtype=np.float32)
+        return np.zeros((0, dim), dtype=np.float32), None
 
     # arr.values is the underlying flat float32 array (length n * dim)
     flat = arr.values.to_numpy(zero_copy_only=False).astype(np.float32, copy=False)
-    return flat.reshape(n, dim)
+    vectors = flat.reshape(n, dim)
+
+    # Check for Arrow-level nulls (from in-memory Arrow tables, e.g. MemTable)
+    if arr.null_count > 0:
+        null_mask = np.ones(n, dtype=bool)
+        for i in range(n):
+            if not arr[i].is_valid:
+                null_mask[i] = False
+                vectors[i] = 0.0  # zero-fill for numpy consistency
+        return vectors, null_mask
+
+    return vectors, None

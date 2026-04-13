@@ -202,12 +202,19 @@ def execute_search_with_index(
     # Segments first.
     for seg in in_scope_segments:
         sources.append((list(seg.pks), seg.seqs, seg.vectors))
+        # Combine scalar filter mask with vector null mask
+        combined_mask = seg_filter_masks.get(id(seg))
+        if seg.vector_null_mask is not None:
+            if combined_mask is not None:
+                combined_mask = combined_mask & seg.vector_null_mask
+            else:
+                combined_mask = seg.vector_null_mask
         _recall_source(
             source_idx=len(sources) - 1,
             pks=sources[-1][0],
             seqs=sources[-1][1],
             vectors=sources[-1][2],
-            filter_mask=seg_filter_masks.get(id(seg)),
+            filter_mask=combined_mask,
             index=seg.index,
         )
 
