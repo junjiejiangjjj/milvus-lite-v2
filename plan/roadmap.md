@@ -702,6 +702,148 @@ servicer.HybridSearch:
 
 ---
 
+## Phase 13 — Group By Search（搜索结果分组去重）
+
+**目标**：支持 pymilvus `search(group_by_field=...)` 和 `hybrid_search(group_by_field=...)`，按标量字段分组返回搜索结果。
+
+**前置依赖**：Phase 12 完成。
+
+### 核心机制
+
+```
+Search → top-N 候选 → 按 group_by_field 分组 → 每组 top group_size → 返回前 limit 个组
+```
+
+### 任务分解
+
+| 编号 | 任务 | 交付物 |
+|---|---|---|
+| 13.1 | Engine 层 group_by 后处理 | Collection.search() 新增 group_by_field/group_size/strict_group_size 参数 |
+| 13.2 | gRPC 适配 | search_params 解析 group_by 参数；SearchResultData 添加 group_by_field_value |
+| 13.3 | 测试 | pymilvus 端到端分组搜索 + hybrid group_by |
+
+### 完成标志
+
+- pymilvus `search(group_by_field="category", group_size=3)` 端到端通过
+- strict_group_size=True/False 行为正确
+- group_by 与 hybrid_search 组合工作
+- 支持 INT64/VARCHAR/BOOL 分组字段
+
+---
+
+## Phase 14 — Range Search（距离范围过滤搜索）
+
+**目标**：支持 pymilvus `search(search_params={"params": {"radius": ..., "range_filter": ...}})` 距离范围过滤。
+
+### 参数语义
+
+- `radius`：距离下界（exclusive），`range_filter`：距离上界（inclusive）
+- 结果范围：`radius < distance <= range_filter`
+- 两个参数均可选；同时存在时要求 `radius < range_filter`
+
+### 任务分解
+
+| 编号 | 任务 | 交付物 |
+|---|---|---|
+| 14.1 | Engine 层 range 过滤 | search() 新增 radius/range_filter，搜索后按距离过滤 |
+| 14.2 | gRPC 适配 + 测试 | search_params 解析 + pymilvus 端到端测试 |
+
+### 完成标志
+
+- pymilvus `search(params={"radius": ..., "range_filter": ...})` 端到端通过
+- L2/COSINE/IP/BM25 各 metric 下范围过滤正确
+- 只有 radius 或只有 range_filter 的情况正确处理
+
+---
+
+## Phase 15 — Auto ID（自增主键）
+
+**已完成。** FieldSchema.auto_id=True，INT64 主键自动递增生成。
+
+---
+
+## Phase 16 — Iterator（query_iterator / search_iterator）
+
+**已完成。** query(expr=None) 返回全部记录，支持 pymilvus 客户端侧的 pk 游标分页和距离范围分页。
+
+---
+
+## Phase 17 — Offset 分页
+
+**已完成。** search(offset=N) 和 query(offset=N) 跳过前 N 条结果。
+
+---
+
+## Phase 18 — 多向量独立建索引
+
+**已完成。** Manifest/Segment/Collection 从单 IndexSpec 重构为 Dict[str, IndexSpec]，每个向量字段独立建索引。
+
+---
+
+## 性能优化（已完成）
+
+1. **批量 .to_pylist()** — BM25 搜索 segment 数据批量转换替代逐行 .as_py()
+2. **延迟物化** — assembler/executor/memtable 全链路仅 top-k winner 物化记录
+3. **BM25 segment 级索引缓存** — 不可变 segment 的倒排索引一次构建永久复用
+
+---
+
+## CRUD 对齐修复（已完成）
+
+- delete(filter=...) 不再要求 load_collection
+- query(output_fields=["count(*)"]) 计数聚合
+- get(ids, output_fields=[...]) 字段过滤
+- search(round_decimal=N) 距离四舍五入
+- output_fields=["*"] 通配符展开
+- JSON 字段 field["key"] 路径过滤语法
+- JSON dict 值 Arrow 序列化
+- Nullable FLOAT_VECTOR 端到端支持
+
+---
+
+## CI/CD + 打包（已完成）
+
+- GitHub Actions：Python 3.10-3.13 × ubuntu + macos 矩阵测试
+- PyPI 打包：Apache-2.0 license，完整元数据
+- 1529 测试，0 skip
+
+---
+
+## 待做（TODO）
+
+### 代码 TODO
+
+| 位置 | 描述 |
+|------|------|
+| `engine/collection.py:552` | BM25 per-segment IDF 应改为全局统计量（跨 segment 汇总 doc_count/avgdl/df） |
+
+### 未实现的 RPC（UNIMPLEMENTED stubs）
+
+| RPC | 原因 |
+|-----|------|
+| RenameCollection | collection 重命名未支持 |
+| CreateAlias / DropAlias | 别名未在 MVP 范围 |
+| AlterCollection | schema 不可变 |
+| LoadPartitions / ReleasePartitions | 仅支持 collection 级 load/release |
+
+### 功能缺口
+
+| 功能 | 优先级 | 说明 |
+|------|--------|------|
+| Alias（集合别名） | 低 | name → collection 映射 |
+| query order_by | 低 | 结果排序（Milvus 2.5+） |
+| Array 字段类型 | 低 | DataType.ARRAY + array_contains() |
+| phrase_match | 低 | 有序短语匹配 + slop |
+| partial_update upsert | 低 | 部分字段更新 |
+| Nullable vector Parquet 持久化 | 低 | 当前 null 向量存为零向量，重启后 null 语义丢失 |
+| Binary / Float16 / BFloat16 向量 | 低 | 扩展向量类型 |
+| Partition Key | 低 | 自动哈希分区 |
+| 用户/角色/权限 | 不做 | 嵌入式不需要 |
+| Database 多实例 | 不做 | 单命名空间足够 |
+| Schema 变更 | 不做 | 架构上不可变 |
+
+---
+
 ## 验证体系
 
 | 层次 | 工具 | 触发 | 价值 |
