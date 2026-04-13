@@ -546,6 +546,11 @@ class Collection:
           (built once, reused across searches).
         - The mutable memtable's index is rebuilt each search (small).
         - Per-source top-k results are merged globally.
+
+        TODO: IDF 准确性 — 当前每个 segment 使用独立的 IDF 统计量，
+        跨 segment 合并时 BM25 分数基线不同。正确方案：搜索时汇总
+        全局统计量 (doc_count/avgdl/df 跨 segment 求和)，用全局 IDF
+        计算分数。类似 Elasticsearch 的 DFS_QUERY_THEN_FETCH 策略。
         """
         from litevecdb.analyzer.sparse import bytes_to_sparse
         from litevecdb.index.sparse_inverted import SparseInvertedIndex
