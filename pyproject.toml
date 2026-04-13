@@ -5,12 +5,34 @@ build-backend = "hatchling.build"
 [project]
 name = "litevecdb"
 version = "0.1.0"
-description = "A local embedded vector database"
+description = "A local embedded vector database — local version of Milvus"
+readme = "README.md"
+license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
+authors = [
+    {name = "LiteVecDB Contributors"},
+]
+keywords = ["vector", "database", "embedding", "milvus", "search", "bm25"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "pyarrow>=15.0",
     "numpy>=1.24",
 ]
+
+[project.urls]
+Homepage = "https://github.com/junjiejiangjjj/milvus-lite-v2"
+Repository = "https://github.com/junjiejiangjjj/milvus-lite-v2"
 
 [project.optional-dependencies]
 dev = [
@@ -23,6 +45,9 @@ faiss = [
     # the first version with stable macOS arm64 wheels and
     # SearchParametersHNSW(sel=...) support.
     "faiss-cpu>=1.7.4",
+]
+chinese = [
+    "jieba>=0.42",
 ]
 grpc = [
     # Phase 10: gRPC adapter for pymilvus protocol compatibility.
