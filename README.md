@@ -26,7 +26,7 @@ This project is entirely **vibe coded** — designed, implemented, and tested th
 |---|---|---|
 | Language | C++ core + CGo + Python wrapper | Pure Python |
 | Install | `pip install` downloads ~200MB binary | `pip install` pulls lightweight Python packages |
-| Platform | Linux/macOS only, no Alpine/musl | Anywhere Python runs |
+| Platform | Linux/macOS only, no Windows/Alpine | Windows, macOS, Linux — anywhere Python runs |
 | Debugging | Opaque C++ core, segfaults | Pure Python stack traces |
 | Extensibility | Requires rebuilding C++ | Standard Python, easy to fork and modify |
 | Index | FLAT, IVF_FLAT | HNSW, IVF_FLAT (FAISS), FLAT, BM25 sparse inverted |
@@ -35,7 +35,7 @@ This project is entirely **vibe coded** — designed, implemented, and tested th
 # Requirements
 
 - Python >= 3.10
-- macOS (Apple Silicon / x86_64) or Linux (x86_64 / arm64)
+- Any platform: macOS, Linux, Windows
 
 # Installation
 

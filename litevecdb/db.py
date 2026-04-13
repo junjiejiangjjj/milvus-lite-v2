@@ -25,8 +25,8 @@ MemTable / WAL state).
 
 from __future__ import annotations
 
-import fcntl
 import os
+import sys
 import shutil
 from typing import Any, Dict, List, Optional
 
@@ -240,14 +240,19 @@ class LiteVecDB:
             raise ValueError(f"invalid collection name: {name!r}")
 
     def _acquire_lock(self) -> None:
-        """Acquire an exclusive non-blocking flock on LOCK_FILENAME.
+        """Acquire an exclusive non-blocking lock on LOCK_FILENAME.
 
+        Uses fcntl.flock on Unix and msvcrt.locking on Windows.
         Raises DataDirLockedError if another process holds it.
         """
-        # Open (creating if missing) the lock file for writing.
         fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (OSError, BlockingIOError) as e:
             os.close(fd)
             raise DataDirLockedError(
@@ -259,7 +264,12 @@ class LiteVecDB:
         if self._lock_fd is None:
             return
         try:
-            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            if sys.platform == "win32":
+                import msvcrt
+                msvcrt.locking(self._lock_fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
         except OSError:
             pass
         try:
