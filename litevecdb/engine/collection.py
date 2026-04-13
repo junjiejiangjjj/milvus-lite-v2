@@ -557,15 +557,21 @@ class Collection:
         if partition_names is not None:
             partition_filter = set(partition_names)
 
-        # Collect all sparse vectors, pks, seqs, and records from segments
+        # Pre-compute excluded field set for projection (optimization #3)
+        _exclude_fields = {f.name for f in self._schema.fields
+                          if f.is_primary or f.dtype in (
+                              DataType.FLOAT_VECTOR, DataType.SPARSE_FLOAT_VECTOR)}
+
+        # ── Collect sparse vectors, pks, seqs using batch conversion ──
+        # (optimization #1: .to_pylist() instead of per-cell .as_py())
         all_pks: list = []
         all_seqs: list = []
-        all_sparse: list = []  # list of dict[int, float]
-        all_records: list = []
+        all_sparse: list = []
+        # _sources: list of (table_or_batch, row_index) for deferred materialization
+        _sources: list = []
 
         for seg in self._segment_cache.values():
             if partition_filter is not None:
-                # Check if segment belongs to a valid partition
                 seg_partition = seg.partition_name if hasattr(seg, 'partition_name') else None
                 if seg_partition is not None and seg_partition not in partition_filter:
                     continue
@@ -574,28 +580,23 @@ class Collection:
             if table is None or len(table) == 0:
                 continue
 
-            pk_col = table.column(self._pk_name)
-            seq_col = table.column("_seq")
-            sparse_col = table.column(vector_field)
+            # Batch convert the three columns we need for scoring
+            pks_batch = table.column(self._pk_name).to_pylist()
+            seqs_batch = table.column("_seq").to_pylist()
+            sparse_batch = table.column(vector_field).to_pylist()
 
-            for i in range(len(table)):
-                pk = pk_col[i].as_py()
-                seq = seq_col[i].as_py()
-                raw = sparse_col[i].as_py()
-                sv = bytes_to_sparse(raw) if isinstance(raw, bytes) else (raw or {})
+            base = len(all_pks)
+            all_pks.extend(pks_batch)
+            all_seqs.extend(seqs_batch)
+            for raw in sparse_batch:
+                all_sparse.append(
+                    bytes_to_sparse(raw) if isinstance(raw, bytes) else (raw or {})
+                )
+            # Store source references for deferred materialization
+            for i in range(len(pks_batch)):
+                _sources.append((table, i))
 
-                all_pks.append(pk)
-                all_seqs.append(seq)
-                all_sparse.append(sv)
-                # Build record dict for result materialization
-                row = {}
-                for col_name in table.column_names:
-                    if col_name == "_seq":
-                        continue
-                    row[col_name] = table.column(col_name)[i].as_py()
-                all_records.append(row)
-
-        # Collect from memtable
+        # Collect from memtable (row-by-row — memtable has scattered batches)
         mt = self._memtable
         for pk, (batch_idx, row_idx, seq) in mt._pk_index.items():
             batch = mt._insert_batches[batch_idx]
@@ -605,17 +606,12 @@ class Collection:
                     continue
 
             raw = batch.column(vector_field)[row_idx].as_py()
-            sv = bytes_to_sparse(raw) if isinstance(raw, bytes) else (raw or {})
-
             all_pks.append(pk)
             all_seqs.append(seq)
-            all_sparse.append(sv)
-            row = {}
-            for col_name in batch.column_names:
-                if col_name in ("_seq", "_partition"):
-                    continue
-                row[col_name] = batch.column(col_name)[row_idx].as_py()
-            all_records.append(row)
+            all_sparse.append(
+                bytes_to_sparse(raw) if isinstance(raw, bytes) else (raw or {})
+            )
+            _sources.append((batch, row_idx))
 
         if not all_pks:
             return [[] for _ in query_vectors]
@@ -634,11 +630,10 @@ class Collection:
             pk = all_pks[i]
             seq = all_seqs[i]
             if seq == pk_max_seq[pk] and i == pk_last_idx[pk]:
-                # Check tombstone
                 if not self._delta_index.is_deleted(pk, seq):
                     valid_mask[i] = True
 
-        # Apply scalar filter
+        # Apply scalar filter (only materialize rows that pass valid_mask)
         compiled_filter = None
         if expr:
             compiled_filter = self._compile_filter(expr)
@@ -646,14 +641,20 @@ class Collection:
             from litevecdb.search.filter.eval.python_backend import _eval_row
             for i in range(n):
                 if valid_mask[i]:
-                    result = _eval_row(compiled_filter.ast, all_records[i])
-                    if not result:
+                    # Materialize only for filter evaluation
+                    tbl, row_i = _sources[i]
+                    rec = {
+                        col: tbl.column(col)[row_i].as_py()
+                        for col in tbl.column_names
+                        if col not in ("_seq", "_partition")
+                    }
+                    if not _eval_row(compiled_filter.ast, rec):
                         valid_mask[i] = False
 
-        # Build inverted index
+        # Build inverted index (optimization #2: valid_mask applied in build,
+        # so posting lists only contain valid docs)
         bm25_k1 = 1.5
         bm25_b = 0.75
-        # Check if there's a sparse IndexSpec with BM25 params
         sparse_spec = self._index_specs.get(vector_field)
         if sparse_spec and sparse_spec.index_type == "SPARSE_INVERTED_INDEX":
             bm25_k1 = sparse_spec.build_params.get("bm25_k1", 1.5)
@@ -662,22 +663,19 @@ class Collection:
         idx = SparseInvertedIndex(k1=bm25_k1, b=bm25_b)
         idx.build(all_sparse, valid_mask=valid_mask)
 
-        # Convert query vectors: if they're dicts, use directly
-        # If they're strings (text queries), tokenize them
+        # Convert query vectors
         query_sparse: List[Dict[int, float]] = []
         for qv in query_vectors:
             if isinstance(qv, dict):
                 query_sparse.append(qv)
             elif isinstance(qv, str):
-                # Text query — tokenize using the BM25 function's analyzer
                 analyzer = self._bm25_functions[0][2] if self._bm25_functions else None
                 if analyzer is None:
                     raise SchemaValidationError(
                         "Text query requires a BM25 function with an analyzer"
                     )
                 from litevecdb.analyzer.sparse import compute_tf
-                term_ids = analyzer.analyze(qv)
-                query_sparse.append(compute_tf(term_ids))
+                query_sparse.append(compute_tf(analyzer.analyze(qv)))
             else:
                 raise SchemaValidationError(
                     f"Sparse search query must be a dict or string, "
@@ -686,9 +684,8 @@ class Collection:
 
         # Search
         local_ids, distances = idx.search(query_sparse, top_k, valid_mask=None)
-        # Note: valid_mask was already applied in build, so no need to re-apply
 
-        # Materialize results
+        # Deferred materialization: only materialize records for top-k winners
         nq = len(query_vectors)
         results: List[List[dict]] = []
         for qi in range(nq):
@@ -699,29 +696,22 @@ class Collection:
                     break
                 dist = float(distances[qi, j])
                 pk = all_pks[lid]
-                rec = all_records[lid]
 
+                # Materialize record on-demand (optimization: only top-k)
+                tbl, row_i = _sources[lid]
                 entity = {}
                 if output_fields is None:
-                    # All fields except pk and vector fields
-                    for k, v in rec.items():
-                        fschema = next((f for f in self._schema.fields if f.name == k), None)
-                        if fschema and (fschema.is_primary or fschema.dtype in (
-                            DataType.FLOAT_VECTOR, DataType.SPARSE_FLOAT_VECTOR
-                        )):
+                    for col in tbl.column_names:
+                        if col in ("_seq", "_partition") or col in _exclude_fields:
                             continue
-                        entity[k] = v
+                        entity[col] = tbl.column(col)[row_i].as_py()
                 elif output_fields:
                     for fname in output_fields:
                         if fname == self._pk_name:
                             continue
-                        entity[fname] = rec.get(fname)
+                        entity[fname] = tbl.column(fname)[row_i].as_py()
 
-                hits.append({
-                    "id": pk,
-                    "distance": dist,
-                    "entity": entity,
-                })
+                hits.append({"id": pk, "distance": dist, "entity": entity})
             results.append(hits)
 
         return results
