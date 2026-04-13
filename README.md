@@ -4,7 +4,7 @@ A local embedded vector database — designed as a **local version of Milvus**, 
 
 LiteVecDB is an LSM-tree-style storage engine with PyArrow in-memory and Parquet on disk, per-segment FAISS HNSW indexing, BM25 full text search, and a Milvus-compatible gRPC adapter. pymilvus clients connect without code changes.
 
-> **Status**: pre-1.0. Phases 0–14 landed — storage, engine, scalar filter, vector index, gRPC adapter, full text search, hybrid search, group by, range search. **1449 tests passing.**
+> **Status**: pre-1.0. Phases 0–17 landed — storage, engine, scalar filter, vector index, gRPC adapter, full text search, hybrid search, group by, range search, auto ID, iterators, offset pagination. **1477 tests passing.**
 
 ---
 
@@ -19,10 +19,13 @@ LiteVecDB is an LSM-tree-style storage engine with PyArrow in-memory and Parquet
 - **text_match filter** — `text_match(field, 'tokens')` tokenized keyword matching with OR logic
 - **Hybrid search** — multi-vector fusion with `WeightedRanker` / `RRFRanker`
 - **Group By search** — `group_by_field` deduplicates results by scalar field, with `group_size` control
-- **Range search** — `radius` / `range_filter` distance bounds
+- **Range search** — `radius` / `range_filter` distance bounds filtering
+- **Auto ID** — `auto_id=True` on INT64 primary key; strictly increasing IDs
+- **Iterators** — `query_iterator` / `search_iterator` for batch pagination
+- **Offset pagination** — `search(offset=10, limit=10)` and `query(offset=...)`
 - **gRPC adapter** — `pymilvus.MilvusClient` fully compatible; embeddable + standalone server
 - **load / release state machine** — mirrors Milvus client behavior
-- **1449 tests**, including recall@10 differential tests and pymilvus end-to-end compatibility suites
+- **1477 tests**, including recall@10 differential tests and pymilvus end-to-end compatibility suites
 
 ---
 
@@ -244,9 +247,10 @@ Collection
           partition_names=None, expr=None, output_fields=None,
           anns_field=None,
           group_by_field=None, group_size=1, strict_group_size=False,
-          radius=None, range_filter=None)
+          radius=None, range_filter=None, offset=0)
           -> List[List[dict]]
-  .query(expr, output_fields=None, partition_names=None, limit=None)
+  .query(expr=None, output_fields=None, partition_names=None,
+         limit=None, offset=0)
          -> List[dict]
 
   # Index lifecycle
@@ -269,7 +273,7 @@ Collection
 ## Testing
 
 ```bash
-pytest                              # 1449 default tests (~60s)
+pytest                              # 1477 default tests (~70s)
 pytest -m slow                      # long-running stress tests
 pytest --cov=litevecdb              # with coverage
 pytest tests/adapter/ -k fts        # specific tests
@@ -283,7 +287,7 @@ pytest tests/adapter/ -k fts        # specific tests
 | `tests/search/` | bitmap, distance, executor, filter (parser/semantic/backends), text_match |
 | `tests/index/` | BruteForceIndex, FaissHnswIndex, SparseInvertedIndex, recall differential |
 | `tests/analyzer/` | StandardAnalyzer, JiebaAnalyzer, sparse codec, BM25 auto-gen |
-| `tests/adapter/` | gRPC server, schema/records/search translators, pymilvus compat (42+24+14+7 cases), hybrid search, group by, range search, FTS compat |
+| `tests/adapter/` | gRPC server, translators, pymilvus compat suites, hybrid search, group by, range search, FTS compat, auto ID, iterators, offset |
 
 ---
 
@@ -299,6 +303,9 @@ pytest tests/adapter/ -k fts        # specific tests
 | **12** | Hybrid search (WeightedRanker, RRFRanker) | done |
 | **13** | Group By search (scalar field grouping) | done |
 | **14** | Range search (distance bounds filtering) | done |
+| **15** | Auto ID (automatic INT64 primary key generation) | done |
+| **16** | Iterators (query_iterator, search_iterator) | done |
+| **17** | Offset pagination (search + query) | done |
 
 For the full roadmap see `plan/roadmap.md`.
 
@@ -308,9 +315,8 @@ For the full roadmap see `plan/roadmap.md`.
 
 - IVF / IVF-PQ quantized vector indexes
 - Binary / Float16 / BFloat16 vectors
-- Auto ID / Partition Key
+- Partition Key
 - phrase_match / Multi-Analyzer / Highlighter
-- Search Iterator
 - Authentication / RBAC
 - Async flush + compaction
 - Multi-process / distributed
@@ -333,7 +339,7 @@ milvus-lite-v2/
 |   +-- analyzer/              # Analyzer, StandardAnalyzer, JiebaAnalyzer, sparse codec, hash
 |   +-- adapter/grpc/          # MilvusServicer, server, reranker, errors, translators/
 |
-+-- tests/                     # 1449 tests
++-- tests/                     # 1477 tests
 +-- examples/                  # m2_demo.py ... m10_demo.py
 +-- plan/                      # design docs (Chinese)
 ```
