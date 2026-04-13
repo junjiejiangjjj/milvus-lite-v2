@@ -186,25 +186,25 @@ class MemTable:
         self,
         vector_field: str,
         partition_names: Optional[List[str]] = None,
-    ) -> Tuple[List[Any], "np.ndarray", "np.ndarray", List[dict]]:
-        """Walk _pk_index and emit (pks, seqs, vectors, records) for search.
+    ) -> Tuple[List[Any], "np.ndarray", "np.ndarray", List[Tuple[Any, int]]]:
+        """Walk _pk_index and emit (pks, seqs, vectors, row_refs) for search.
 
-        Used by search/assembler.py to merge MemTable rows with on-disk
-        Segment data into a single candidate set.
+        Records are NOT materialized here — callers should use
+        materialize_row(ref) to get the dict only for top-k winners.
 
         Returns:
-            pks:     list of pk values (length M)
-            seqs:    np.ndarray[uint64], shape (M,)
-            vectors: np.ndarray[float32], shape (M, dim)
-            records: list of dicts (one per row, with all entity fields,
-                     no _seq, no _partition)
+            pks:      list of pk values (length M)
+            seqs:     np.ndarray[uint64], shape (M,)
+            vectors:  np.ndarray[float32], shape (M, dim)
+            row_refs: list of (batch_idx, row_idx) tuples for deferred
+                      materialization via materialize_row()
         """
-        import numpy as np  # local: keep top of file numpy-free for L0 deps
+        import numpy as np
 
         pks: List[Any] = []
         seqs: List[int] = []
         vecs: List[list] = []
-        records: List[dict] = []
+        row_refs: List[Tuple[int, int]] = []
         partition_filter: Optional[set] = None
         if partition_names is not None:
             partition_filter = set(partition_names)
@@ -218,14 +218,22 @@ class MemTable:
             pks.append(pk)
             seqs.append(seq)
             vecs.append(batch.column(vector_field)[row_idx].as_py())
-            records.append(self._row_to_dict(batch, row_idx))
+            row_refs.append((batch_idx, row_idx))
 
         seqs_arr = np.asarray(seqs, dtype=np.uint64)
         if vecs:
             vectors_arr = np.asarray(vecs, dtype=np.float32)
         else:
             vectors_arr = np.zeros((0, 0), dtype=np.float32)
-        return pks, seqs_arr, vectors_arr, records
+        return pks, seqs_arr, vectors_arr, row_refs
+
+    def materialize_row(self, batch_idx: int, row_idx: int) -> dict:
+        """Materialize a single row dict from batch references.
+
+        Used by executor for deferred materialization — only called
+        for top-k winners, not all memtable rows.
+        """
+        return self._row_to_dict(self._insert_batches[batch_idx], row_idx)
 
     def is_locally_deleted(self, pk_value: Any) -> bool:
         """True iff *pk_value* has a tombstone in this MemTable's local

@@ -751,7 +751,7 @@ class Collection:
 
         compiled_filter = self._compile_filter(expr) if expr else None
 
-        all_pks, all_seqs, _all_vectors, all_records, filter_mask = assemble_candidates(
+        all_pks, all_seqs, _all_vectors, all_rec_sources, filter_mask = assemble_candidates(
             segments=self._segment_cache.values(),
             memtable=self._memtable,
             vector_field=self._vector_name,
@@ -764,16 +764,17 @@ class Collection:
 
         # Combine bitmap (dedup + tombstone) with filter_mask via build_valid_mask.
         from litevecdb.search.bitmap import build_valid_mask
+        from litevecdb.search.assembler import materialize_record
         mask = build_valid_mask(
             all_pks, all_seqs, self._delta_index, filter_mask=filter_mask,
         )
 
-        # Project + offset + limit.
+        # Deferred materialization: only materialize records that pass the mask.
         effective_limit = (offset + limit) if limit is not None else None
         live_indices = np.flatnonzero(mask)
         out: List[dict] = []
         for i in live_indices:
-            rec = all_records[int(i)]
+            rec = materialize_record(all_rec_sources[int(i)])
             out.append(self._project_record(rec, output_fields))
             if effective_limit is not None and len(out) >= effective_limit:
                 break

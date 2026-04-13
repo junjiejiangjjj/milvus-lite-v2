@@ -101,8 +101,8 @@ def execute_search_with_index(
         and (partition_filter is None or s.partition in partition_filter)
     ]
 
-    # Memtable arrays.
-    mt_pks, mt_seqs, mt_vecs, mt_records = memtable.to_search_arrays(
+    # Memtable arrays (records deferred — only refs stored).
+    mt_pks, mt_seqs, mt_vecs, mt_row_refs = memtable.to_search_arrays(
         vector_field=vector_field,
         partition_names=partition_names,
     )
@@ -245,8 +245,9 @@ def execute_search_with_index(
     def _materialize_record(source_idx: int, local_id: int) -> dict:
         if source_idx < n_segments:
             return in_scope_segments[source_idx].row_to_dict(local_id)
-        # memtable source — records were already materialized in step 0.
-        return mt_records[local_id]
+        # Memtable source — deferred materialization via row refs.
+        batch_idx, row_idx = mt_row_refs[local_id]
+        return memtable.materialize_row(batch_idx, row_idx)
 
     results: List[List[dict]] = []
     for q in range(nq):

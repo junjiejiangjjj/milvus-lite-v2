@@ -119,10 +119,14 @@ def execute_search(
             order = np.argsort(dists)
 
         # ── 4. assemble result dicts ────────────────────────────
+        from litevecdb.search.assembler import materialize_record
         per_query: List[dict] = []
         for local_idx in order:
             global_idx = int(valid_indices[local_idx])
             record = all_records[global_idx]
+            # Deferred materialization: record may be a RecordSource tuple
+            if isinstance(record, tuple):
+                record = materialize_record(record)
             pk = record.get(pk_field)
             entity = project_entity(record)
             per_query.append({
