@@ -151,3 +151,43 @@ class TestPymilvusIntegration:
                 client.drop_collection("quick")
             finally:
                 mgr.release_all()
+
+    def test_dot_db_uri_via_pymilvus(self):
+        """Test that MilvusClient("./xxx.db") works end-to-end.
+
+        pymilvus detects .db suffix → imports milvus_lite.server_manager
+        → starts our gRPC server → connects. Full round-trip.
+        """
+        with tempfile.TemporaryDirectory() as d:
+            db_path = os.path.join(d, "pymilvus_test.db")
+            client = MilvusClient(uri=db_path)
+
+            try:
+                # Create + insert + index + load + search
+                client.create_collection("e2e", dimension=4)
+                client.insert("e2e", [
+                    {"id": 1, "vector": [1, 0, 0, 0]},
+                    {"id": 2, "vector": [0, 1, 0, 0]},
+                    {"id": 3, "vector": [0, 0, 1, 0]},
+                ])
+                results = client.search("e2e", data=[[1, 0, 0, 0]], limit=3)
+                assert len(results[0]) == 3
+                assert results[0][0]["id"] == 1
+
+                # Query
+                rows = client.query("e2e", filter="id >= 2",
+                                    output_fields=["id"], limit=10)
+                assert {r["id"] for r in rows} == {2, 3}
+
+                # Delete + verify
+                client.delete("e2e", ids=[2])
+                rows = client.query("e2e", filter="id >= 1",
+                                    output_fields=["id"], limit=10)
+                assert {r["id"] for r in rows} == {1, 3}
+
+                client.drop_collection("e2e")
+            finally:
+                client.close()
+                # Clean up server started by pymilvus
+                from milvus_lite.server_manager import server_manager_instance
+                server_manager_instance.release_server(db_path)
