@@ -119,12 +119,12 @@ def test_valid_mask_parity(metric):
     """When given the same valid_mask, FAISS and BruteForce should
     return the same top-k IDs (modulo recall noise — both should
     only consider rows where mask is True)."""
-    vectors = _gen_vectors(500, 16, seed=33)
+    vectors = _gen_vectors(2000, 16, seed=33)
     queries = _gen_vectors(10, 16, seed=44)
 
     # Random mask: keep ~70% of rows
     rng = np.random.default_rng(55)
-    mask = rng.random(500) < 0.7
+    mask = rng.random(2000) < 0.7
 
     brute = BruteForceIndex.build(vectors, metric)
     faiss_idx = FaissHnswIndex.build(vectors, metric, HNSW_PARAMS)
