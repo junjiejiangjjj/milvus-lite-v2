@@ -19,6 +19,7 @@ class DataType(Enum):
     DOUBLE = "double"
     VARCHAR = "varchar"
     JSON = "json"
+    ARRAY = "array"
     FLOAT_VECTOR = "float_vector"
     SPARSE_FLOAT_VECTOR = "sparse_float_vector"
 
@@ -50,6 +51,8 @@ class FieldSchema:
     auto_id: bool = False
     dim: Optional[int] = None
     max_length: Optional[int] = None
+    element_type: Optional[DataType] = None  # For ARRAY fields
+    max_capacity: Optional[int] = None       # For ARRAY fields
     nullable: bool = False
     default_value: Any = None
     # Full text search attributes (Phase 11)
@@ -80,6 +83,7 @@ TYPE_MAP: Dict[DataType, Any] = {
     DataType.DOUBLE: pa.float64(),
     DataType.VARCHAR: pa.string(),
     DataType.JSON: pa.string(),
+    DataType.ARRAY: None,  # resolved at runtime from element_type
     DataType.FLOAT_VECTOR: None,
     DataType.SPARSE_FLOAT_VECTOR: pa.binary(),
 }

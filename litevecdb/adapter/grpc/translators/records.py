@@ -196,6 +196,10 @@ def _extract_column(fd, num_rows: int) -> List[Any]:
 def _extract_scalar_column(fd, dtype_int: int) -> List[Any]:
     scalars = fd.scalars
 
+    # Array type (22) — special handling via array_data slot
+    if dtype_int == 22:
+        return _extract_array_column(fd)
+
     if dtype_int not in _SCALAR_TYPE_TO_SLOT:
         raise SchemaValidationError(
             f"FieldData {fd.field_name!r} uses scalar type "
@@ -220,6 +224,29 @@ def _extract_scalar_column(fd, dtype_int: int) -> List[Any]:
         return out
 
     return raw
+
+
+def _extract_array_column(fd) -> List[Any]:
+    """Extract Array column — each row is a Python list."""
+    array_data = fd.scalars.array_data
+    column: List[Any] = []
+    for row_sf in array_data.data:
+        # Each row_sf is a ScalarField containing one element type
+        if row_sf.HasField("long_data"):
+            column.append(list(row_sf.long_data.data))
+        elif row_sf.HasField("int_data"):
+            column.append(list(row_sf.int_data.data))
+        elif row_sf.HasField("float_data"):
+            column.append(list(row_sf.float_data.data))
+        elif row_sf.HasField("double_data"):
+            column.append(list(row_sf.double_data.data))
+        elif row_sf.HasField("string_data"):
+            column.append(list(row_sf.string_data.data))
+        elif row_sf.HasField("bool_data"):
+            column.append(list(row_sf.bool_data.data))
+        else:
+            column.append([])
+    return column
 
 
 def _extract_vector_column(fd, dtype_int: int, num_rows: int) -> List[Any]:
@@ -410,6 +437,24 @@ def _build_field_data(name, fschema, column):
         fd.vectors.sparse_float_vector.dim = max_dim
         return fd
 
+    if dtype == DataType.ARRAY:
+        fd.type = 22  # Array
+        # Determine element Milvus type
+        elem_type = fschema.element_type
+        elem_milvus = _LITEVECDB_TO_MILVUS_INT.get(elem_type, 5) if elem_type else 5
+        _ELEM_SLOT = {
+            1: "bool_data", 2: "int_data", 3: "int_data", 4: "int_data",
+            5: "long_data", 10: "float_data", 11: "double_data", 21: "string_data",
+        }
+        elem_slot = _ELEM_SLOT.get(elem_milvus, "long_data")
+        fd.scalars.array_data.element_type = elem_milvus
+        for v in column:
+            row_sf = fd.scalars.array_data.data.add()
+            arr_vals = v if v is not None else []
+            if isinstance(arr_vals, (list, tuple)):
+                getattr(row_sf, elem_slot).data.extend(arr_vals)
+        return fd
+
     # Scalar types
     milvus_type_int = _LITEVECDB_TO_MILVUS_INT.get(dtype)
     if milvus_type_int is None:
@@ -457,6 +502,7 @@ _LITEVECDB_TO_MILVUS_INT: Dict[DataType, int] = {
     DataType.FLOAT:   10,
     DataType.DOUBLE:  11,
     DataType.VARCHAR: 21,
+    DataType.ARRAY:   22,
     DataType.JSON:    23,
     DataType.FLOAT_VECTOR: 101,
     DataType.SPARSE_FLOAT_VECTOR: 104,

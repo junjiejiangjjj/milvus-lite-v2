@@ -37,6 +37,9 @@ from litevecdb.search.filter.ast import (
     StringLit,
     JsonAccess,
     TextMatchOp,
+    ArrayContainsOp,
+    ArrayLengthOp,
+    ArrayAccessOp,
 )
 from litevecdb.search.filter.exceptions import (
     FilterFieldError,
@@ -77,6 +80,8 @@ def _datatype_to_sem(dtype: DataType) -> Optional[str]:
         return SEM_BOOL
     if dtype == DataType.JSON:
         return SEM_STRING  # JSON column is stored as string in Phase F1
+    if dtype == DataType.ARRAY:
+        return SEM_DYNAMIC  # handled by python backend
     if dtype == DataType.FLOAT_VECTOR:
         return None  # not allowed in scalar filter
     return None
@@ -381,6 +386,28 @@ def _check_node(node: Expr, ctx: "_CompileCtx") -> str:
         _check_node(node.field, ctx)
         ctx.has_meta_access = True
         return SEM_BOOL
+
+    # ── Array functions ──────────────────────────────────────
+    if isinstance(node, ArrayContainsOp):
+        _check_node(node.field, ctx)
+        ctx.has_meta_access = True
+        return SEM_BOOL
+
+    if isinstance(node, ArrayLengthOp):
+        _check_node(node.field, ctx)
+        ctx.has_meta_access = True
+        return SEM_INT
+
+    if isinstance(node, ArrayAccessOp):
+        if node.field_name not in ctx.schema_fields:
+            raise FilterFieldError(
+                f"unknown field {node.field_name!r}",
+                ctx.source, node.pos,
+                field_name=node.field_name,
+                available_fields=ctx.field_names,
+            )
+        ctx.has_meta_access = True
+        return SEM_DYNAMIC
 
     raise TypeError(f"unknown AST node type: {type(node).__name__}")
 

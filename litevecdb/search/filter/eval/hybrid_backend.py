@@ -156,7 +156,8 @@ def _collect(node: Expr, keys: Set[str]) -> None:
 
 def _has_python_only_nodes(node: Expr) -> bool:
     """Check if the AST contains nodes that require python_backend."""
-    if isinstance(node, (TextMatchOp, JsonAccess)):
+    from litevecdb.search.filter.ast import ArrayContainsOp, ArrayLengthOp, ArrayAccessOp
+    if isinstance(node, (TextMatchOp, JsonAccess, ArrayContainsOp, ArrayLengthOp, ArrayAccessOp)):
         return True
     if isinstance(node, (CmpOp, ArithOp)):
         return _has_python_only_nodes(node.left) or _has_python_only_nodes(node.right)

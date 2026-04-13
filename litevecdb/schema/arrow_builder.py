@@ -38,6 +38,13 @@ def _arrow_type(field: FieldSchema) -> pa.DataType:
         if field.dim is None:
             raise ValueError(f"FLOAT_VECTOR field '{field.name}' requires dim")
         return pa.list_(pa.float32(), field.dim)
+    if field.dtype == DataType.ARRAY:
+        if field.element_type is None:
+            raise ValueError(f"ARRAY field '{field.name}' requires element_type")
+        elem_arrow = TYPE_MAP.get(field.element_type)
+        if elem_arrow is None:
+            raise ValueError(f"ARRAY field '{field.name}' has unsupported element_type {field.element_type}")
+        return pa.list_(elem_arrow)
     if field.dtype == DataType.SPARSE_FLOAT_VECTOR:
         return pa.binary()
     return TYPE_MAP[field.dtype]

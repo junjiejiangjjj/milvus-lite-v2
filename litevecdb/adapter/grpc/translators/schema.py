@@ -64,6 +64,7 @@ _MILVUS_TO_LITEVECDB: dict[int, DataType] = {
     10: DataType.FLOAT,          # Float
     11: DataType.DOUBLE,         # Double
     21: DataType.VARCHAR,        # VarChar
+    22: DataType.ARRAY,          # Array
     23: DataType.JSON,           # JSON
     101: DataType.FLOAT_VECTOR,          # FloatVector
     104: DataType.SPARSE_FLOAT_VECTOR,  # SparseFloatVector
@@ -206,6 +207,20 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
 
     auto_id = bool(getattr(proto_field, 'autoID', False))
 
+    # ARRAY attributes
+    element_type = None
+    max_capacity = None
+    if dtype == DataType.ARRAY:
+        elem_int = int(getattr(proto_field, 'element_type', 0))
+        if elem_int in _MILVUS_TO_LITEVECDB:
+            element_type = _MILVUS_TO_LITEVECDB[elem_int]
+        max_cap_str = params.get("max_capacity")
+        if max_cap_str:
+            try:
+                max_capacity = int(max_cap_str)
+            except (ValueError, TypeError):
+                pass
+
     return FieldSchema(
         name=proto_field.name,
         dtype=dtype,
@@ -213,6 +228,8 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
         auto_id=auto_id,
         dim=dim,
         max_length=max_length,
+        element_type=element_type,
+        max_capacity=max_capacity,
         nullable=bool(proto_field.nullable),
         enable_analyzer=enable_analyzer,
         analyzer_params=analyzer_params,
@@ -292,6 +309,18 @@ def litevecdb_to_milvus_schema(
             kv = pf.type_params.add()
             kv.key = "dim"
             kv.value = str(f.dim)
+
+        if f.dtype == DataType.ARRAY:
+            if f.element_type is not None:
+                pf.element_type = _LITEVECDB_TO_MILVUS.get(f.element_type, 0)
+            if f.max_capacity is not None:
+                kv = pf.type_params.add()
+                kv.key = "max_capacity"
+                kv.value = str(f.max_capacity)
+            if f.max_length is not None:
+                kv = pf.type_params.add()
+                kv.key = "max_length"
+                kv.value = str(f.max_length)
 
         if f.dtype == DataType.VARCHAR and f.max_length is not None:
             kv = pf.type_params.add()

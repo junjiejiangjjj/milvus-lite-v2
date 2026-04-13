@@ -85,6 +85,11 @@ def validate_schema(schema: CollectionSchema) -> None:
                 )
         if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
             all_vector_fields.append(f)
+        if f.dtype == DataType.ARRAY:
+            if f.element_type is None:
+                raise SchemaValidationError(
+                    f"ARRAY field {f.name!r} requires element_type"
+                )
 
     if len(pk_fields) == 0:
         raise SchemaValidationError("schema has no primary key field")
@@ -249,6 +254,19 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
     for f in schema.fields:
         if f.dtype == DataType.FLOAT_VECTOR:
             continue  # already checked above
+        if f.dtype == DataType.ARRAY:
+            if f.name in record and record[f.name] is not None:
+                val = record[f.name]
+                if not isinstance(val, (list, tuple)):
+                    raise SchemaValidationError(
+                        f"ARRAY field {f.name!r} must be list/tuple, "
+                        f"got {type(val).__name__}"
+                    )
+            elif not f.nullable and f.default_value is None:
+                raise SchemaValidationError(
+                    f"ARRAY field {f.name!r} missing and not nullable / no default"
+                )
+            continue
         if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
             # Function output fields: skip — engine auto-generates them.
             if f.name in func_output_names:

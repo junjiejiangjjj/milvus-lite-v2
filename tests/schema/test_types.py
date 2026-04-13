@@ -25,7 +25,7 @@ def test_datatype_values():
 def test_datatype_members():
     expected = {
         "BOOL", "INT8", "INT16", "INT32", "INT64",
-        "FLOAT", "DOUBLE", "VARCHAR", "JSON",
+        "FLOAT", "DOUBLE", "VARCHAR", "JSON", "ARRAY",
         "FLOAT_VECTOR", "SPARSE_FLOAT_VECTOR",
     }
     assert set(DataType.__members__.keys()) == expected

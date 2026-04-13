@@ -36,6 +36,9 @@ from litevecdb.search.filter.ast import (
     StringLit,
     JsonAccess,
     TextMatchOp,
+    ArrayContainsOp,
+    ArrayLengthOp,
+    ArrayAccessOp,
 )
 
 if TYPE_CHECKING:
@@ -261,5 +264,40 @@ def _eval_row(node, row: dict) -> Any:
             return False
         # OR logic: match if any query token is in doc tokens
         return bool(doc_tokens & query_tokens)
+
+    # ── Array functions ─────────────────────────────────────────
+    if isinstance(node, ArrayContainsOp):
+        arr = row.get(node.field.name)
+        if arr is None or not isinstance(arr, (list, tuple)):
+            return False
+        if node.mode == "any_one":
+            # array_contains(field, single_value)
+            target = _eval_row(node.values, row)
+            return target in arr
+        # array_contains_all / array_contains_any with list
+        if isinstance(node.values, ListLit):
+            targets = [_eval_row(e, row) for e in node.values.elements]
+        else:
+            v = _eval_row(node.values, row)
+            targets = v if isinstance(v, (list, tuple)) else [v]
+        if node.mode == "all":
+            return all(t in arr for t in targets)
+        # mode == "any"
+        return any(t in arr for t in targets)
+
+    if isinstance(node, ArrayLengthOp):
+        arr = row.get(node.field.name)
+        if arr is None or not isinstance(arr, (list, tuple)):
+            return 0
+        return len(arr)
+
+    if isinstance(node, ArrayAccessOp):
+        arr = row.get(node.field_name)
+        if arr is None or not isinstance(arr, (list, tuple)):
+            return None
+        idx = node.index
+        if 0 <= idx < len(arr):
+            return arr[idx]
+        return None
 
     raise TypeError(f"unknown AST node: {type(node).__name__}")

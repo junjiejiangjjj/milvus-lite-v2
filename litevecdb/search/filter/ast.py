@@ -209,6 +209,32 @@ class TextMatchOp:
     pos: int
 
 
+# ── Array filter functions ────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ArrayContainsOp:
+    """``array_contains(field, value)`` / ``array_contains_all`` / ``array_contains_any``."""
+    field: FieldRef
+    values: "Expr"  # single value or ListLit
+    mode: str       # "any_one" | "all" | "any"
+    pos: int
+
+
+@dataclass(frozen=True)
+class ArrayLengthOp:
+    """``array_length(field)`` — returns the length of an array field."""
+    field: FieldRef
+    pos: int
+
+
+@dataclass(frozen=True)
+class ArrayAccessOp:
+    """``field[index]`` — integer index access on an array field."""
+    field_name: str
+    index: int
+    pos: int
+
+
 # ── Type alias for the union of all node types ──────────────────────────────
 
 Expr = Union[
@@ -219,4 +245,5 @@ Expr = Union[
     ArithOp, LikeOp, IsNullOp,
     MetaAccess, JsonAccess,
     TextMatchOp,
+    ArrayContainsOp, ArrayLengthOp, ArrayAccessOp,
 ]

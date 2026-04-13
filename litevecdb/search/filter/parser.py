@@ -35,6 +35,9 @@ from litevecdb.search.filter.ast import (
     FloatLit,
     InOp,
     IntLit,
+    ArrayAccessOp,
+    ArrayContainsOp,
+    ArrayLengthOp,
     IsNullOp,
     JsonAccess,
     LikeOp,
@@ -303,30 +306,92 @@ class Parser:
         self._consume()
         return TextMatchOp(field=field, query=query, pos=func_tok.pos)
 
-    def _parse_json_access(self, ident_tok: Token) -> Expr:
-        """``field_name["key"]`` or ``field_name['key']``.
+    def _parse_bracket_access(self, ident_tok: Token) -> Expr:
+        """``field["key"]`` (JSON path) or ``field[N]`` (array index).
 
-        The IDENT has already been consumed; we expect '[' STRING ']'.
+        The IDENT has already been consumed; we expect '[' (STRING|INT) ']'.
         """
         self._consume()  # '['
         key_tok = self._peek()
-        if key_tok.kind != TokenKind.STRING:
+        if key_tok.kind == TokenKind.STRING:
+            self._consume()
+            if self._peek().kind != TokenKind.RBRACKET:
+                raise FilterParseError(
+                    "field access: expected ']'",
+                    self.source, self._peek().pos,
+                )
+            self._consume()
+            return JsonAccess(
+                field_name=ident_tok.text,
+                key=key_tok.value,
+                pos=ident_tok.pos,
+            )
+        if key_tok.kind == TokenKind.INT:
+            self._consume()
+            if self._peek().kind != TokenKind.RBRACKET:
+                raise FilterParseError(
+                    "array index: expected ']'",
+                    self.source, self._peek().pos,
+                )
+            self._consume()
+            return ArrayAccessOp(
+                field_name=ident_tok.text,
+                index=key_tok.value,
+                pos=ident_tok.pos,
+            )
+        raise FilterParseError(
+            f"field access: expected string key or integer index, got {key_tok.text!r}",
+            self.source, key_tok.pos,
+        )
+
+    def _parse_array_contains(self, func_tok: Token, mode: str) -> Expr:
+        """``array_contains(field, value)`` or ``array_contains_all/any(field, [values])``."""
+        self._consume()  # '('
+        field_tok = self._peek()
+        if field_tok.kind != TokenKind.IDENT:
             raise FilterParseError(
-                f"JSON access: expected string key, got {key_tok.text!r}",
-                self.source, key_tok.pos,
+                f"{func_tok.text}: expected field name",
+                self.source, field_tok.pos,
             )
         self._consume()
-        if self._peek().kind != TokenKind.RBRACKET:
+        field = FieldRef(name=field_tok.text, pos=field_tok.pos)
+        if self._peek().kind != TokenKind.COMMA:
             raise FilterParseError(
-                "JSON access: expected ']'",
+                f"{func_tok.text}: expected ','",
                 self.source, self._peek().pos,
             )
         self._consume()
-        return JsonAccess(
-            field_name=ident_tok.text,
-            key=key_tok.value,
-            pos=ident_tok.pos,
-        )
+        # Value: single literal or list
+        if self._peek().kind == TokenKind.LBRACKET:
+            values = self.parse_list_literal()
+        else:
+            values = self.parse_primary()
+        if self._peek().kind != TokenKind.RPAREN:
+            raise FilterParseError(
+                f"{func_tok.text}: expected ')'",
+                self.source, self._peek().pos,
+            )
+        self._consume()
+        return ArrayContainsOp(field=field, values=values, mode=mode, pos=func_tok.pos)
+
+    def _parse_array_length(self, func_tok: Token) -> Expr:
+        """``array_length(field)`` — returns int, used in comparisons."""
+        self._consume()  # '('
+        field_tok = self._peek()
+        if field_tok.kind != TokenKind.IDENT:
+            raise FilterParseError(
+                f"array_length: expected field name",
+                self.source, field_tok.pos,
+            )
+        self._consume()
+        if self._peek().kind != TokenKind.RPAREN:
+            raise FilterParseError(
+                "array_length: expected ')'",
+                self.source, self._peek().pos,
+            )
+        self._consume()
+        return ArrayLengthOp(field=FieldRef(name=field_tok.text, pos=field_tok.pos),
+                             pos=func_tok.pos)
 
     def _parse_in_tail(self, left: Expr, negate: bool) -> Expr:
         """Parse the `in [...]` tail. *left* must be a FieldRef."""
@@ -390,18 +455,28 @@ class Parser:
 
         if tok.kind == TokenKind.IDENT:
             self._consume()
-            # Function-call syntax: text_match(field, 'query')
+            # Function-call syntax
             if self._peek().kind == TokenKind.LPAREN:
-                if tok.text == "text_match":
+                fn_name = tok.text.lower()
+                if fn_name == "text_match":
                     return self._parse_text_match(tok)
+                if fn_name == "array_contains":
+                    return self._parse_array_contains(tok, "any_one")
+                if fn_name == "array_contains_all":
+                    return self._parse_array_contains(tok, "all")
+                if fn_name == "array_contains_any":
+                    return self._parse_array_contains(tok, "any")
+                if fn_name == "array_length":
+                    return self._parse_array_length(tok)
                 raise FilterParseError(
                     f"unknown function {tok.text!r}",
                     self.source, tok.pos, span=len(tok.text),
-                    hint="supported functions: text_match",
+                    hint="supported: text_match, array_contains, array_contains_all, "
+                         "array_contains_any, array_length",
                 )
-            # JSON field access: field_name["key"] or field_name['key']
+            # field[...] access: JSON path or array index
             if self._peek().kind == TokenKind.LBRACKET:
-                return self._parse_json_access(tok)
+                return self._parse_bracket_access(tok)
             return FieldRef(name=tok.text, pos=tok.pos)
 
         if tok.kind == TokenKind.META:

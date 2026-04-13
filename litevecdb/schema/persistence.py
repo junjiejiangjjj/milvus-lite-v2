@@ -136,6 +136,8 @@ def _field_to_dict(f: FieldSchema) -> dict:
         "auto_id": f.auto_id,
         "dim": f.dim,
         "max_length": f.max_length,
+        "element_type": f.element_type.value if f.element_type else None,
+        "max_capacity": f.max_capacity,
         "nullable": f.nullable,
         "default_value": f.default_value,
     }
@@ -178,6 +180,8 @@ def _field_from_dict(d: Any, source: str) -> FieldSchema:
         auto_id=bool(d.get("auto_id", False)),
         dim=d.get("dim"),
         max_length=d.get("max_length"),
+        element_type=DataType(d["element_type"]) if d.get("element_type") else None,
+        max_capacity=d.get("max_capacity"),
         nullable=bool(d.get("nullable", False)),
         default_value=d.get("default_value"),
         enable_analyzer=bool(d.get("enable_analyzer", False)),
