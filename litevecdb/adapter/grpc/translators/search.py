@@ -134,6 +134,7 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
         "group_size_strict": strict_group_size,
         "radius": radius,
         "range_filter": range_filter_val,
+        "offset": int(raw_params.get("offset", 0)),
     }
 
 

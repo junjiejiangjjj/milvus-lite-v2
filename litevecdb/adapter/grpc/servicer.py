@@ -300,12 +300,18 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             partition_names = list(request.partition_names) or None
             output_fields = list(request.output_fields) or None
 
-            # Extract limit from query_params KV list (pymilvus packs it there).
+            # Extract limit and offset from query_params KV list.
             limit = None
+            offset = 0
             for kv in request.query_params:
                 if kv.key == "limit":
                     try:
                         limit = int(kv.value)
+                    except (ValueError, TypeError):
+                        pass
+                elif kv.key == "offset":
+                    try:
+                        offset = int(kv.value)
                     except (ValueError, TypeError):
                         pass
 
@@ -319,6 +325,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     output_fields=output_fields,
                     partition_names=partition_names,
                     limit=limit,
+                    offset=offset,
                 )
 
             return milvus_pb2.QueryResults(
@@ -379,6 +386,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 strict_group_size=strict,
                 radius=parsed.get("radius"),
                 range_filter=parsed.get("range_filter"),
+                offset=parsed.get("offset", 0),
             )
 
             result_data = build_search_result_data(

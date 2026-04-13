@@ -397,6 +397,7 @@ class Collection:
         strict_group_size: bool = False,
         radius: Optional[float] = None,
         range_filter: Optional[float] = None,
+        offset: int = 0,
     ) -> List[List[dict]]:
         """Vector top-k search.
 
@@ -413,10 +414,9 @@ class Collection:
             group_size: number of results per group (default 1).
             strict_group_size: if True, discard groups with fewer than
                 group_size results.
-            radius: optional distance lower bound (exclusive). Only results
-                with distance > radius are returned.
-            range_filter: optional distance upper bound (inclusive). Only
-                results with distance <= range_filter are returned.
+            radius: optional distance lower bound (exclusive).
+            range_filter: optional distance upper bound (inclusive).
+            offset: number of results to skip before returning (default 0).
 
         Returns:
             List of length nq. Each inner list has dicts of shape
@@ -450,12 +450,12 @@ class Collection:
                     f"which is not supported for group_by"
                 )
 
-        # Over-fetch when group_by or range search is active
-        effective_top_k = top_k
+        # Over-fetch when group_by, range search, or offset is active
+        effective_top_k = top_k + offset
         if group_by_field is not None:
-            effective_top_k = max(top_k * group_size * 3, top_k * 10)
+            effective_top_k = max((top_k + offset) * group_size * 3, (top_k + offset) * 10)
         if radius is not None or range_filter is not None:
-            effective_top_k = max(effective_top_k, top_k * 5)
+            effective_top_k = max(effective_top_k, (top_k + offset) * 5)
 
         # Resolve the target vector field
         vector_field = self._resolve_anns_field(anns_field)
@@ -495,13 +495,20 @@ class Collection:
 
         # Apply range filter (before group_by)
         if radius is not None or range_filter is not None:
-            raw_results = _apply_range_filter(raw_results, radius, range_filter, top_k)
+            raw_results = _apply_range_filter(
+                raw_results, radius, range_filter, top_k + offset,
+            )
 
         # Apply group_by post-processing
         if group_by_field is not None:
             raw_results = _apply_group_by(
-                raw_results, group_by_field, top_k, group_size, strict_group_size,
+                raw_results, group_by_field, top_k + offset,
+                group_size, strict_group_size,
             )
+
+        # Apply offset: skip the first `offset` results per query
+        if offset > 0:
+            raw_results = [hits[offset:offset + top_k] for hits in raw_results]
 
         return raw_results
 
@@ -728,6 +735,7 @@ class Collection:
         output_fields: Optional[List[str]] = None,
         partition_names: Optional[List[str]] = None,
         limit: Optional[int] = None,
+        offset: int = 0,
     ) -> List[dict]:
         """Pure scalar query — no vector, no distance.
 
@@ -773,15 +781,16 @@ class Collection:
             all_pks, all_seqs, self._delta_index, filter_mask=filter_mask,
         )
 
-        # Project + limit.
+        # Project + offset + limit.
+        effective_limit = (offset + limit) if limit is not None else None
         live_indices = np.flatnonzero(mask)
         out: List[dict] = []
         for i in live_indices:
             rec = all_records[int(i)]
             out.append(self._project_record(rec, output_fields))
-            if limit is not None and len(out) >= limit:
+            if effective_limit is not None and len(out) >= effective_limit:
                 break
-        return out
+        return out[offset:]
 
     def _index_dir(self, partition: str) -> str:
         """Phase 9.4: canonical path for a partition's index sidecar dir.
