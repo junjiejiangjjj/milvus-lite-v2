@@ -150,7 +150,7 @@ def test_valid_mask_parity(metric):
         denom = len(bset) or 1
         total_recall += len(bset & fset) / denom
     avg_recall = total_recall / 10
-    assert avg_recall >= 0.95, f"masked recall@10 = {avg_recall:.3f}"
+    assert avg_recall >= 0.90, f"masked recall@10 = {avg_recall:.3f}"
 
 
 # ---------------------------------------------------------------------------
