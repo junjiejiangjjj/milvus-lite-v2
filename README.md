@@ -1,49 +1,102 @@
-# LiteVecDB
+<div align="center">
+    <img src="https://raw.githubusercontent.com/milvus-io/milvus-lite/refs/heads/main/milvus_lite_logo.png" width="60%"/>
+</div>
 
-A local embedded vector database — designed as a **local version of Milvus**, written in pure Python.
+<h3 align="center">
+    <p>Milvus Lite v2 &mdash; The next-generation lightweight Milvus</p>
+</h3>
 
-LiteVecDB is an LSM-tree-style storage engine with PyArrow in-memory and Parquet on disk, per-segment FAISS HNSW indexing, BM25 full text search, and a Milvus-compatible gRPC adapter. pymilvus clients connect without code changes.
+<p align="center">
+    <a href="https://github.com/junjiejiangjjj/milvus-lite-v2/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
+    <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python">
+    <img src="https://img.shields.io/badge/built%20with-vibe%20coding-ff69b4" alt="Vibe Coding">
+</p>
 
-> **Status**: pre-1.0. Phases 0–18 landed — storage, engine, scalar filter, vector index, gRPC adapter, full text search, hybrid search, group by, range search, auto ID, iterators, offset pagination, multi-vector independent indexing. **1484 tests passing.**
+# Introduction
 
----
+Milvus Lite v2 is the next-generation lightweight version of [Milvus](https://github.com/milvus-io/milvus), rebuilt from scratch in **pure Python** to replace the original [milvus-lite](https://github.com/milvus-io/milvus-lite).
 
-## Highlights
+The original milvus-lite wraps the full C++ Milvus core via CGo bindings, inheriting its heavy build chain, platform restrictions (no Windows, no Alpine), and opaque debugging experience. Milvus Lite v2 takes a different approach: a clean-room Python implementation with an LSM-tree storage engine, delivering the same pymilvus-compatible API in a package that is easy to install, inspect, and extend.
 
-- **LSM-Tree storage** — WAL → MemTable → Parquet, with size-tiered compaction and tombstone GC
-- **Crash-safe** — atomic Manifest with `.prev` backup; WAL replay on every restart
-- **Milvus-style API** — `insert / delete / get / search / query`, partition CRUD, `_seq` global ordering, upsert semantics
-- **Scalar filter expressions** — `age > 18 and category in ['tech', 'news']` style; three backends (`arrow` / `hybrid` / `python`) with automatic dispatch
-- **FAISS HNSW vector index** — per-segment binding, `IDSelectorBitmap` pre-filter, optional via `[faiss]` extra; multi-vector independent indexing (dense + sparse each have their own index)
-- **BM25 full text search** — `Function(type=BM25)` auto-generates sparse vectors from text; inverted index with BM25 scoring
-- **text_match filter** — `text_match(field, 'tokens')` tokenized keyword matching with OR logic
-- **Hybrid search** — multi-vector fusion with `WeightedRanker` / `RRFRanker`
-- **Group By search** — `group_by_field` deduplicates results by scalar field, with `group_size` control
-- **Range search** — `radius` / `range_filter` distance bounds filtering
-- **Auto ID** — `auto_id=True` on INT64 primary key; strictly increasing IDs
-- **Iterators** — `query_iterator` / `search_iterator` for batch pagination
-- **Offset pagination** — `search(offset=10, limit=10)` and `query(offset=...)`
-- **gRPC adapter** — `pymilvus.MilvusClient` fully compatible; embeddable + standalone server
-- **load / release state machine** — mirrors Milvus client behavior
-- **1484 tests**, including recall@10 differential tests and pymilvus end-to-end compatibility suites
+This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 1560 test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
 
----
+### Why replace milvus-lite?
 
-## Quick start
+| | milvus-lite (v1) | Milvus Lite v2 |
+|---|---|---|
+| Language | C++ core + CGo + Python wrapper | Pure Python |
+| Install | `pip install` downloads ~200MB binary | `pip install` pulls lightweight Python packages |
+| Platform | Linux/macOS only, no Alpine/musl | Anywhere Python runs |
+| Debugging | Opaque C++ core, segfaults | Pure Python stack traces |
+| Extensibility | Requires rebuilding C++ | Standard Python, easy to fork and modify |
+| Index | FLAT, IVF_FLAT | HNSW (FAISS), FLAT, BM25 sparse inverted |
+| Full text search | Tantivy (C++ binding) | Pure Python BM25 with pluggable analyzers |
 
-### Install
+# Requirements
+
+- Python >= 3.10
+- macOS (Apple Silicon / x86_64) or Linux (x86_64 / arm64)
+
+# Installation
 
 ```bash
-git clone <this repo>
-cd milvus-lite-v2
-pip install -e ".[dev]"              # base + test deps
-pip install -e ".[dev,faiss]"        # add FAISS HNSW (recommended)
-pip install -e ".[dev,faiss,grpc]"   # add pymilvus-compatible gRPC server
+pip install litevecdb                  # core (BruteForce index only)
+pip install litevecdb[faiss]           # + FAISS HNSW vector index
+pip install litevecdb[faiss,grpc]      # + pymilvus-compatible gRPC server
 ```
 
-Requires Python >= 3.10. Core deps: `pyarrow >= 15.0`, `numpy >= 1.24`. Optional: `faiss-cpu >= 1.7.4` for HNSW, `pymilvus >= 2.4 + grpcio >= 1.50` for gRPC, `jieba >= 0.42` for Chinese tokenization.
+For development:
 
-### Embedded usage
+```bash
+git clone https://github.com/junjiejiangjjj/milvus-lite-v2.git
+cd milvus-lite-v2
+pip install -e ".[dev,faiss,grpc]"
+```
+
+# Quick Start
+
+### Option 1: pymilvus client (drop-in replacement)
+
+Start the gRPC server:
+
+```bash
+litevecdb-grpc --data-dir ./data --port 19530
+```
+
+Then use the standard pymilvus API — **no code changes needed**:
+
+```python
+from pymilvus import MilvusClient
+
+# Just point to the Milvus Lite v2 server instead of Milvus Standalone
+client = MilvusClient(uri="http://localhost:19530")
+
+# Everything works exactly like Milvus
+client.create_collection("demo", dimension=384)
+
+data = [
+    {"id": i, "vector": [float(j) for j in range(384)], "text": f"doc {i}"}
+    for i in range(100)
+]
+client.insert("demo", data)
+
+results = client.search(
+    "demo",
+    data=[[float(i) for i in range(384)]],
+    limit=5,
+    output_fields=["text"],
+)
+for hits in results:
+    for hit in hits:
+        print(f"id={hit['id']}, distance={hit['distance']:.4f}, text={hit['entity']['text']}")
+
+# Filter, query, delete — all standard pymilvus API
+results = client.query("demo", filter="id < 10", output_fields=["text"], limit=5)
+client.delete("demo", ids=[0, 1, 2])
+client.drop_collection("demo")
+```
+
+### Option 2: Embedded engine (no server)
 
 ```python
 from litevecdb import LiteVecDB, CollectionSchema, FieldSchema, DataType
@@ -51,302 +104,201 @@ from litevecdb import LiteVecDB, CollectionSchema, FieldSchema, DataType
 schema = CollectionSchema(fields=[
     FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
     FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=128),
-    FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=256),
-    FieldSchema(name="category", dtype=DataType.VARCHAR),
+    FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=64),
 ])
 
-with LiteVecDB("/path/to/data") as db:
+with LiteVecDB("./data") as db:
     col = db.create_collection("docs", schema)
     col.insert([
-        {"id": 1, "vec": [...], "title": "intro", "category": "tech"},
-        {"id": 2, "vec": [...], "title": "blog",  "category": "news"},
+        {"id": 1, "vec": [0.1] * 128, "category": "tech"},
+        {"id": 2, "vec": [0.2] * 128, "category": "news"},
     ])
-
     col.create_index("vec", {
         "index_type": "HNSW", "metric_type": "COSINE",
         "params": {"M": 16, "efConstruction": 200},
     })
     col.load()
 
-    # Vector search with scalar filter
     results = col.search(
-        [[0.1, 0.2, ...]], top_k=10, metric_type="COSINE",
-        expr="category == 'tech'", output_fields=["title"],
+        [[0.1] * 128], top_k=3, metric_type="COSINE",
+        expr="category == 'tech'", output_fields=["category"],
     )
-
-    # Group by search
-    results = col.search(
-        [[0.1, 0.2, ...]], top_k=5,
-        group_by_field="category", group_size=2,
-    )
-
-    # Range search
-    results = col.search(
-        [[0.1, 0.2, ...]], top_k=10,
-        radius=0.1, range_filter=0.8,
-    )
-
-    # Scalar query
-    rows = col.query("category == 'tech'", limit=20)
 ```
 
-### Full text search (BM25)
+# Examples
 
-```python
-from litevecdb.schema.types import Function, FunctionType
-
-schema = CollectionSchema(fields=[
-    FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
-    FieldSchema(name="text", dtype=DataType.VARCHAR,
-                enable_analyzer=True,
-                analyzer_params={"tokenizer": "standard"}),
-    FieldSchema(name="dense", dtype=DataType.FLOAT_VECTOR, dim=128),
-    FieldSchema(name="sparse_emb", dtype=DataType.SPARSE_FLOAT_VECTOR,
-                is_function_output=True),
-], functions=[
-    Function(name="bm25_fn", function_type=FunctionType.BM25,
-             input_field_names=["text"], output_field_names=["sparse_emb"]),
-])
-
-with LiteVecDB("/path/to/data") as db:
-    col = db.create_collection("articles", schema)
-    col.insert([
-        {"id": 1, "text": "machine learning algorithms", "dense": [...]},
-        {"id": 2, "text": "deep learning neural networks", "dense": [...]},
-    ])
-    col.load()
-
-    # BM25 text search
-    results = col.search(
-        ["machine learning"], top_k=10,
-        metric_type="BM25", anns_field="sparse_emb",
-    )
-
-    # text_match filter
-    rows = col.query("text_match(text, 'machine learning')", limit=20)
-```
-
-### gRPC server (pymilvus client)
-
-```bash
-litevecdb-grpc --data-dir ./data --port 19530
-```
+## Full Text Search (BM25)
 
 ```python
 from pymilvus import MilvusClient, DataType, Function, FunctionType
-from pymilvus import AnnSearchRequest, WeightedRanker
 
 client = MilvusClient(uri="http://localhost:19530")
 
-# Create collection, insert, index, load, search — all standard pymilvus API
-schema = MilvusClient.create_schema(auto_id=False)
-schema.add_field("id", DataType.INT64, is_primary=True)
+schema = MilvusClient.create_schema()
+schema.add_field("id", DataType.INT64, is_primary=True, auto_id=True)
 schema.add_field("text", DataType.VARCHAR, max_length=65535,
                  enable_analyzer=True, enable_match=True)
-schema.add_field("vec", DataType.FLOAT_VECTOR, dim=128)
-schema.add_field("bm25_emb", DataType.SPARSE_FLOAT_VECTOR)
+schema.add_field("sparse", DataType.SPARSE_FLOAT_VECTOR)
 schema.add_function(Function(
-    name="bm25_fn", function_type=FunctionType.BM25,
-    input_field_names=["text"], output_field_names=["bm25_emb"],
+    name="bm25", function_type=FunctionType.BM25,
+    input_field_names=["text"], output_field_names=["sparse"],
 ))
 client.create_collection("articles", schema=schema)
-client.insert("articles", data=[...])
 
-# Hybrid search: dense + BM25
-dense_req = AnnSearchRequest(data=[[...]], anns_field="vec", param={}, limit=10)
-bm25_req = AnnSearchRequest(data=[{term: 1.0}], anns_field="bm25_emb",
-                            param={"metric_type": "BM25"}, limit=10)
-results = client.hybrid_search("articles",
-    reqs=[dense_req, bm25_req],
-    ranker=WeightedRanker(0.6, 0.4), limit=10)
+client.insert("articles", [
+    {"text": "machine learning algorithms for classification"},
+    {"text": "deep learning neural networks"},
+    {"text": "natural language processing with transformers"},
+])
+
+idx = client.prepare_index_params()
+idx.add_index(field_name="sparse", index_type="SPARSE_INVERTED_INDEX",
+              metric_type="BM25", params={})
+client.create_index("articles", idx)
+client.load_collection("articles")
+
+results = client.search(
+    "articles", data=["machine learning"], anns_field="sparse",
+    limit=3, output_fields=["text"],
+)
 ```
 
----
-
-## Architecture
-
-```
-+-------------------------------------------------+
-| adapter/grpc           Phase 10-14               |
-|   pymilvus protocol -> engine API translation    |
-|   + BM25/sparse/hybrid/group_by/range support    |
-+-------------------------------------------------+
-                         |
-+-------------------------------------------------+
-| db.LiteVecDB      Multi-collection lifecycle     |
-+-------------------------------------------------+
-                         |
-+-------------------------------------------------+
-| engine/Collection   Insert/Delete/Get/Search/    |
-|   Query, BM25 auto-gen, group_by, range filter,  |
-|   create_index/load/release, partition CRUD,      |
-|   flush, compaction, recovery                     |
-+-------------------------------------------------+
-          |                              |
-+---------------------+    +--------------------------+
-| storage/            |    | search/                   |
-|   WAL, MemTable,    |    |   bitmap pipeline,        |
-|   Manifest (v2),    |    |   distance, assembler,    |
-|   Segment + index   |    |   executor (with index),  |
-+---------------------+    |   filter/ (Phase 8),      |
-          |                |   text_match (Phase 11)   |
-          |                +--------------------------+
-          |                              |
-+---------------------+    +--------------------------+
-| index/              |    | analyzer/   Phase 11      |
-|   VectorIndex,      |    |   StandardAnalyzer,       |
-|   BruteForceIndex,  |    |   JiebaAnalyzer,          |
-|   FaissHnswIndex,   |    |   BM25 sparse codec,      |
-|   SparseInverted    |    |   term hash (FNV-1a)      |
-+---------------------+    +--------------------------+
-                         |
-+-------------------------------------------------+
-| schema/     DataType (incl. SPARSE_FLOAT_VECTOR), |
-|   FieldSchema, Function/FunctionType,             |
-|   validation, Arrow builders, persistence         |
-+-------------------------------------------------+
-```
-
-### Key design decisions
-
-- **`_seq` is the global ordering** — every override / discard decision compares `_seq`, never call order
-- **Files are immutable** — data Parquet, delta Parquet, WAL, .idx are write-once. Manifest is the only mutable state (atomic tmp + rename)
-- **Vector index is segment-level** — one `.idx` per data Parquet, 1:1 lifetime. Avoids FAISS HNSW "no real delete" trap
-- **BM25 uses per-segment inverted index** — TF stored at insert time, IDF computed at search time from segment statistics
-- **Hybrid search = multi-route + rerank** — each route executes independently, results merged by WeightedRanker or RRFRanker
-- **Filter parser / evaluator decoupled via AST** — three backends chosen at compile time; text_match forces python backend
-
----
-
-## Filter expression syntax
-
-| Category | Operators / Forms |
-|---|---|
-| Comparison | `==` `!=` `<` `<=` `>` `>=` |
-| Logical | `and` `or` `not` + `&&` `\|\|` `!` |
-| Set membership | `field in [...]` `field not in [...]` |
-| String | `field like "pattern%"` (SQL LIKE: `%` and `_`) |
-| Arithmetic | `+` `-` `*` `/` |
-| Null check | `field is null` `field is not null` |
-| Dynamic field | `$meta["key"]` (requires `enable_dynamic_field=True`) |
-| Text match | `text_match(field, 'token1 token2')` (OR logic, requires `enable_match=True`) |
-
----
-
-## Engine API reference
+## Hybrid Search (Dense + BM25)
 
 ```python
-Collection
-  # Writes
-  .insert(records: List[dict], partition_name="_default") -> List[pk]
-  .delete(pks: List, partition_name=None) -> int
+from pymilvus import AnnSearchRequest, WeightedRanker
 
-  # Reads (require loaded state if index configured)
-  .get(pks, partition_names=None, expr=None) -> List[dict]
-  .search(query_vectors, top_k=10, metric_type="COSINE",
-          partition_names=None, expr=None, output_fields=None,
-          anns_field=None,
-          group_by_field=None, group_size=1, strict_group_size=False,
-          radius=None, range_filter=None, offset=0)
-          -> List[List[dict]]
-  .query(expr=None, output_fields=None, partition_names=None,
-         limit=None, offset=0)
-         -> List[dict]
-
-  # Index lifecycle
-  .create_index(field_name, index_params)
-  .drop_index(field_name=None)
-  .load() / .release()
-  .load_state -> "released" | "loading" | "loaded"
-
-  # Partitions
-  .create_partition(name) / .drop_partition(name)
-  .list_partitions() / .has_partition(name)
-
-  # Stats
-  .num_entities -> int
-  .describe() -> dict
+dense_req = AnnSearchRequest(
+    data=[[0.1] * 128], anns_field="vec",
+    param={"metric_type": "COSINE"}, limit=10,
+)
+sparse_req = AnnSearchRequest(
+    data=["search query"], anns_field="sparse",
+    param={"metric_type": "BM25"}, limit=10,
+)
+results = client.hybrid_search(
+    "articles", reqs=[dense_req, sparse_req],
+    ranker=WeightedRanker(0.7, 0.3), limit=5,
+)
 ```
 
----
+## Metadata Filtering
 
-## Testing
+```python
+# Comparison & logical
+client.query("col", filter="age > 25 and status == 'active'", limit=10)
+
+# IN operator
+client.query("col", filter="category in ['tech', 'science']", limit=10)
+
+# String matching
+client.query("col", filter="name like 'John%'", limit=10)
+
+# Dynamic field ($meta)
+client.query("col", filter='$meta["color"] == "red"', limit=10)
+
+# Text match (tokenized keyword search)
+client.query("col", filter="text_match(title, 'machine learning')", limit=10)
+
+# Array operations
+client.query("col", filter='array_contains(tags, "python")', limit=10)
+client.query("col", filter="array_length(scores) >= 3", limit=10)
+client.query("col", filter="scores[0] > 90", limit=10)
+```
+
+# Supported Features
+
+| Feature | Details |
+|---|---|
+| Vector types | `FLOAT_VECTOR`, `SPARSE_FLOAT_VECTOR` |
+| Index types | `HNSW` (FAISS), `FLAT` / `BRUTE_FORCE` / `AUTOINDEX`, `SPARSE_INVERTED_INDEX` |
+| Metrics | `COSINE`, `L2`, `IP`, `BM25` |
+| Scalar types | `INT8/16/32/64`, `FLOAT`, `DOUBLE`, `VARCHAR`, `BOOL`, `JSON`, `ARRAY` |
+| Search | Dense ANN, sparse BM25, hybrid (multi-vector + reranker), range search, group-by |
+| Filter | Comparison, logical, IN, LIKE, arithmetic, IS NULL, $meta, text_match, array ops |
+| CRUD | Insert (upsert), delete (by ID or filter), get, query, search |
+| Partitions | Create, drop, list, per-partition insert/search |
+| Pagination | `offset` parameter, query/search iterators |
+| Auto ID | `auto_id=True` on INT64 primary key |
+| Dynamic fields | `enable_dynamic_field=True` + `$meta["key"]` filtering |
+| BM25 | `Function(type=BM25)` auto-generates sparse vectors, per-segment inverted index |
+| Nullable fields | Nullable scalars and vectors |
+| gRPC | 25+ Milvus RPCs, pymilvus fully compatible |
+
+# Known Limitations
+
+- **Single-process only** — one process per `data_dir` (file-level lock)
+- **Synchronous flush** — no background compaction or async writes
+- **No authentication / RBAC**
+- **No partition key** — partition selection is explicit
+- **No binary / float16 / bfloat16 vectors**
+- **No IVF / quantized indexes** — only HNSW and flat
+- **Per-segment BM25 IDF** — IDF statistics are segment-local, not global
+
+# Architecture
+
+```
+pymilvus client
+      |  gRPC
+      v
++---------------------------------------------------+
+| adapter/grpc/  MilvusServicer                      |
+|   25+ RPCs, schema/search/records translators      |
++---------------------------------------------------+
+      |
++---------------------------------------------------+
+| engine/  Collection                                |
+|   insert, delete, search, query, flush,            |
+|   compaction, recovery, load/release               |
++---------------------------------------------------+
+      |                           |
++------------------+    +---------------------+
+| storage/         |    | search/             |
+|   WAL, MemTable, |    |   assembler,        |
+|   Segment,       |    |   executor,         |
+|   Manifest       |    |   filter/ (3 BE)    |
++------------------+    +---------------------+
+      |                           |
++------------------+    +---------------------+
+| index/           |    | analyzer/           |
+|   HNSW (FAISS),  |    |   Standard/Jieba,   |
+|   BruteForce,    |    |   BM25 sparse,      |
+|   SparseInverted |    |   term hash         |
++------------------+    +---------------------+
+      |
++---------------------------------------------------+
+| schema/  DataType, FieldSchema, Function,          |
+|   validation, Arrow builders, persistence          |
++---------------------------------------------------+
+```
+
+Storage is LSM-tree style: WAL (Arrow IPC) -> MemTable -> immutable Parquet segments. Vector indexes are segment-level (one `.idx` per Parquet file). Manifest is the single source of truth, updated atomically via tmp+rename.
+
+# Built with Vibe Coding
+
+This entire project — architecture design, implementation, test suite, documentation — was built through conversational AI pair programming using [Claude Code](https://claude.ai/code).
+
+The development process:
+1. **Design** — discuss architecture in natural language, produce design docs
+2. **Implement** — describe what to build, review and iterate on generated code
+3. **Test** — 1560 tests including recall validation and Milvus compatibility suites
+4. **Iterate** — fix bugs, optimize performance, add features — all through conversation
+
+No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human with a vision and an AI that codes.
+
+# Testing
 
 ```bash
-pytest                              # 1484 default tests (~75s)
-pytest -m slow                      # long-running stress tests
-pytest --cov=litevecdb              # with coverage
-pytest tests/adapter/ -k fts        # specific tests
+pytest                                  # 1560 tests
+pytest tests/adapter/ -k "grpc"         # gRPC integration tests
+pytest tests/index/test_index_differential.py  # recall validation
+pytest --cov=litevecdb                  # with coverage
 ```
 
-| Path | Coverage |
-|---|---|
-| `tests/schema/` | type system, validation, Arrow builders, FTS schema extensions |
-| `tests/storage/` | WAL, MemTable, Parquet IO, Manifest, DeltaIndex, Segment |
-| `tests/engine/` | Collection CRUD, flush, recovery, compaction, partitions, anns_field |
-| `tests/search/` | bitmap, distance, executor, filter (parser/semantic/backends), text_match |
-| `tests/index/` | BruteForceIndex, FaissHnswIndex, SparseInvertedIndex, recall differential |
-| `tests/analyzer/` | StandardAnalyzer, JiebaAnalyzer, sparse codec, BM25 auto-gen |
-| `tests/adapter/` | gRPC server, translators, pymilvus compat suites, hybrid search, group by, range search, FTS compat, auto ID, iterators, offset, multi-index |
+# Contributing
 
----
+Issues and pull requests are welcome at [GitHub](https://github.com/junjiejiangjjj/milvus-lite-v2).
 
-## Project status & roadmap
-
-| Phase | Scope | Status |
-|---|---|---|
-| 0-7 | Storage, engine, search, partitions, compaction | done |
-| **8** | Scalar filter expressions (F1-F3+, three backends) | done |
-| **9** | FAISS HNSW vector index (per-segment, load/release) | done |
-| **10** | gRPC adapter (pymilvus compatible, 25+ RPCs) | done |
-| **11** | Full text search (BM25, Analyzer, text_match) | done |
-| **12** | Hybrid search (WeightedRanker, RRFRanker) | done |
-| **13** | Group By search (scalar field grouping) | done |
-| **14** | Range search (distance bounds filtering) | done |
-| **15** | Auto ID (automatic INT64 primary key generation) | done |
-| **16** | Iterators (query_iterator, search_iterator) | done |
-| **17** | Offset pagination (search + query) | done |
-| **18** | Multi-vector independent indexing (per-field IndexSpec) | done |
-
-For the full roadmap see `plan/roadmap.md`.
-
----
-
-## Out of scope (post-MVP)
-
-- IVF / IVF-PQ quantized vector indexes
-- Binary / Float16 / BFloat16 vectors
-- Partition Key
-- phrase_match / Multi-Analyzer / Highlighter
-- Authentication / RBAC
-- Async flush + compaction
-- Multi-process / distributed
-
----
-
-## Repository layout
-
-```
-milvus-lite-v2/
-+-- README.md
-+-- pyproject.toml             # hatchling build, [faiss] / [grpc] / [chinese] extras
-|
-+-- litevecdb/
-|   +-- schema/                # DataType, FieldSchema, Function, validation, Arrow builders
-|   +-- storage/               # WAL, MemTable, DataFile, DeltaFile, DeltaIndex, Segment, Manifest
-|   +-- engine/                # Collection, Operation, flush, recovery, compaction
-|   +-- search/                # bitmap, distance, assembler, executor, filter/
-|   +-- index/                 # VectorIndex, BruteForceIndex, FaissHnswIndex, SparseInvertedIndex
-|   +-- analyzer/              # Analyzer, StandardAnalyzer, JiebaAnalyzer, sparse codec, hash
-|   +-- adapter/grpc/          # MilvusServicer, server, reranker, errors, translators/
-|
-+-- tests/                     # 1484 tests
-+-- examples/                  # m2_demo.py ... m10_demo.py
-+-- plan/                      # design docs (Chinese)
-```
-
----
-
-## License
+# License
 
 Apache License 2.0. See [LICENSE](LICENSE).
