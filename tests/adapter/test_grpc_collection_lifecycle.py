@@ -95,9 +95,11 @@ def test_list_collections_empty(milvus_client):
 
 
 def test_list_collections_multiple_sorted(milvus_client):
+    print("xxxxxxxxxx----")
     for name in ["zebra", "alpha", "middle"]:
         milvus_client.create_collection(name, schema=_make_schema())
     names = milvus_client.list_collections()
+    print(names)
     assert {"zebra", "alpha", "middle"}.issubset(set(names))
     # Verify the returned list is sorted
     assert names == sorted(names)
