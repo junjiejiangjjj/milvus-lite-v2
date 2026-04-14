@@ -386,8 +386,7 @@ class Collection:
             if compiled_filter is not None and not _row_matches_filter(rec, compiled_filter):
                 continue
 
-            out.append(self._project_record(rec, output_fields)
-                       if output_fields is not None else rec)
+            out.append(self._project_record(rec, output_fields))
 
         return out
 
@@ -506,6 +505,7 @@ class Collection:
         if radius is not None or range_filter is not None:
             raw_results = _apply_range_filter(
                 raw_results, radius, range_filter, top_k + offset,
+                metric_type=metric_type,
             )
 
         # Apply group_by post-processing
@@ -518,6 +518,13 @@ class Collection:
         # Apply offset: skip the first `offset` results per query
         if offset > 0:
             raw_results = [hits[offset:offset + top_k] for hits in raw_results]
+
+        # Convert IP distances to Milvus convention (positive = more similar).
+        # Internally we use -dot for sorting; Milvus returns raw dot product.
+        if metric_type == "IP":
+            for hits in raw_results:
+                for hit in hits:
+                    hit["distance"] = -hit["distance"]
 
         return raw_results
 
@@ -888,14 +895,14 @@ class Collection:
     ) -> dict:
         """Apply output_fields projection to a record dict.
 
-        - None → return the record as-is (with internal fields stripped
-          by the upstream code path)
+        - None → return all fields (stripping internal $meta key)
         - list → keep only the named fields, plus the pk field
         """
         if output_fields is None:
-            return record
+            return {k: v for k, v in record.items() if k != "$meta"}
         keep = set(output_fields)
         keep.add(self._pk_name)
+        keep.discard("$meta")
         return {k: v for k, v in record.items() if k in keep}
 
     def flush(self) -> None:
@@ -1673,10 +1680,17 @@ def _apply_range_filter(
     radius: Optional[float],
     range_filter: Optional[float],
     limit: int,
+    metric_type: str = "COSINE",
 ) -> List[List[dict]]:
     """Filter search results by distance range.
 
-    Keeps hits where ``radius < distance <= range_filter``.
+    Milvus range search semantics:
+        L2/COSINE: radius = max distance (outer), range_filter = min distance (inner)
+            Keep: range_filter <= distance <= radius
+        IP: radius = min score (inner), range_filter = max score (outer)
+            Keep: radius <= distance <= range_filter
+            (note: at this point IP distances are still internal -dot form)
+
     Either bound can be None (no bound on that side).
     After filtering, truncates to *limit* hits per query.
     """
@@ -1685,10 +1699,22 @@ def _apply_range_filter(
         filtered = []
         for hit in query_hits:
             d = hit["distance"]
-            if radius is not None and not (d > radius):
-                continue
-            if range_filter is not None and not (d <= range_filter):
-                continue
+            if metric_type == "IP":
+                # IP internal convention: -dot (smaller = more similar)
+                # radius/range_filter are user-facing (positive dot values)
+                # but _apply_range_filter runs BEFORE IP sign flip, so
+                # negate the bounds for comparison
+                if radius is not None and not (d <= -radius):
+                    continue
+                if range_filter is not None and not (d >= -range_filter):
+                    continue
+            else:
+                # L2/COSINE: smaller distance = closer
+                # radius = outer bound (max), range_filter = inner bound (min)
+                if radius is not None and not (d <= radius):
+                    continue
+                if range_filter is not None and not (d >= range_filter):
+                    continue
             filtered.append(hit)
         out.append(filtered[:limit])
     return out

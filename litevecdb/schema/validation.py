@@ -116,12 +116,6 @@ def validate_schema(schema: CollectionSchema) -> None:
         raise SchemaValidationError(
             "schema has no vector field (FLOAT_VECTOR or SPARSE_FLOAT_VECTOR)"
         )
-    if len(float_vector_fields) > 1:
-        names = [f.name for f in float_vector_fields]
-        raise SchemaValidationError(
-            f"at most one FLOAT_VECTOR field allowed, got {names}"
-        )
-
     # Validate functions
     for func in schema.functions:
         _validate_function(func, field_by_name)

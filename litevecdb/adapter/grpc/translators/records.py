@@ -372,6 +372,28 @@ def records_to_fields_data(
         fd = _build_field_data(fname, fschema, column)
         fields_data.append(fd)
 
+    # Emit dynamic fields (not in schema but present in records)
+    if output_fields is not None and schema.enable_dynamic_field:
+        schema_names = {f.name for f in schema.fields}
+        for fname in output_fields:
+            if fname in schema_names or fname == pk_name:
+                continue
+            # Dynamic field: emit as JSON (VARCHAR) FieldData
+            column = [r.get(fname) for r in records]
+            # Build a simple VARCHAR FieldData for the dynamic values
+            import json
+            str_column = [
+                json.dumps(v) if not isinstance(v, str) and v is not None else (v or "")
+                for v in column
+            ]
+            fd = schema_pb2.FieldData()
+            fd.field_name = fname
+            fd.type = 21  # DataType.VARCHAR
+            fd.is_dynamic = True
+            sd = fd.scalars.string_data
+            sd.data.extend(str_column)
+            fields_data.append(fd)
+
     return fields_data
 
 

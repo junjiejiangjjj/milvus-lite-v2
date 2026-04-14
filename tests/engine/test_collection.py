@@ -236,9 +236,10 @@ def test_dynamic_field_extras_stored(tmp_path, schema_with_dynamic):
     ])
     [rec] = col.get(["x"])
     assert rec["id"] == "x"
-    # $meta is in the schema row, so it shows up in the dict
-    assert "$meta" in rec
-    assert "category" in rec["$meta"]
+    # Dynamic fields are unpacked from $meta into top-level keys
+    assert rec["category"] == "blog"
+    assert rec["lang"] == "en"
+    assert "$meta" not in rec  # internal key stripped from output
     col.close()
 
 

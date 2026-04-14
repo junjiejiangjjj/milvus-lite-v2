@@ -133,12 +133,29 @@ class Segment:
         """Materialize a row as a dict (excluding _seq).
 
         Used by Collection.get() and search executor's result builder.
+        Dynamic fields stored in `$meta` are unpacked into the result.
         """
         result: dict = {}
+        meta_raw = None
         for name in self.table.schema.names:
             if name == "_seq":
                 continue
-            result[name] = self.table.column(name)[row_idx].as_py()
+            val = self.table.column(name)[row_idx].as_py()
+            if name == "$meta":
+                meta_raw = val
+            result[name] = val
+        # Unpack $meta JSON into top-level keys (keeps $meta for filters)
+        if meta_raw is not None:
+            import json
+            if isinstance(meta_raw, str):
+                try:
+                    meta = json.loads(meta_raw)
+                    if isinstance(meta, dict):
+                        result.update(meta)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            elif isinstance(meta_raw, dict):
+                result.update(meta_raw)
         return result
 
     # ── index lifecycle (Phase 9.2 / 9.4) ───────────────────────

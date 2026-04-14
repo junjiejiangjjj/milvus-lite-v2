@@ -58,7 +58,7 @@ class TestRangeSearchEngine:
                 assert hit["distance"] <= 1.5
 
     def test_range_only_radius(self):
-        """Only radius: distance > radius."""
+        """Only radius (outer bound for COSINE): distance <= radius."""
         with tempfile.TemporaryDirectory() as d:
             col = self._make_collection(d)
             results = col.search(
@@ -68,10 +68,10 @@ class TestRangeSearchEngine:
                 radius=0.5,
             )
             for hit in results[0]:
-                assert hit["distance"] > 0.5
+                assert hit["distance"] <= 0.5
 
     def test_range_only_range_filter(self):
-        """Only range_filter: distance <= range_filter."""
+        """Only range_filter (inner bound for COSINE): distance >= range_filter."""
         with tempfile.TemporaryDirectory() as d:
             col = self._make_collection(d)
             results = col.search(
@@ -81,7 +81,7 @@ class TestRangeSearchEngine:
                 range_filter=0.5,
             )
             for hit in results[0]:
-                assert hit["distance"] <= 0.5
+                assert hit["distance"] >= 0.5
 
     def test_range_empty_result(self):
         """No results in range."""
@@ -174,7 +174,7 @@ def test_grpc_range_only_range_filter(milvus_client):
         limit=10,
     )
     for hit in results[0]:
-        assert hit["distance"] <= 0.5
+        assert hit["distance"] >= 0.5
     milvus_client.drop_collection("rs_rf")
 
 

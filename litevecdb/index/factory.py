@@ -77,7 +77,13 @@ def build_index_from_spec(
         ValueError: index_type is unrecognized
     """
     index_type = spec.index_type
-    if index_type in ("BRUTE_FORCE", "FLAT", "AUTOINDEX"):
+    if index_type in ("BRUTE_FORCE", "FLAT"):
+        return BruteForceIndex.build(vectors, spec.metric_type, spec.build_params)
+    if index_type == "AUTOINDEX":
+        # Use HNSW when faiss is available, otherwise fall back to BruteForce
+        if _FAISS_AVAILABLE:
+            from litevecdb.index.faiss_hnsw import FaissHnswIndex
+            return FaissHnswIndex.build(vectors, spec.metric_type, spec.build_params)
         return BruteForceIndex.build(vectors, spec.metric_type, spec.build_params)
     if index_type in _FAISS_INDEX_TYPES:
         _require_faiss(index_type)
@@ -105,7 +111,12 @@ def load_index_from_spec(
     error semantics.
     """
     index_type = spec.index_type
-    if index_type in ("BRUTE_FORCE", "FLAT", "AUTOINDEX"):
+    if index_type in ("BRUTE_FORCE", "FLAT"):
+        return BruteForceIndex.load(path, spec.metric_type, dim)
+    if index_type == "AUTOINDEX":
+        if _FAISS_AVAILABLE:
+            from litevecdb.index.faiss_hnsw import FaissHnswIndex
+            return FaissHnswIndex.load(path, spec.metric_type, dim)
         return BruteForceIndex.load(path, spec.metric_type, dim)
     if index_type in _FAISS_INDEX_TYPES:
         _require_faiss(index_type)

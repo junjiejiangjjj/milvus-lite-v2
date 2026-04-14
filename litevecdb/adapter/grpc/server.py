@@ -98,8 +98,17 @@ def start_server_in_thread(
     return server, db, bound_port
 
 
+_MAX_MESSAGE_SIZE = 256 * 1024 * 1024  # 256 MB, matching Milvus Standalone
+
+
 def _build_server(db: LiteVecDB, max_workers: int) -> grpc.Server:
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
+    server = grpc.server(
+        futures.ThreadPoolExecutor(max_workers=max_workers),
+        options=[
+            ("grpc.max_receive_message_length", _MAX_MESSAGE_SIZE),
+            ("grpc.max_send_message_length", _MAX_MESSAGE_SIZE),
+        ],
+    )
     servicer = MilvusServicer(db)
     milvus_pb2_grpc.add_MilvusServiceServicer_to_server(servicer, server)
     return server

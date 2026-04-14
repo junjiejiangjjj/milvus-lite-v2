@@ -428,12 +428,31 @@ class MemTable:
     # ── internal helpers ────────────────────────────────────────
 
     def _row_to_dict(self, batch: pa.RecordBatch, row_idx: int) -> dict:
-        """Extract one row as a dict, stripping _seq and _partition."""
+        """Extract one row as a dict, stripping _seq and _partition.
+
+        Dynamic fields stored in `$meta` are unpacked into the result.
+        """
         result = {}
+        meta_raw = None
         for name in batch.schema.names:
             if name in ("_seq", "_partition"):
                 continue
-            result[name] = batch.column(name)[row_idx].as_py()
+            val = batch.column(name)[row_idx].as_py()
+            if name == "$meta":
+                meta_raw = val
+            result[name] = val
+        # Unpack $meta JSON into top-level keys (keeps $meta for filters)
+        if meta_raw is not None:
+            import json
+            if isinstance(meta_raw, str):
+                try:
+                    meta = json.loads(meta_raw)
+                    if isinstance(meta, dict):
+                        result.update(meta)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            elif isinstance(meta_raw, dict):
+                result.update(meta_raw)
         return result
 
     def _validate_insert_schema(self, batch: pa.RecordBatch) -> None:

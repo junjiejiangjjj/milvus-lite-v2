@@ -112,12 +112,12 @@ def test_no_vector_field():
 
 
 def test_multiple_vector_fields():
-    with pytest.raises(SchemaValidationError, match="at most one FLOAT_VECTOR"):
-        validate_schema(CollectionSchema(fields=[
-            FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
-            FieldSchema(name="v1", dtype=DataType.FLOAT_VECTOR, dim=4),
-            FieldSchema(name="v2", dtype=DataType.FLOAT_VECTOR, dim=4),
-        ]))
+    """Multiple FLOAT_VECTOR fields are allowed (multi-vector support)."""
+    validate_schema(CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True),
+        FieldSchema(name="v1", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="v2", dtype=DataType.FLOAT_VECTOR, dim=4),
+    ]))
 
 
 @pytest.mark.parametrize("bad_dim", [None, 0, -1])

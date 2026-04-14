@@ -521,12 +521,25 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     f"no index on collection {request.collection_name!r}"
                 )
 
-            # Filter by field_name if requested.
-            if request.field_name:
-                spec = all_specs.get(request.field_name)
+            # Resolve field_name: try request.field_name first, then
+            # index_name (pymilvus sends field_name as index_name).
+            field_name = request.field_name
+            if not field_name and request.index_name:
+                # index_name might be the field_name directly, or
+                # "{field_name}_idx" convention
+                idx_name = request.index_name
+                if idx_name in all_specs:
+                    field_name = idx_name
+                elif idx_name.endswith("_idx"):
+                    candidate = idx_name[:-4]
+                    if candidate in all_specs:
+                        field_name = candidate
+
+            if field_name:
+                spec = all_specs.get(field_name)
                 if spec is None:
                     raise _INFE(
-                        f"no index on field {request.field_name!r} of "
+                        f"no index on field {field_name!r} of "
                         f"collection {request.collection_name!r}"
                     )
                 specs_to_report = [spec]
