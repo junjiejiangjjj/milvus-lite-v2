@@ -28,6 +28,7 @@ class FunctionType(IntEnum):
     """Function types that can be attached to a CollectionSchema."""
     BM25 = 1
     TEXT_EMBEDDING = 2
+    RERANK = 3
 
 
 @dataclass

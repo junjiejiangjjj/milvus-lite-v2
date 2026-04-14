@@ -195,6 +195,10 @@ class Collection:
         self._bm25_functions: List[Tuple[str, str, Any]] = []
         # _embedding_functions: list of (input_field_name, output_field_name, EmbeddingProvider)
         self._embedding_functions: List[Tuple[str, str, Any]] = []
+        # _rerank_functions: list of (input_field_name, RerankProvider) — semantic rerankers
+        self._rerank_functions: List[Tuple[str, Any]] = []
+        # _decay_functions: list of (input_field_name, DecayReranker) — decay rerankers
+        self._decay_functions: List[Tuple[str, Any]] = []
         if schema.functions:
             from litevecdb.analyzer.factory import create_analyzer
             field_by_name = {f.name: f for f in schema.fields}
@@ -211,6 +215,23 @@ class Collection:
                     out_name = func.output_field_names[0]
                     provider = create_embedding_provider(func.params)
                     self._embedding_functions.append((in_name, out_name, provider))
+                elif func.function_type == FunctionType.RERANK:
+                    in_name = func.input_field_names[0]
+                    reranker_type = func.params.get("reranker", "").lower()
+                    if reranker_type == "decay":
+                        from litevecdb.rerank.decay import DecayReranker
+                        dr = DecayReranker(
+                            function=func.params["function"],
+                            origin=func.params["origin"],
+                            scale=func.params["scale"],
+                            offset=func.params.get("offset", 0.0),
+                            decay=func.params.get("decay", 0.5),
+                        )
+                        self._decay_functions.append((in_name, dr))
+                    else:
+                        from litevecdb.rerank.factory import create_rerank_provider
+                        provider = create_rerank_provider(func.params)
+                        self._rerank_functions.append((in_name, provider))
 
     # ── public API ──────────────────────────────────────────────
 
@@ -440,6 +461,11 @@ class Collection:
 
         self._require_loaded()
 
+        # Save original query texts for reranking (before embedding)
+        _query_texts: Optional[List[str]] = None
+        if self._rerank_functions and query_vectors and isinstance(query_vectors[0], str):
+            _query_texts = list(query_vectors)
+
         # Validate group_by_field
         if group_by_field is not None:
             gf = next((f for f in self._schema.fields if f.name == group_by_field), None)
@@ -467,6 +493,22 @@ class Collection:
         # Resolve the target vector field
         vector_field = self._resolve_anns_field(anns_field)
         field_schema = next(f for f in self._schema.fields if f.name == vector_field)
+
+        # If reranking is active, ensure the rerank input field is fetched
+        _rerank_field_injected = False
+        if _query_texts is not None:
+            rerank_in_name = self._rerank_functions[0][0]
+            if output_fields is not None and rerank_in_name not in output_fields:
+                output_fields = list(output_fields) + [rerank_in_name]
+                _rerank_field_injected = True
+
+        # If decay reranking is active, ensure the decay input field is fetched
+        _decay_field_injected = False
+        if self._decay_functions:
+            decay_in_name = self._decay_functions[0][0]
+            if output_fields is not None and decay_in_name not in output_fields:
+                output_fields = list(output_fields) + [decay_in_name]
+                _decay_field_injected = True
 
         if field_schema.dtype == DataType.SPARSE_FLOAT_VECTOR:
             raw_results = self._search_sparse(
@@ -508,6 +550,22 @@ class Collection:
                 metric_type=metric_type,
             )
 
+        # Apply reranking (after range_filter, before group_by)
+        _scores_replaced = False
+        if _query_texts is not None:
+            raw_results = self._apply_rerank(
+                raw_results, _query_texts, _rerank_field_injected,
+            )
+            _scores_replaced = True
+
+        # Apply decay reranking
+        if self._decay_functions:
+            raw_results = self._apply_decay(
+                raw_results, metric_type, _decay_field_injected,
+                _scores_replaced,
+            )
+            _scores_replaced = True
+
         # Apply group_by post-processing
         if group_by_field is not None:
             raw_results = _apply_group_by(
@@ -521,7 +579,8 @@ class Collection:
 
         # Convert IP distances to Milvus convention (positive = more similar).
         # Internally we use -dot for sorting; Milvus returns raw dot product.
-        if metric_type == "IP":
+        # Skip if scores were already replaced by reranking.
+        if metric_type == "IP" and not _scores_replaced:
             for hits in raw_results:
                 for hit in hits:
                     hit["distance"] = -hit["distance"]
@@ -764,6 +823,100 @@ class Collection:
             else:
                 embedded.append(qv)
         return embedded
+
+    def _apply_rerank(
+        self,
+        raw_results: List[List[dict]],
+        query_texts: List[str],
+        strip_rerank_field: bool,
+    ) -> List[List[dict]]:
+        """Re-score search results using the RERANK function provider.
+
+        For each query, extracts the rerank input field text from each hit's
+        entity, calls the reranker, and re-orders hits by relevance_score.
+
+        Args:
+            raw_results: per-query hit lists from the vector search.
+            query_texts: original query strings (one per query).
+            strip_rerank_field: if True, remove the rerank input field from
+                entity dicts (it was injected internally, user didn't ask for it).
+        """
+        in_name, provider = self._rerank_functions[0]
+
+        reranked_results: List[List[dict]] = []
+        for qi, hits in enumerate(raw_results):
+            if not hits:
+                reranked_results.append(hits)
+                continue
+
+            query_text = query_texts[qi]
+
+            # Extract document texts from hits; fall back to "" for missing
+            doc_texts = [
+                hit.get("entity", {}).get(in_name, "") or ""
+                for hit in hits
+            ]
+
+            rr = provider.rerank(query_text, doc_texts, top_n=len(hits))
+
+            # Rebuild hits in reranked order with reranker score
+            new_hits = []
+            for r in rr:
+                hit = hits[r.index]
+                hit["distance"] = r.relevance_score
+                new_hits.append(hit)
+            reranked_results.append(new_hits)
+
+            # Strip rerank input field from entity if we injected it
+            if strip_rerank_field:
+                for hit in new_hits:
+                    hit.get("entity", {}).pop(in_name, None)
+
+        return reranked_results
+
+    def _apply_decay(
+        self,
+        raw_results: List[List[dict]],
+        metric_type: str,
+        strip_decay_field: bool,
+        scores_already_replaced: bool,
+    ) -> List[List[dict]]:
+        """Apply decay reranking based on a numeric field's proximity to origin.
+
+        For each hit, computes a decay factor from the numeric field value,
+        multiplies it with the vector relevance score, and re-sorts.
+        """
+        in_name, reranker = self._decay_functions[0]
+
+        decayed_results: List[List[dict]] = []
+        for hits in raw_results:
+            if not hits:
+                decayed_results.append(hits)
+                continue
+
+            for hit in hits:
+                field_val = hit.get("entity", {}).get(in_name)
+                if field_val is None:
+                    hit["distance"] = 0.0
+                    continue
+                factor = reranker.compute_factor(float(field_val))
+                if scores_already_replaced:
+                    # distance is already a relevance score (higher = better)
+                    hit["distance"] = hit["distance"] * factor
+                else:
+                    score = _distance_to_score(hit["distance"], metric_type)
+                    hit["distance"] = score * factor
+
+            # Sort by final score descending (higher = better)
+            hits.sort(key=lambda h: h["distance"], reverse=True)
+
+            if strip_decay_field:
+                for hit in hits:
+                    hit.get("entity", {}).pop(in_name, None)
+
+            decayed_results.append(hits)
+
+        return decayed_results
 
     def _prepare_sparse_queries(self, query_vectors: List) -> List[Dict[int, float]]:
         """Convert query vectors to sparse dicts (text → tokenize → TF)."""
@@ -1673,6 +1826,23 @@ def _apply_group_by(
         out.append(flattened)
 
     return out
+
+
+def _distance_to_score(distance: float, metric_type: str) -> float:
+    """Convert internal distance to a relevance score (higher = better).
+
+    Internal distances are always "lower = better":
+    - COSINE: 1 - cosine_similarity (range [0, 2])
+    - L2: L2 distance (range [0, ∞))
+    - IP: -dot_product (negated for internal sorting)
+    """
+    if metric_type == "COSINE":
+        return 1.0 - distance  # cosine similarity
+    elif metric_type == "IP":
+        return -distance  # raw dot product
+    elif metric_type == "L2":
+        return 1.0 / (1.0 + distance)
+    return 1.0 - distance  # fallback
 
 
 def _apply_range_filter(

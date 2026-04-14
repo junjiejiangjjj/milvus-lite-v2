@@ -18,7 +18,7 @@ Milvus Lite v2 is the next-generation lightweight version of [Milvus](https://gi
 
 The original milvus-lite wraps the full C++ Milvus core via CGo bindings, inheriting its heavy build chain, platform restrictions (no Windows, no Alpine), and opaque debugging experience. Milvus Lite v2 takes a different approach: a clean-room Python implementation with an LSM-tree storage engine, delivering the same pymilvus-compatible API in a package that is easy to install, inspect, and extend.
 
-This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 1560 test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
+This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 1660+ test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
 
 ### Why replace milvus-lite?
 
@@ -50,6 +50,8 @@ Default install includes FAISS (HNSW/IVF_FLAT indexes), pymilvus, and gRPC — e
 > pip uninstall milvus-lite -y
 > pip install litevecdb
 > ```
+
+> **Important:** `.db` files created by milvus-lite v1 are **not compatible** with Milvus Lite v2. The v1 storage format uses SQLite + C++ internal structures, while v2 uses a completely different LSM-tree engine (WAL + Parquet). You must re-import your data into a new v2 database — there is no automatic migration.
 
 For development:
 
@@ -107,7 +109,7 @@ client.delete("demo", ids=[0, 1, 2])
 client.drop_collection("demo")
 ```
 
-This is a **drop-in replacement** for milvus-lite — just `pip install litevecdb[faiss,grpc]` and your existing `MilvusClient("./xxx.db")` code works without changes.
+This is a **drop-in replacement** for milvus-lite — just `pip install litevecdb` and your existing `MilvusClient("./xxx.db")` code works without changes.
 
 ### Option 2: Standalone gRPC server
 
@@ -210,6 +212,89 @@ results = client.hybrid_search(
 )
 ```
 
+## Text Embedding (Auto text-to-vector)
+
+Define a `TEXT_EMBEDDING` function to auto-generate dense vectors from text fields during insert, and auto-embed text queries during search:
+
+```python
+from litevecdb import LiteVecDB, CollectionSchema, FieldSchema, DataType, Function, FunctionType
+
+schema = CollectionSchema(fields=[
+    FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+    FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
+    FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=1536, is_function_output=True),
+], functions=[
+    Function(
+        name="text_emb", function_type=FunctionType.TEXT_EMBEDDING,
+        input_field_names=["text"], output_field_names=["vec"],
+        params={"provider": "openai", "model_name": "text-embedding-3-small"},
+    ),
+])
+
+with LiteVecDB("./data") as db:
+    col = db.create_collection("docs", schema)
+
+    # Insert text only — vectors are auto-generated via OpenAI API
+    col.insert([
+        {"text": "machine learning algorithms"},
+        {"text": "deep learning neural networks"},
+        {"text": "web development frameworks"},
+    ])
+    col.create_index("vec", {"index_type": "HNSW", "metric_type": "COSINE",
+                              "params": {"M": 16, "efConstruction": 200}})
+    col.load()
+
+    # Search with text — query is auto-embedded
+    results = col.search(
+        query_vectors=["machine learning"],
+        top_k=3, metric_type="COSINE", anns_field="vec",
+        output_fields=["text"],
+    )
+```
+
+Requires `OPENAI_API_KEY` environment variable or `api_key` param. Uses `urllib` internally — no OpenAI SDK dependency.
+
+## Rerank
+
+### Semantic Rerank (Cohere)
+
+Add a `RERANK` function with an external provider to re-score search results using a cross-encoder model:
+
+```python
+from litevecdb import Function, FunctionType
+
+# Add to schema alongside TEXT_EMBEDDING
+Function(
+    name="my_reranker", function_type=FunctionType.RERANK,
+    input_field_names=["text"], output_field_names=[],
+    params={"provider": "cohere", "model_name": "rerank-v3.5"},
+)
+```
+
+When searching with text queries, the engine first retrieves candidates via vector search, then calls the Cohere Rerank API to re-score by semantic relevance. Requires `COHERE_API_KEY` environment variable or `api_key` param.
+
+### Decay Rerank (Field-value based)
+
+Adjust search scores based on how close a numeric field is to a reference value. Three decay curves: `gauss`, `exp`, `linear`.
+
+```python
+Function(
+    name="recency_decay", function_type=FunctionType.RERANK,
+    input_field_names=["timestamp"],  # numeric field
+    output_field_names=[],
+    params={
+        "reranker": "decay",
+        "function": "gauss",   # or "exp", "linear"
+        "origin": 1700000000,  # reference value (e.g. current timestamp)
+        "scale": 86400,        # at this distance, score *= decay
+        "offset": 3600,        # safe zone (no penalty within +-offset)
+        "decay": 0.5,          # target factor at distance=scale
+    },
+)
+```
+
+Final score = `vector_relevance * decay_factor`. Items closer to `origin` rank higher. No external API call — pure local computation.
+
 ## Metadata Filtering
 
 ```python
@@ -250,6 +335,8 @@ client.query("col", filter="scores[0] > 90", limit=10)
 | Auto ID | `auto_id=True` on INT64 primary key |
 | Dynamic fields | `enable_dynamic_field=True` + `$meta["key"]` filtering |
 | BM25 | `Function(type=BM25)` auto-generates sparse vectors, per-segment inverted index |
+| Text Embedding | `Function(type=TEXT_EMBEDDING)` auto text-to-vector via OpenAI API (insert + search) |
+| Rerank | `Function(type=RERANK)` — semantic reranking (Cohere API) and decay reranking (gauss/exp/linear) |
 | Nullable fields | Nullable scalars and vectors |
 | gRPC | 25+ Milvus RPCs, pymilvus fully compatible |
 
@@ -260,7 +347,7 @@ client.query("col", filter="scores[0] > 90", limit=10)
 - **No authentication / RBAC**
 - **No partition key** — partition selection is explicit
 - **No binary / float16 / bfloat16 vectors**
-- **No IVF / quantized indexes** — only HNSW and flat
+- **No quantized indexes** — no PQ / SQ, only HNSW / IVF_FLAT / flat
 - **Per-segment BM25 IDF** — IDF statistics are segment-local, not global
 
 # Architecture
@@ -290,9 +377,16 @@ pymilvus client
 +------------------+    +---------------------+
 | index/           |    | analyzer/           |
 |   HNSW (FAISS),  |    |   Standard/Jieba,   |
-|   BruteForce,    |    |   BM25 sparse,      |
-|   SparseInverted |    |   term hash         |
-+------------------+    +---------------------+
+|   IVF_FLAT,      |    |   BM25 sparse,      |
+|   BruteForce,    |    |   term hash         |
+|   SparseInverted |    +---------------------+
++------------------+              |
+      |               +---------------------+
++------------------+  | embedding/          |
+| rerank/          |  |   OpenAI provider,  |
+|   Cohere API,    |  |   auto text→vector  |
+|   Decay (local)  |  +---------------------+
++------------------+
       |
 +---------------------------------------------------+
 | schema/  DataType, FieldSchema, Function,          |
@@ -309,7 +403,7 @@ This entire project — architecture design, implementation, test suite, documen
 The development process:
 1. **Design** — discuss architecture in natural language, produce design docs
 2. **Implement** — describe what to build, review and iterate on generated code
-3. **Test** — 1560 tests including recall validation and Milvus compatibility suites
+3. **Test** — 1660+ tests including recall validation and Milvus compatibility suites
 4. **Iterate** — fix bugs, optimize performance, add features — all through conversation
 
 No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human with a vision and an AI that codes.
@@ -317,7 +411,7 @@ No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human wit
 # Testing
 
 ```bash
-pytest                                  # 1560 tests
+pytest                                  # 1660+ tests
 pytest tests/adapter/ -k "grpc"         # gRPC integration tests
 pytest tests/index/test_index_differential.py  # recall validation
 pytest --cov=litevecdb                  # with coverage
