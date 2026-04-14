@@ -172,6 +172,42 @@ def _validate_function(func: Function, field_by_name: dict[str, FieldSchema]) ->
                 f"BM25 function {func.name!r} output field {out_name!r} must be "
                 f"SPARSE_FLOAT_VECTOR, got {out_field.dtype.name}"
             )
+    elif func.function_type == FunctionType.TEXT_EMBEDDING:
+        # Input: exactly one VARCHAR field
+        if len(func.input_field_names) != 1:
+            raise SchemaValidationError(
+                f"TEXT_EMBEDDING function {func.name!r} requires exactly one input field"
+            )
+        in_name = func.input_field_names[0]
+        in_field = field_by_name.get(in_name)
+        if in_field is None:
+            raise SchemaValidationError(
+                f"TEXT_EMBEDDING function {func.name!r} input field {in_name!r} "
+                f"not found in schema"
+            )
+        if in_field.dtype != DataType.VARCHAR:
+            raise SchemaValidationError(
+                f"TEXT_EMBEDDING function {func.name!r} input field {in_name!r} "
+                f"must be VARCHAR, got {in_field.dtype.name}"
+            )
+
+        # Output: exactly one FLOAT_VECTOR field
+        if len(func.output_field_names) != 1:
+            raise SchemaValidationError(
+                f"TEXT_EMBEDDING function {func.name!r} requires exactly one output field"
+            )
+        out_name = func.output_field_names[0]
+        out_field = field_by_name.get(out_name)
+        if out_field is None:
+            raise SchemaValidationError(
+                f"TEXT_EMBEDDING function {func.name!r} output field {out_name!r} "
+                f"not found in schema"
+            )
+        if out_field.dtype != DataType.FLOAT_VECTOR:
+            raise SchemaValidationError(
+                f"TEXT_EMBEDDING function {func.name!r} output field {out_name!r} "
+                f"must be FLOAT_VECTOR, got {out_field.dtype.name}"
+            )
     else:
         raise SchemaValidationError(
             f"unknown function type {func.function_type!r} for function {func.name!r}"

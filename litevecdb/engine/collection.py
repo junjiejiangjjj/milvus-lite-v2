@@ -193,6 +193,8 @@ class Collection:
         # can auto-generate sparse vector fields from text input.
         # _bm25_functions: list of (input_field_name, output_field_name, Analyzer)
         self._bm25_functions: List[Tuple[str, str, Any]] = []
+        # _embedding_functions: list of (input_field_name, output_field_name, EmbeddingProvider)
+        self._embedding_functions: List[Tuple[str, str, Any]] = []
         if schema.functions:
             from litevecdb.analyzer.factory import create_analyzer
             field_by_name = {f.name: f for f in schema.fields}
@@ -203,6 +205,12 @@ class Collection:
                     in_field = field_by_name[in_name]
                     analyzer = create_analyzer(in_field.analyzer_params)
                     self._bm25_functions.append((in_name, out_name, analyzer))
+                elif func.function_type == FunctionType.TEXT_EMBEDDING:
+                    from litevecdb.embedding.factory import create_embedding_provider
+                    in_name = func.input_field_names[0]
+                    out_name = func.output_field_names[0]
+                    provider = create_embedding_provider(func.params)
+                    self._embedding_functions.append((in_name, out_name, provider))
 
     # ── public API ──────────────────────────────────────────────
 
@@ -234,9 +242,11 @@ class Collection:
                 if self._pk_name not in r or r[self._pk_name] is None:
                     r[self._pk_name] = id_start + i
 
-        # 2. auto-generate BM25 function output fields
+        # 2. auto-generate function output fields
         if self._bm25_functions:
             self._apply_bm25_functions(records)
+        if self._embedding_functions:
+            self._apply_embedding_functions(records)
 
         # 3. validate every record up-front
         for r in records:
@@ -470,7 +480,8 @@ class Collection:
                 output_fields=output_fields,
             )
         else:
-            # Dense float vector search (existing path)
+            # Dense float vector search — auto-embed text queries if needed
+            query_vectors = self._maybe_embed_queries(query_vectors, vector_field)
             q_arr = np.asarray(query_vectors, dtype=np.float32)
             if q_arr.ndim != 2:
                 raise ValueError(
@@ -719,6 +730,33 @@ class Collection:
             results.append(hits)
 
         return results
+
+    def _maybe_embed_queries(self, query_vectors: List, vector_field: str) -> List:
+        """If query_vectors contains strings and this field has a TEXT_EMBEDDING
+        function, auto-embed them. Otherwise return as-is."""
+        if not query_vectors or not isinstance(query_vectors[0], str):
+            return query_vectors
+
+        # Find the embedding provider for this vector field
+        provider = None
+        for _in, out, prov in self._embedding_functions:
+            if out == vector_field:
+                provider = prov
+                break
+
+        if provider is None:
+            raise SchemaValidationError(
+                f"Text query on field {vector_field!r} requires a "
+                f"TEXT_EMBEDDING function targeting that field"
+            )
+
+        embedded = []
+        for qv in query_vectors:
+            if isinstance(qv, str):
+                embedded.append(provider.embed_query(qv))
+            else:
+                embedded.append(qv)
+        return embedded
 
     def _prepare_sparse_queries(self, query_vectors: List) -> List[Dict[int, float]]:
         """Convert query vectors to sparse dicts (text → tokenize → TF)."""
@@ -1412,6 +1450,31 @@ class Collection:
                 else:
                     term_ids = analyzer.analyze(text)
                     r[out_name] = compute_tf(term_ids)
+
+    # ── TEXT_EMBEDDING function auto-generation ─────────────────
+
+    def _apply_embedding_functions(self, records: List[dict]) -> None:
+        """Auto-generate dense vector fields for TEXT_EMBEDDING functions.
+
+        Calls the embedding provider's batch API to convert text inputs
+        into float vectors. Modifies *records* in place.
+        """
+        for in_name, out_name, provider in self._embedding_functions:
+            texts = []
+            indices = []
+            for i, r in enumerate(records):
+                text = r.get(in_name)
+                if text is not None and isinstance(text, str) and text:
+                    texts.append(text)
+                    indices.append(i)
+                else:
+                    # Nullable text → zero vector
+                    r[out_name] = [0.0] * provider.dimension
+
+            if texts:
+                vectors = provider.embed_documents(texts)
+                for idx, vec in zip(indices, vectors):
+                    records[idx][out_name] = vec
 
     # ── batch builders ──────────────────────────────────────────
 

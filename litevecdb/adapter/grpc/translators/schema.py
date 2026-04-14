@@ -240,6 +240,7 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
 
 _MILVUS_FUNCTION_TYPE_MAP = {
     1: FunctionType.BM25,
+    2: FunctionType.TEXT_EMBEDDING,
 }
 _LITEVECDB_FUNCTION_TYPE_MAP = {v: k for k, v in _MILVUS_FUNCTION_TYPE_MAP.items()}
 
