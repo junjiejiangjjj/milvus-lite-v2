@@ -56,8 +56,20 @@ For development:
 ```bash
 git clone https://github.com/junjiejiangjjj/milvus-lite-v2.git
 cd milvus-lite-v2
-pip install -e ".[dev]"
+make dev                    # create .venv + install with dev deps
+source .venv/bin/activate
 ```
+
+| Command | Description |
+|---|---|
+| `make dev` | Create virtual environment and install with dev dependencies |
+| `make install` | Create virtual environment and install (without dev deps) |
+| `make test` | Run tests (excludes benchmark) |
+| `make test-all` | Run all tests including benchmark |
+| `make benchmark` | Run performance benchmark only |
+| `make coverage` | Run tests with coverage report |
+| `make serve` | Start gRPC server on port 19530 |
+| `make clean` | Remove .venv, caches, build artifacts |
 
 # Quick Start
 
