@@ -20,9 +20,9 @@ dev: venv
 	$(BIN)/pip install --upgrade pip
 	$(BIN)/pip install -e ".[dev]"
 
-# Run tests (excludes benchmark)
+# Run tests (excludes benchmark, real-time output)
 test:
-	$(BIN)/pytest --tb=short -q
+	$(BIN)/pytest --tb=short -v
 
 # Run all tests including benchmark
 test-all:
