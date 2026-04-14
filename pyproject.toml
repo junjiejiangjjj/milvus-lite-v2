@@ -28,6 +28,9 @@ classifiers = [
 dependencies = [
     "pyarrow>=15.0",
     "numpy>=1.24",
+    "faiss-cpu>=1.7.4",
+    "pymilvus>=2.4",
+    "grpcio>=1.50",
 ]
 
 [project.urls]
@@ -39,25 +42,12 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
 ]
-faiss = [
-    # Phase 9.5: FAISS HNSW vector index. Without this, the engine
-    # falls back to BruteForceIndex (slower but functional). 1.7.4 is
-    # the first version with stable macOS arm64 wheels and
-    # SearchParametersHNSW(sel=...) support.
-    "faiss-cpu>=1.7.4",
-]
 chinese = [
     "jieba>=0.42",
 ]
-grpc = [
-    # Phase 10: gRPC adapter for pymilvus protocol compatibility.
-    # We import proto stubs from pymilvus.grpc_gen rather than
-    # generating our own — this guarantees wire compatibility with
-    # whichever pymilvus version is installed and tracks pymilvus
-    # protocol updates automatically.
-    "pymilvus>=2.4",
-    "grpcio>=1.50",
-]
+# Backwards-compat aliases (faiss + grpc are now in default dependencies)
+faiss = []
+grpc = []
 
 [project.scripts]
 # Phase 10: CLI entry for the gRPC server.
