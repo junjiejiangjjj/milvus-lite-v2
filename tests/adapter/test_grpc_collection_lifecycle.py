@@ -106,6 +106,29 @@ def test_list_collections_multiple_sorted(milvus_client):
 
 
 # ---------------------------------------------------------------------------
+# rename_collection (Issue #11)
+# ---------------------------------------------------------------------------
+
+def test_rename_collection(milvus_client):
+    milvus_client.create_collection("old_name", schema=_make_schema())
+    milvus_client.rename_collection("old_name", "new_name")
+    assert not milvus_client.has_collection("old_name")
+    assert milvus_client.has_collection("new_name")
+
+
+def test_rename_collection_preserves_data(milvus_client):
+    schema = _make_schema()
+    milvus_client.create_collection("src", schema=schema)
+    milvus_client.insert("src", [
+        {"id": 1, "vec": [1, 0, 0, 0], "title": "hello", "active": True},
+    ])
+    milvus_client.rename_collection("src", "dst")
+    results = milvus_client.query("dst", filter="id == 1", output_fields=["title"])
+    assert len(results) == 1
+    assert results[0]["title"] == "hello"
+
+
+# ---------------------------------------------------------------------------
 # describe_collection
 # ---------------------------------------------------------------------------
 

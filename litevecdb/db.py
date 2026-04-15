@@ -147,6 +147,33 @@ class LiteVecDB:
         col_dir = self._collection_dir(name)
         shutil.rmtree(col_dir, ignore_errors=False)
 
+    def rename_collection(self, old_name: str, new_name: str) -> None:
+        """Rename a collection on disk and in the cache."""
+        self._check_open()
+        if not self.has_collection(old_name):
+            raise CollectionNotFoundError(
+                f"collection {old_name!r} does not exist"
+            )
+        self._validate_name(new_name)
+        if self.has_collection(new_name):
+            raise CollectionAlreadyExistsError(
+                f"collection {new_name!r} already exists"
+            )
+
+        # Close the cached instance so WAL / file handles are released.
+        if old_name in self._collections:
+            self._collections[old_name].close()
+            del self._collections[old_name]
+
+        old_dir = self._collection_dir(old_name)
+        new_dir = self._collection_dir(new_name)
+        os.rename(old_dir, new_dir)
+
+        # Update collection_name inside schema.json.
+        schema_path = os.path.join(new_dir, SCHEMA_FILENAME)
+        _name, schema = load_schema(schema_path)
+        save_schema(schema, new_name, schema_path)
+
     def has_collection(self, name: str) -> bool:
         """True iff a Collection with this name exists on disk."""
         return os.path.exists(

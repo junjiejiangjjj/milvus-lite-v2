@@ -861,10 +861,14 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             )
 
     def RenameCollection(self, request, context):
-        return self._unimplemented(
-            context, "RenameCollection",
-            "collection renaming is not supported in LiteVecDB MVP",
-        )
+        try:
+            self._db.rename_collection(request.oldName, request.newName)
+            return common_pb2.Status(**success_status_kwargs())
+        except LiteVecDBError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("RenameCollection failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
 
     def CreateAlias(self, request, context):
         return self._unimplemented(context, "CreateAlias", "aliases are not in MVP scope")

@@ -79,13 +79,11 @@ def test_unimplemented_rpc_raises_clean_error(milvus_client):
     pymilvus exception that wraps gRPC's UNIMPLEMENTED status, NOT
     crash the connection or silent-fail.
 
-    We use ``rename_collection`` because it's intentionally
-    UNIMPLEMENTED in Phase 10 — schema mutations aren't in scope.
-    Most other "destructive" RPCs are also still unimplemented as
-    of Phase 10.2."""
+    We use ``create_alias`` because it's intentionally
+    UNIMPLEMENTED — aliases are not in MVP scope."""
     with pytest.raises(Exception) as exc_info:
-        milvus_client.rename_collection("a", "b")
-    assert "implement" in str(exc_info.value).lower()
+        milvus_client.create_alias("col", "alias")
+    assert "implement" in str(exc_info.value).lower() or "not support" in str(exc_info.value).lower()
 
 
 def test_connection_survives_unimplemented_call(grpc_server, milvus_client):
@@ -95,7 +93,7 @@ def test_connection_survives_unimplemented_call(grpc_server, milvus_client):
 
     # Trigger an UNIMPLEMENTED error via a still-unimplemented RPC
     with pytest.raises(Exception):
-        milvus_client.rename_collection("a", "b")
+        milvus_client.create_alias("col", "alias")
 
     # Connection-level RPCs should still work on a fresh connection
     from pymilvus import connections, utility

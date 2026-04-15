@@ -141,6 +141,40 @@ def test_list_collections_empty(db):
 
 
 # ---------------------------------------------------------------------------
+# rename_collection (Issue #11)
+# ---------------------------------------------------------------------------
+
+def test_rename_collection(db, schema):
+    col = db.create_collection("old_name", schema)
+    col.insert([{"id": "a", "vec": [1, 0, 0, 0]}])
+    db.rename_collection("old_name", "new_name")
+    assert not db.has_collection("old_name")
+    assert db.has_collection("new_name")
+    # Data survives rename
+    col2 = db.get_collection("new_name")
+    col2.load()
+    assert col2.num_entities == 1
+
+
+def test_rename_nonexistent_raises(db):
+    with pytest.raises(CollectionNotFoundError):
+        db.rename_collection("ghost", "new")
+
+
+def test_rename_to_existing_raises(db, schema):
+    db.create_collection("a", schema)
+    db.create_collection("b", schema)
+    with pytest.raises(CollectionAlreadyExistsError):
+        db.rename_collection("a", "b")
+
+
+def test_rename_invalid_name_raises(db, schema):
+    db.create_collection("src", schema)
+    with pytest.raises(ValueError):
+        db.rename_collection("src", "")
+
+
+# ---------------------------------------------------------------------------
 # get_collection_stats (Phase 9.1.4)
 # ---------------------------------------------------------------------------
 

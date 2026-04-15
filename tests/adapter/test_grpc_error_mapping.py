@@ -89,11 +89,11 @@ def test_search_before_load_reports_not_loaded(milvus_client):
 # UNIMPLEMENTED stubs: friendly messages
 # ---------------------------------------------------------------------------
 
-def test_rename_collection_unimplemented(milvus_client):
+def test_rename_nonexistent_reports_not_found(milvus_client):
+    """Renaming a non-existent collection should report an error."""
     with pytest.raises(Exception) as exc_info:
-        milvus_client.rename_collection("a", "b")
-    msg = str(exc_info.value).lower()
-    assert "not support" in msg or "implement" in msg
+        milvus_client.rename_collection("ghost", "new")
+    assert "not exist" in str(exc_info.value).lower() or "does not exist" in str(exc_info.value).lower()
 
 
 def test_hybrid_search_unimplemented(milvus_client):
