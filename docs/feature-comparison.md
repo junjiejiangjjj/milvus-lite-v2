@@ -93,7 +93,7 @@
 | Schema functions (BM25) | Y | Y |
 | Schema functions (TEXT_EMBEDDING) | Y | Y |
 | Schema functions (RERANK) | Y | Y |
-| Partition key | - | Y |
+| Partition key | Y (auto-bucket routing) | Y |
 | Clustering key | - | Y |
 | Field-level analyzer config | Y | Y |
 
