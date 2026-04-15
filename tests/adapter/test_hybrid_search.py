@@ -286,3 +286,71 @@ def test_hybrid_single_route_same_as_search(milvus_client):
     assert plain_ids == hybrid_ids
 
     milvus_client.drop_collection(name)
+
+
+# ---------------------------------------------------------------------------
+# Issue #15 — BM25 sparse sub-request without explicit metric_type
+# ---------------------------------------------------------------------------
+
+def _create_hybrid_with_indexes(client, name):
+    """Collection with dense + BM25 sparse, both indexed."""
+    schema = MilvusClient.create_schema(auto_id=False)
+    schema.add_field("id", DataType.INT64, is_primary=True)
+    schema.add_field("text", DataType.VARCHAR, max_length=65535,
+                     enable_analyzer=True,
+                     analyzer_params={"tokenizer": "standard"})
+    schema.add_field("dense", DataType.FLOAT_VECTOR, dim=4)
+    schema.add_field("bm25_emb", DataType.SPARSE_FLOAT_VECTOR)
+    schema.add_function(Function(
+        name="bm25_fn",
+        function_type=FunctionType.BM25,
+        input_field_names=["text"],
+        output_field_names=["bm25_emb"],
+    ))
+
+    idx = client.prepare_index_params()
+    idx.add_index(field_name="dense", index_type="BRUTE_FORCE",
+                  metric_type="COSINE", params={})
+    idx.add_index(field_name="bm25_emb", index_type="SPARSE_INVERTED_INDEX",
+                  metric_type="BM25", params={})
+
+    client.create_collection(name, schema=schema, index_params=idx)
+    client.insert(name, [
+        {"id": 1, "text": "python programming language",
+         "dense": [1.0, 0.0, 0.0, 0.0]},
+        {"id": 2, "text": "machine learning algorithms",
+         "dense": [0.0, 0.0, 1.0, 0.0]},
+    ])
+    client.load_collection(name)
+    return name
+
+
+def test_hybrid_bm25_no_explicit_metric(milvus_client):
+    """Issue #15: sparse sub-request with param={} should auto-resolve
+    metric_type from the field's index spec (BM25)."""
+    name = _create_hybrid_with_indexes(milvus_client, "hybrid_issue15")
+
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        anns_field="dense",
+        param={},  # no explicit metric_type
+        limit=5,
+    )
+    sparse_req = AnnSearchRequest(
+        data=["machine learning"],
+        anns_field="bm25_emb",
+        param={},  # no explicit metric_type — must auto-resolve to BM25
+        limit=5,
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[sparse_req, dense_req],
+        ranker=RRFRanker(k=60),
+        limit=5,
+        output_fields=["text"],
+    )
+
+    assert len(results) == 1
+    assert len(results[0]) > 0
+    milvus_client.drop_collection(name)

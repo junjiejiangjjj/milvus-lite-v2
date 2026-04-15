@@ -170,6 +170,13 @@ def test_describe_index_state_is_finished(populated):
     assert "Finished" in str(desc.get("state", ""))
 
 
+def test_describe_index_name_matches_field_name(populated):
+    """Issue #16: pymilvus search_iterator v1 matches index_name against
+    anns_field to extract metric_type. index_name must equal field_name."""
+    desc = populated.describe_index("demo", "vec")
+    assert desc["index_name"] == "vec"
+
+
 def test_describe_index_empty_when_no_index(milvus_client):
     milvus_client.create_collection("demo", schema=_make_schema())
     desc = milvus_client.describe_index("demo", "vec")

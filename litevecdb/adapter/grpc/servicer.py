@@ -56,6 +56,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _extract_anns_field(sub_req) -> str | None:
+    """Extract anns_field from a sub-SearchRequest's search_params."""
+    import json as _json
+    for kv in sub_req.search_params:
+        if kv.key == "anns_field":
+            try:
+                v = _json.loads(kv.value)
+            except (ValueError, _json.JSONDecodeError):
+                v = kv.value
+            return v if isinstance(v, str) and v else None
+    return None
+
+
 class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
     """Maps Milvus RPCs onto LiteVecDB engine calls.
 
@@ -549,7 +562,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             num_ent = col.num_entities
             descriptions = [
                 milvus_pb2.IndexDescription(
-                    index_name=f"{s.field_name}_idx",
+                    index_name=s.field_name,
                     field_name=s.field_name,
                     params=index_spec_to_kv_pairs(s),
                     state=common_pb2.IndexState.Finished,
@@ -794,8 +807,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             from litevecdb.adapter.grpc.reranker import parse_rank_params, rerank
 
             col = self._db.get_collection(request.collection_name)
-            first_spec = next(iter(col._index_specs.values()), None) if col._index_specs else None  # noqa: SLF001
-            default_metric = first_spec.metric_type if first_spec else "COSINE"
+            all_specs = col._index_specs or {}  # noqa: SLF001
 
             # Parse rank_params
             rp = parse_rank_params(request.rank_params)
@@ -803,7 +815,16 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             # Execute each sub-request independently
             all_results = []
             for sub_req in request.requests:
-                parsed = parse_search_request(sub_req, default_metric_type=default_metric)
+                # Resolve per-field default metric from the field's own
+                # index spec so BM25 sparse and COSINE dense sub-requests
+                # each get the correct metric.
+                sub_anns = _extract_anns_field(sub_req)
+                if sub_anns and sub_anns in all_specs:
+                    sub_default_metric = all_specs[sub_anns].metric_type
+                else:
+                    first_spec = next(iter(all_specs.values()), None)
+                    sub_default_metric = first_spec.metric_type if first_spec else "COSINE"
+                parsed = parse_search_request(sub_req, default_metric_type=sub_default_metric)
                 results = col.search(
                     query_vectors=parsed["query_vectors"],
                     top_k=parsed["top_k"],
