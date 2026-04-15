@@ -121,7 +121,8 @@ class Collection:
         self._data_dir = data_dir
         self._schema = schema
         self._pk_name = get_primary_field(schema).name
-        self._vector_name = get_vector_field(schema).name
+        _vf = get_vector_field(schema)
+        self._vector_name: Optional[str] = _vf.name if _vf is not None else None
 
         self._wal_data_schema = build_wal_data_schema(schema)
         self._wal_delta_schema = build_wal_delta_schema(schema)
@@ -594,6 +595,13 @@ class Collection:
         Validates that the field exists and is a vector type.
         """
         if anns_field is None:
+            if self._vector_name is None:
+                # Sparse-only collection — caller must specify anns_field
+                # explicitly (e.g. the sparse vector field name).
+                raise SchemaValidationError(
+                    "collection has no FLOAT_VECTOR field; "
+                    "specify anns_field explicitly for sparse search"
+                )
             return self._vector_name
 
         field = next((f for f in self._schema.fields if f.name == anns_field), None)

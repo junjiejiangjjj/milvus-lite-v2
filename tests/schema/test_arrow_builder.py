@@ -74,8 +74,7 @@ def test_get_vector_field_missing():
     schema = CollectionSchema(fields=[
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
     ])
-    with pytest.raises(ValueError, match="no vector"):
-        get_vector_field(schema)
+    assert get_vector_field(schema) is None
 
 
 # ---------------------------------------------------------------------------

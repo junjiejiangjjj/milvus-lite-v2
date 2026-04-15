@@ -394,20 +394,18 @@ def test_build_wal_data_schema_with_sparse():
 
 
 def test_get_vector_field_sparse_only():
-    """get_vector_field falls back to SPARSE_FLOAT_VECTOR when no FLOAT_VECTOR."""
+    """get_vector_field returns None when only SPARSE_FLOAT_VECTOR exists."""
     schema = CollectionSchema(
         fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="sv", dtype=DataType.SPARSE_FLOAT_VECTOR),
         ],
     )
-    vf = get_vector_field(schema)
-    assert vf.name == "sv"
-    assert vf.dtype == DataType.SPARSE_FLOAT_VECTOR
+    assert get_vector_field(schema) is None
 
 
 def test_get_vector_field_prefers_float():
-    """get_vector_field prefers FLOAT_VECTOR over SPARSE_FLOAT_VECTOR."""
+    """get_vector_field returns FLOAT_VECTOR, ignoring SPARSE_FLOAT_VECTOR."""
     schema = CollectionSchema(
         fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),

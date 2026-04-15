@@ -184,7 +184,7 @@ class MemTable:
 
     def to_search_arrays(
         self,
-        vector_field: str,
+        vector_field: Optional[str],
         partition_names: Optional[List[str]] = None,
     ) -> Tuple[List[Any], "np.ndarray", "np.ndarray", List[Tuple[Any, int]]]:
         """Walk _pk_index and emit (pks, seqs, vectors, row_refs) for search.
@@ -217,7 +217,8 @@ class MemTable:
                     continue
             pks.append(pk)
             seqs.append(seq)
-            vecs.append(batch.column(vector_field)[row_idx].as_py())
+            if vector_field is not None:
+                vecs.append(batch.column(vector_field)[row_idx].as_py())
             row_refs.append((batch_idx, row_idx))
 
         seqs_arr = np.asarray(seqs, dtype=np.uint64)

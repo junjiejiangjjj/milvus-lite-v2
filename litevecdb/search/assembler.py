@@ -28,7 +28,7 @@ RecordSource = Tuple[Any, int]  # (segment_or_memtable, row_index)
 def assemble_candidates(
     segments: Iterable["Segment"],
     memtable: "MemTable",
-    vector_field: str,
+    vector_field: Optional[str],
     partition_names: Optional[List[str]] = None,
     filter_compiled: Optional["CompiledExpr"] = None,
 ) -> Tuple[List[Any], np.ndarray, np.ndarray, List[RecordSource], Optional[np.ndarray]]:

@@ -104,18 +104,27 @@ class Segment:
         file_path: str,
         partition: str,
         pk_field: str,
-        vector_field: str,
+        vector_field: Optional[str],
     ) -> "Segment":
-        """Load a Parquet file from *file_path* into a Segment."""
+        """Load a Parquet file from *file_path* into a Segment.
+
+        *vector_field* may be ``None`` for sparse-only collections that
+        have no dense FLOAT_VECTOR column.  In that case ``vectors`` is
+        set to an empty (0, 0) array.
+        """
         table = read_data_file(file_path)
         pks = table.column(pk_field).to_pylist()
         seqs = np.asarray(table.column("_seq").to_pylist(), dtype=np.uint64)
-        vectors, null_mask = _extract_vector_array(table.column(vector_field))
+        if vector_field is not None:
+            vectors, null_mask = _extract_vector_array(table.column(vector_field))
+        else:
+            vectors = np.zeros((len(pks), 0), dtype=np.float32)
+            null_mask = None
         return cls(
             file_path=file_path,
             partition=partition,
             pk_field=pk_field,
-            vector_field=vector_field,
+            vector_field=vector_field or "",
             pks=pks,
             seqs=seqs,
             vectors=vectors,

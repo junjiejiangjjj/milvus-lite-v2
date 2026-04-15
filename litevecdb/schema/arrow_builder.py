@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 import pyarrow as pa
 
 from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema, TYPE_MAP
@@ -21,15 +23,17 @@ def get_primary_field(schema: CollectionSchema) -> FieldSchema:
     raise ValueError("Schema has no primary key field")
 
 
-def get_vector_field(schema: CollectionSchema) -> FieldSchema:
-    """Return the first vector FieldSchema (FLOAT_VECTOR preferred)."""
+def get_vector_field(schema: CollectionSchema) -> Optional[FieldSchema]:
+    """Return the first dense vector FieldSchema, or None if none exists.
+
+    Only returns FLOAT_VECTOR fields.  SPARSE_FLOAT_VECTOR has a
+    completely different storage layout (pa.binary()) and must not be
+    treated as a dense vector column.
+    """
     for f in schema.fields:
         if f.dtype == DataType.FLOAT_VECTOR:
             return f
-    for f in schema.fields:
-        if f.dtype == DataType.SPARSE_FLOAT_VECTOR:
-            return f
-    raise ValueError("Schema has no vector field")
+    return None
 
 
 def _arrow_type(field: FieldSchema) -> pa.DataType:
