@@ -321,3 +321,45 @@ def test_separate_meta_is_deterministic():
     _, meta_a = separate_dynamic_fields(rec_a, schema)
     _, meta_b = separate_dynamic_fields(rec_b, schema)
     assert meta_a == meta_b
+
+
+# ---------------------------------------------------------------------------
+# validate_record — default_value filling (Issue #14)
+# ---------------------------------------------------------------------------
+
+def test_validate_record_fills_default_for_missing_field():
+    """Missing field with default_value should be filled, not rejected."""
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=2),
+        FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=32,
+                    default_value="active"),
+    ])
+    rec = {"id": 1, "vec": [0.1, 0.2]}
+    validate_record(rec, schema)  # should not raise
+    assert rec["status"] == "active"
+
+
+def test_validate_record_fills_default_for_none_value():
+    """Field explicitly set to None with default_value should be filled."""
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=2),
+        FieldSchema(name="count", dtype=DataType.INT64, default_value=0),
+    ])
+    rec = {"id": 1, "vec": [0.1, 0.2], "count": None}
+    validate_record(rec, schema)
+    assert rec["count"] == 0
+
+
+def test_validate_record_keeps_explicit_value_over_default():
+    """Explicit value should not be overwritten by default_value."""
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=2),
+        FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=32,
+                    default_value="active"),
+    ])
+    rec = {"id": 1, "vec": [0.1, 0.2], "status": "inactive"}
+    validate_record(rec, schema)
+    assert rec["status"] == "inactive"

@@ -348,6 +348,12 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
             f"record must be a dict, got {type(record).__name__}"
         )
 
+    # Fill default values for missing or None fields before validation.
+    for f in schema.fields:
+        if f.default_value is not None:
+            if f.name not in record or record[f.name] is None:
+                record[f.name] = f.default_value
+
     schema_field_names = {f.name for f in schema.fields}
     pk = _find_pk(schema)
     func_output_names = _function_output_field_names(schema)
