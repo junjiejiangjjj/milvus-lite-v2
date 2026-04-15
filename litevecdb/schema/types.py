@@ -62,6 +62,7 @@ class FieldSchema:
     analyzer_params: Optional[Dict[str, Any]] = None
     enable_match: bool = False
     is_function_output: bool = False
+    is_partition_key: bool = False
 
 
 @dataclass

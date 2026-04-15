@@ -29,7 +29,7 @@ Field-level params we preserve:
     nullable    (any field)
 
 Fields we IGNORE on incoming protos (Phase 10.2 has no engine support):
-    is_partition_key, is_clustering_key
+    is_clustering_key
 """
 
 from __future__ import annotations
@@ -239,6 +239,7 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
         analyzer_params=analyzer_params,
         enable_match=enable_match,
         is_function_output=bool(getattr(proto_field, 'is_function_output', False)),
+        is_partition_key=bool(getattr(proto_field, 'is_partition_key', False)),
     )
 
 
@@ -376,6 +377,8 @@ def litevecdb_to_milvus_schema(
             kv.value = _json.dumps(f.analyzer_params)
         if f.is_function_output:
             pf.is_function_output = True
+        if f.is_partition_key:
+            pf.is_partition_key = True
 
     # Encode functions
     for fn in schema.functions:

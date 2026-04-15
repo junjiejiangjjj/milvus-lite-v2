@@ -150,6 +150,8 @@ def _field_to_dict(f: FieldSchema) -> dict:
         d["enable_match"] = True
     if f.is_function_output:
         d["is_function_output"] = True
+    if f.is_partition_key:
+        d["is_partition_key"] = True
     return d
 
 
@@ -188,6 +190,7 @@ def _field_from_dict(d: Any, source: str) -> FieldSchema:
         analyzer_params=d.get("analyzer_params"),
         enable_match=bool(d.get("enable_match", False)),
         is_function_output=bool(d.get("is_function_output", False)),
+        is_partition_key=bool(d.get("is_partition_key", False)),
     )
 
 

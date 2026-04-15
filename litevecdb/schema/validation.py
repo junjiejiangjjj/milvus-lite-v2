@@ -116,6 +116,22 @@ def validate_schema(schema: CollectionSchema) -> None:
         raise SchemaValidationError(
             "schema has no vector field (FLOAT_VECTOR or SPARSE_FLOAT_VECTOR)"
         )
+
+    # Partition key validation
+    pk_key_fields = [f for f in schema.fields if f.is_partition_key]
+    if len(pk_key_fields) > 1:
+        names = [f.name for f in pk_key_fields]
+        raise SchemaValidationError(
+            f"at most one field can be partition key, got {names}"
+        )
+    if pk_key_fields:
+        pkf = pk_key_fields[0]
+        if pkf.dtype not in (DataType.INT64, DataType.VARCHAR):
+            raise SchemaValidationError(
+                f"partition key {pkf.name!r} must be INT64 or VARCHAR, "
+                f"got {pkf.dtype.name}"
+            )
+
     # Validate functions
     for func in schema.functions:
         _validate_function(func, field_by_name)

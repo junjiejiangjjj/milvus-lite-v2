@@ -17,6 +17,10 @@ WAL_DELTA_TEMPLATE = "wal_delta_{n:0{w}d}.arrow"
 DEFAULT_PARTITION = "_default"
 ALL_PARTITIONS = "_all"
 
+# ── Partition Key ──
+DEFAULT_NUM_PARTITIONS = 16
+PARTITION_KEY_BUCKET_PREFIX = "_pk_"
+
 # ── Filter expression cache ──
 # Per-Collection LRU cache for compiled filter expressions. Phase F2c.
 # Most search workloads reuse a small set of expression strings — 256

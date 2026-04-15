@@ -33,9 +33,11 @@ import pyarrow as pa
 
 from litevecdb.constants import (
     ALL_PARTITIONS,
+    DEFAULT_NUM_PARTITIONS,
     DEFAULT_PARTITION,
     FILTER_CACHE_SIZE,
     MEMTABLE_SIZE_LIMIT,
+    PARTITION_KEY_BUCKET_PREFIX,
 )
 from litevecdb.engine.compaction import CompactionManager
 from litevecdb.engine.flush import execute_flush
@@ -234,6 +236,20 @@ class Collection:
                         provider = create_rerank_provider(func.params)
                         self._rerank_functions.append((in_name, provider))
 
+        # ── 10. partition key (auto-bucket partitions) ──────────────
+        pk_key_field = next(
+            (f for f in schema.fields if f.is_partition_key), None
+        )
+        self._partition_key_field: Optional[str] = (
+            pk_key_field.name if pk_key_field else None
+        )
+        self._num_partition_buckets: int = DEFAULT_NUM_PARTITIONS
+        if self._partition_key_field is not None:
+            for i in range(self._num_partition_buckets):
+                bucket = f"{PARTITION_KEY_BUCKET_PREFIX}{i}"
+                if not self._manifest.has_partition(bucket):
+                    self._manifest.add_partition(bucket)
+
     # ── public API ──────────────────────────────────────────────
 
     def insert(
@@ -247,14 +263,15 @@ class Collection:
         on validation error). After WAL+MemTable apply, if the MemTable
         has hit MEMTABLE_SIZE_LIMIT, a synchronous flush runs before
         returning.
+
+        When ``is_partition_key`` is set on a schema field, records are
+        automatically routed to bucket partitions based on the hash of
+        that field's value. The caller's ``partition_name`` is ignored.
         """
         if not isinstance(records, list):
             raise TypeError(f"records must be a list, got {type(records).__name__}")
         if not records:
             return []
-
-        if not self._manifest.has_partition(partition_name):
-            raise PartitionNotFoundError(partition_name)
 
         # 1. auto-generate primary key IDs if auto_id is enabled
         if self._auto_id:
@@ -274,23 +291,61 @@ class Collection:
         for r in records:
             validate_record(r, self._schema)
 
-        # 4. allocate seqs
+        # 4. partition key routing
+        if self._partition_key_field is not None:
+            return self._insert_with_partition_key(records)
+
+        if not self._manifest.has_partition(partition_name):
+            raise PartitionNotFoundError(partition_name)
+
+        # 5. allocate seqs
         seq_start = self._next_seq
         self._next_seq += len(records)
         seqs = list(range(seq_start, seq_start + len(records)))
 
-        # 4. build wal_data RecordBatch
+        # 6. build wal_data RecordBatch
         batch = self._build_wal_data_batch(records, partition_name, seqs)
 
-        # 5. construct Operation and dispatch
+        # 7. construct Operation and dispatch
         op = InsertOp(partition=partition_name, batch=batch)
         self._apply(op)
 
-        # 6. trigger flush if we hit the size limit
+        # 8. trigger flush if we hit the size limit
         if self._memtable.size() >= MEMTABLE_SIZE_LIMIT:
             self._trigger_flush()
 
         return [r[self._pk_name] for r in records]
+
+    def _insert_with_partition_key(self, records: List[dict]) -> List[Any]:
+        """Route records to bucket partitions by hashing the partition key."""
+        import hashlib
+        field = self._partition_key_field
+        n = self._num_partition_buckets
+
+        # Group records by bucket
+        buckets: Dict[str, List[dict]] = {}
+        for r in records:
+            val = r.get(field)
+            # Hash: consistent bucket assignment
+            h = int(hashlib.md5(str(val).encode()).hexdigest(), 16) % n
+            bucket_name = f"{PARTITION_KEY_BUCKET_PREFIX}{h}"
+            buckets.setdefault(bucket_name, []).append(r)
+
+        # Insert each bucket's records
+        all_pks: List[Any] = []
+        for bucket_name, bucket_records in buckets.items():
+            seq_start = self._next_seq
+            self._next_seq += len(bucket_records)
+            seqs = list(range(seq_start, seq_start + len(bucket_records)))
+            batch = self._build_wal_data_batch(bucket_records, bucket_name, seqs)
+            op = InsertOp(partition=bucket_name, batch=batch)
+            self._apply(op)
+            all_pks.extend(r[self._pk_name] for r in bucket_records)
+
+        if self._memtable.size() >= MEMTABLE_SIZE_LIMIT:
+            self._trigger_flush()
+
+        return all_pks
 
     def upsert(
         self,
@@ -1164,6 +1219,11 @@ class Collection:
         - Creates the on-disk partition directory so flush can write
           into it later. The dir is empty at this point.
         """
+        if self._partition_key_field is not None:
+            raise SchemaValidationError(
+                "cannot create manual partitions when partition key is set "
+                f"(partition_key field: {self._partition_key_field!r})"
+            )
         self._manifest.add_partition(partition_name)
         self._manifest.save()
         partition_dir = os.path.join(
