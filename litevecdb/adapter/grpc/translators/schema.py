@@ -29,7 +29,7 @@ Field-level params we preserve:
     nullable    (any field)
 
 Fields we IGNORE on incoming protos (Phase 10.2 has no engine support):
-    autoID, is_partition_key, is_clustering_key, default_value, element_type
+    is_partition_key, is_clustering_key
 """
 
 from __future__ import annotations
@@ -221,6 +221,9 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
             except (ValueError, TypeError):
                 pass
 
+    # default_value
+    default_value = _decode_default_value(proto_field)
+
     return FieldSchema(
         name=proto_field.name,
         dtype=dtype,
@@ -231,11 +234,38 @@ def _decode_field(proto_field: schema_pb2.FieldSchema) -> FieldSchema:
         element_type=element_type,
         max_capacity=max_capacity,
         nullable=bool(proto_field.nullable),
+        default_value=default_value,
         enable_analyzer=enable_analyzer,
         analyzer_params=analyzer_params,
         enable_match=enable_match,
         is_function_output=bool(getattr(proto_field, 'is_function_output', False)),
     )
+
+
+def _decode_default_value(proto_field) -> object | None:
+    """Extract default_value from a proto FieldSchema, or None."""
+    dv = proto_field.default_value
+    which = dv.WhichOneof("data")
+    if which is None:
+        return None
+    return getattr(dv, which)
+
+
+def _encode_default_value(pf, dtype: DataType, value: object) -> None:
+    """Set default_value on a proto FieldSchema."""
+    vd = pf.default_value
+    if dtype == DataType.BOOL:
+        vd.bool_data = bool(value)
+    elif dtype in (DataType.INT8, DataType.INT16, DataType.INT32):
+        vd.int_data = int(value)
+    elif dtype == DataType.INT64:
+        vd.long_data = int(value)
+    elif dtype == DataType.FLOAT:
+        vd.float_data = float(value)
+    elif dtype == DataType.DOUBLE:
+        vd.double_data = float(value)
+    elif dtype == DataType.VARCHAR:
+        vd.string_data = str(value)
 
 
 _MILVUS_FUNCTION_TYPE_MAP = {
@@ -301,6 +331,8 @@ def litevecdb_to_milvus_schema(
         pf.is_primary_key = bool(f.is_primary)
         pf.autoID = bool(f.auto_id)
         pf.nullable = bool(f.nullable)
+        if f.default_value is not None:
+            _encode_default_value(pf, f.dtype, f.default_value)
 
         if f.dtype == DataType.FLOAT_VECTOR:
             if f.dim is None:

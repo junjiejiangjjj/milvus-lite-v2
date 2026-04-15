@@ -186,3 +186,69 @@ def test_encode_float_vector_without_dim_raises():
     object.__setattr__(schema.fields[1], "dim", None)
     with pytest.raises(SchemaValidationError, match="dim"):
         litevecdb_to_milvus_schema("x", schema)
+
+
+# ---------------------------------------------------------------------------
+# default_value round-trip (Issue #13)
+# ---------------------------------------------------------------------------
+
+def test_round_trip_default_value_varchar():
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=32,
+                    default_value="active"),
+    ])
+    proto = litevecdb_to_milvus_schema("dv", schema)
+    decoded = milvus_to_litevecdb_schema(proto)
+    by_name = {f.name: f for f in decoded.fields}
+    assert by_name["status"].default_value == "active"
+
+
+def test_round_trip_default_value_int64():
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="count", dtype=DataType.INT64, default_value=0),
+    ])
+    proto = litevecdb_to_milvus_schema("dv", schema)
+    decoded = milvus_to_litevecdb_schema(proto)
+    by_name = {f.name: f for f in decoded.fields}
+    assert by_name["count"].default_value == 0
+
+
+def test_round_trip_default_value_bool():
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="flag", dtype=DataType.BOOL, default_value=True),
+    ])
+    proto = litevecdb_to_milvus_schema("dv", schema)
+    decoded = milvus_to_litevecdb_schema(proto)
+    by_name = {f.name: f for f in decoded.fields}
+    assert by_name["flag"].default_value is True
+
+
+def test_round_trip_default_value_float():
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="score", dtype=DataType.FLOAT, default_value=0.5),
+    ])
+    proto = litevecdb_to_milvus_schema("dv", schema)
+    decoded = milvus_to_litevecdb_schema(proto)
+    by_name = {f.name: f for f in decoded.fields}
+    assert abs(by_name["score"].default_value - 0.5) < 1e-6
+
+
+def test_round_trip_no_default_value():
+    """Fields without default_value should decode to None."""
+    schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=64),
+    ])
+    proto = litevecdb_to_milvus_schema("dv", schema)
+    decoded = milvus_to_litevecdb_schema(proto)
+    by_name = {f.name: f for f in decoded.fields}
+    assert by_name["title"].default_value is None
