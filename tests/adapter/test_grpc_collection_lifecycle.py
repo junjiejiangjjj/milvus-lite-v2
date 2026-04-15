@@ -60,9 +60,9 @@ def test_create_collection_duplicate_raises(milvus_client):
     assert "already exists" in str(exc_info.value).lower()
 
 
-def test_drop_nonexistent_raises(milvus_client):
-    with pytest.raises(Exception):
-        milvus_client.drop_collection("ghost")
+def test_drop_nonexistent_is_idempotent(milvus_client):
+    """Dropping a non-existent collection should silently succeed (Milvus compat)."""
+    milvus_client.drop_collection("ghost")  # no error
 
 
 # ---------------------------------------------------------------------------

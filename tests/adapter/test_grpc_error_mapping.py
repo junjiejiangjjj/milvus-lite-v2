@@ -62,12 +62,9 @@ def test_unknown_exception_maps_to_unexpected():
 # Integration: pymilvus sees the right exceptions via gRPC
 # ---------------------------------------------------------------------------
 
-def test_drop_nonexistent_reports_collection_not_found(milvus_client):
-    """pymilvus should raise an exception mentioning "not exist"
-    when we drop a missing collection."""
-    with pytest.raises(Exception) as exc_info:
-        milvus_client.drop_collection("ghost")
-    assert "not exist" in str(exc_info.value).lower() or "does not exist" in str(exc_info.value).lower()
+def test_drop_nonexistent_is_idempotent(milvus_client):
+    """Dropping a non-existent collection should silently succeed (Milvus compat)."""
+    milvus_client.drop_collection("ghost")  # no error
 
 
 def test_search_before_load_reports_not_loaded(milvus_client):

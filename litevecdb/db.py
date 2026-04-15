@@ -133,12 +133,10 @@ class LiteVecDB:
         return col
 
     def drop_collection(self, name: str) -> None:
-        """Close and delete a Collection. Raises if it does not exist."""
+        """Close and delete a Collection. No-op if it does not exist."""
         self._check_open()
         if not self.has_collection(name):
-            raise CollectionNotFoundError(
-                f"collection {name!r} does not exist"
-            )
+            return
 
         # Close the cached instance first so its WAL writers release
         # any open file handles before we rmtree the directory.

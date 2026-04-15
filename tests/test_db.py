@@ -114,9 +114,9 @@ def test_drop_collection(db, schema):
     assert "docs" not in db.list_collections()
 
 
-def test_drop_nonexistent_raises(db):
-    with pytest.raises(CollectionNotFoundError):
-        db.drop_collection("ghost")
+def test_drop_nonexistent_is_idempotent(db):
+    """Dropping a non-existent collection should silently succeed (Milvus compat)."""
+    db.drop_collection("ghost")  # no error
 
 
 def test_drop_removes_data_dir(tmp_path, schema):
