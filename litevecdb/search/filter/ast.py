@@ -183,14 +183,17 @@ class MetaAccess:
 
 @dataclass(frozen=True)
 class JsonAccess:
-    """``field_name["key"]`` — JSON field nested value lookup.
+    """``field_name["key"]`` or ``field_name["a"]["b"]`` — JSON path lookup.
 
     Unlike MetaAccess (which is specifically for ``$meta["key"]``),
     JsonAccess works on any JSON-typed schema field. The result type
     is dynamic (not known until runtime). Forces python backend.
+
+    ``keys`` is a tuple of one or more string keys for chained access:
+    ``info["a"]["b"]`` → ``keys=("a", "b")``.
     """
     field_name: str
-    key: str
+    keys: Tuple[str, ...]
     pos: int
 
 

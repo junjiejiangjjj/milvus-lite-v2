@@ -307,9 +307,10 @@ class Parser:
         return TextMatchOp(field=field, query=query, pos=func_tok.pos)
 
     def _parse_bracket_access(self, ident_tok: Token) -> Expr:
-        """``field["key"]`` (JSON path) or ``field[N]`` (array index).
+        """``field["key"]``, ``field["a"]["b"]`` (JSON path) or ``field[N]`` (array index).
 
         The IDENT has already been consumed; we expect '[' (STRING|INT) ']'.
+        For string keys, chained bracket access is supported.
         """
         self._consume()  # '['
         key_tok = self._peek()
@@ -321,9 +322,27 @@ class Parser:
                     self.source, self._peek().pos,
                 )
             self._consume()
+            # Collect chained keys: field["a"]["b"]["c"]
+            keys = [key_tok.value]
+            while self._peek().kind == TokenKind.LBRACKET:
+                self._consume()  # '['
+                next_key = self._peek()
+                if next_key.kind != TokenKind.STRING:
+                    raise FilterParseError(
+                        "chained JSON access: expected string key",
+                        self.source, next_key.pos,
+                    )
+                self._consume()
+                if self._peek().kind != TokenKind.RBRACKET:
+                    raise FilterParseError(
+                        "chained JSON access: expected ']'",
+                        self.source, self._peek().pos,
+                    )
+                self._consume()
+                keys.append(next_key.value)
             return JsonAccess(
                 field_name=ident_tok.text,
-                key=key_tok.value,
+                keys=tuple(keys),
                 pos=ident_tok.pos,
             )
         if key_tok.kind == TokenKind.INT:

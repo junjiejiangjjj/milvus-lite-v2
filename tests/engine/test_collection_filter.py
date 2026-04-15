@@ -811,3 +811,92 @@ def test_filter_cache_meta_expression(col_dynamic):
     col_dynamic._compile_filter('$meta["category"] == "tech"')
     col_dynamic._compile_filter('$meta["category"] == "tech"')
     assert col_dynamic._filter_cache.hits == 1
+
+
+# ===========================================================================
+# Issue #17 — chained JSON path access (info["a"]["b"])
+# ===========================================================================
+
+@pytest.fixture
+def schema_json():
+    return CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+        FieldSchema(name="info", dtype=DataType.JSON),
+    ])
+
+
+@pytest.fixture
+def col_json(tmp_path, schema_json):
+    c = Collection("c", str(tmp_path / "d"), schema_json)
+    yield c
+    c.close()
+
+
+def _populate_json(col):
+    col.insert([
+        {"id": 1, "vec": [1, 0, 0, 0], "info": {"a": {"b": 1, "c": "x"}}},
+        {"id": 2, "vec": [0, 1, 0, 0], "info": {"a": {"b": 5, "c": "y"}}},
+        {"id": 3, "vec": [0, 0, 1, 0], "info": {"a": {"b": 10, "c": "z"}}},
+    ])
+
+
+def test_query_json_chained_access(col_json):
+    """info["a"]["b"] >= 5 should work."""
+    _populate_json(col_json)
+    col_json.load()
+    out = col_json.query('info["a"]["b"] >= 5')
+    ids = {r["id"] for r in out}
+    assert ids == {2, 3}
+
+
+def test_query_json_chained_string(col_json):
+    """info["a"]["c"] == 'z' should work."""
+    _populate_json(col_json)
+    col_json.load()
+    out = col_json.query('info["a"]["c"] == "z"')
+    ids = {r["id"] for r in out}
+    assert ids == {3}
+
+
+def test_query_json_single_level_still_works(col_json):
+    """info["a"] should still work (returns dict, compared dynamically)."""
+    _populate_json(col_json)
+    col_json.load()
+    # Single-level access still works
+    out = col_json.query('info["a"]["b"] > 0')
+    assert len(out) == 3
+
+
+def test_query_json_chained_after_flush(col_json):
+    """Chained JSON access works on flushed segments too."""
+    _populate_json(col_json)
+    col_json.flush()
+    col_json.load()
+    out = col_json.query('info["a"]["b"] >= 5')
+    ids = {r["id"] for r in out}
+    assert ids == {2, 3}
+
+
+def test_search_json_chained_filter(col_json):
+    """Chained JSON access works in search expr."""
+    _populate_json(col_json)
+    col_json.load()
+    results = col_json.search(
+        [[1, 0, 0, 0]], top_k=10, metric_type="L2",
+        expr='info["a"]["b"] >= 5',
+    )
+    ids = {h["id"] for h in results[0]}
+    assert ids == {2, 3}
+
+
+def test_query_json_three_levels(col_json):
+    """Three-level chained access: info["x"]["y"]["z"]."""
+    col_json.insert([
+        {"id": 10, "vec": [1, 0, 0, 0], "info": {"x": {"y": {"z": 42}}}},
+        {"id": 11, "vec": [0, 1, 0, 0], "info": {"x": {"y": {"z": 99}}}},
+    ])
+    col_json.load()
+    out = col_json.query('info["x"]["y"]["z"] > 50')
+    ids = {r["id"] for r in out}
+    assert ids == {11}

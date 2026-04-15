@@ -246,9 +246,13 @@ def _eval_row(node, row: dict) -> Any:
                 field_val = json.loads(field_val)
             except (json.JSONDecodeError, ValueError):
                 return None
-        if isinstance(field_val, dict):
-            return field_val.get(node.key)
-        return None
+        # Walk the keys tuple for chained access: info["a"]["b"]
+        for key in node.keys:
+            if isinstance(field_val, dict):
+                field_val = field_val.get(key)
+            else:
+                return None
+        return field_val
 
     # ── Phase 11.6: text_match ──────────────────────────────────
     if isinstance(node, TextMatchOp):
