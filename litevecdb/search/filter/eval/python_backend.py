@@ -153,7 +153,7 @@ def _eval_row(node, row: dict) -> Any:
     if isinstance(node, InOp):
         val = _eval_row(node.field, row)
         if val is None:
-            return False if node.negate else False
+            return None  # NULL propagation (Kleene logic)
         members = {el.value for el in node.values.elements}
         result = val in members
         return (not result) if node.negate else result

@@ -142,9 +142,9 @@ def _eval(node, table):
         # handles any int/float promotion.
         py_values = [el.value for el in node.values.elements]
         if not py_values:
-            # Empty list → never matches. Return all-false mask of the
-            # right length.
-            return pa.array([False] * len(col), type=pa.bool_())
+            # Empty list: `in []` → all False, `not in []` → all True.
+            val = node.negate  # False for `in`, True for `not in`
+            return pa.array([val] * len(col), type=pa.bool_())
         value_set = pa.array(py_values)
         result = pc.is_in(col, value_set=value_set)
         if node.negate:

@@ -259,7 +259,6 @@ class TestQuery:
         ids = {r["id"] for r in res}
         assert 0 not in ids and 1 not in ids
 
-    @pytest.mark.xfail(reason="not in [] with empty list not yet supported")
     def test_query_not_in_empty_returns_all(self, milvus_client):
         """not in [] returns all records."""
         _create_and_load(milvus_client, "q_notinall")
@@ -333,10 +332,14 @@ class TestQuery:
                                   output_fields=["title"])
         assert res[0]["title"] == "new"
 
-    @pytest.mark.xfail(reason="pymilvus may auto-load or handle unloaded state differently")
     def test_query_without_loading_raises(self, milvus_client):
+        """Collection with index but not loaded should reject query."""
         schema = _schema(dim=DIM)
-        milvus_client.create_collection("q_noload", schema=schema)
+        idx = milvus_client.prepare_index_params()
+        idx.add_index(field_name="vec", index_type="FLAT", metric_type="COSINE")
+        milvus_client.create_collection("q_noload", schema=schema,
+                                        index_params=idx)
+        milvus_client.release_collection("q_noload")
         with pytest.raises(Exception):
             milvus_client.query("q_noload", filter="id >= 0", limit=10)
 
