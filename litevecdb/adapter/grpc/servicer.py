@@ -221,15 +221,15 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             )
 
     def Upsert(self, request, context):
-        """Same engine call as Insert (LiteVecDB's insert is
-        upsert-by-pk). Returns upsert_cnt instead of insert_cnt."""
+        """Upsert with partial update — merges new fields onto existing
+        records so callers don't need to provide every field."""
         try:
             col = self._db.get_collection(request.collection_name)
             records = fields_data_to_records(
                 request.fields_data, request.num_rows
             )
             partition_name = request.partition_name or "_default"
-            upserted_pks = col.insert(records, partition_name=partition_name)
+            upserted_pks = col.upsert(records, partition_name=partition_name)
             return milvus_pb2.MutationResult(
                 status=common_pb2.Status(**success_status_kwargs()),
                 IDs=self._build_ids_proto(upserted_pks, col),

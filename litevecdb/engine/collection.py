@@ -292,6 +292,84 @@ class Collection:
 
         return [r[self._pk_name] for r in records]
 
+    def upsert(
+        self,
+        records: List[dict],
+        partition_name: str = DEFAULT_PARTITION,
+    ) -> List[Any]:
+        """Upsert with partial update support.
+
+        For each record whose pk already exists, reads the old record
+        and merges new fields onto it so callers don't need to provide
+        every field.  Records with new pks are inserted as-is (all
+        required fields must be present).
+
+        Returns the list of pks, same as insert().
+        """
+        if not isinstance(records, list):
+            raise TypeError(f"records must be a list, got {type(records).__name__}")
+        if not records:
+            return []
+
+        # Build merged records: for existing pks, fill missing fields
+        # from the old record.
+        merged: List[dict] = []
+        for rec in records:
+            pk = rec.get(self._pk_name)
+            if pk is None:
+                # No pk or auto_id — treat as a fresh insert
+                merged.append(rec)
+                continue
+
+            old = self._get_raw(pk)
+            if old is None:
+                merged.append(rec)
+                continue
+
+            # Merge: old record is the base, new record overrides
+            combined = dict(old)
+            combined.update(rec)
+            merged.append(combined)
+
+        return self.insert(merged, partition_name=partition_name)
+
+    def _get_raw(self, pk: Any) -> Optional[dict]:
+        """Internal point read for a single pk, bypassing load-state check.
+
+        Returns the record dict with dynamic fields unpacked and
+        internal columns (_seq, _partition, $meta) stripped, or None.
+        Used by upsert() to read old records for merging.
+        """
+        # 1. MemTable
+        rec = self._memtable.get(pk)
+        if rec is not None:
+            rec.pop("$meta", None)
+            return rec
+        if self._memtable.is_locally_deleted(pk):
+            return None
+
+        # 2. Segments
+        best_seq = -1
+        best_segment = None
+        best_row_idx = -1
+        for seg in self._segment_cache.values():
+            row_idx = seg.find_row(pk)
+            if row_idx is None:
+                continue
+            seq = int(seg.seqs[row_idx])
+            if seq > best_seq:
+                best_seq = seq
+                best_segment = seg
+                best_row_idx = row_idx
+
+        if best_segment is not None:
+            if not self._delta_index.is_deleted(pk, best_seq):
+                rec = best_segment.row_to_dict(best_row_idx)
+                rec.pop("$meta", None)
+                return rec
+
+        return None
+
     def delete(
         self,
         pks: List[Any],
