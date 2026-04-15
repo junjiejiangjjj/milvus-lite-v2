@@ -18,7 +18,7 @@ Milvus Lite v2 is the next-generation lightweight version of [Milvus](https://gi
 
 The original milvus-lite wraps the full C++ Milvus core via CGo bindings, inheriting its heavy build chain, platform restrictions (no Windows, no Alpine), and opaque debugging experience. Milvus Lite v2 takes a different approach: a clean-room Python implementation with an LSM-tree storage engine, delivering the same pymilvus-compatible API in a package that is easy to install, inspect, and extend.
 
-This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 1660+ test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
+This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 1700+ test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
 
 ### Why replace milvus-lite?
 
@@ -307,7 +307,8 @@ client.query("col", filter="category in ['tech', 'science']", limit=10)
 # String matching
 client.query("col", filter="name like 'John%'", limit=10)
 
-# Dynamic field ($meta)
+# Dynamic field (bare name or $meta["key"] syntax)
+client.query("col", filter='color == "red"', limit=10)
 client.query("col", filter='$meta["color"] == "red"', limit=10)
 
 # Text match (tokenized keyword search)
@@ -329,15 +330,17 @@ client.query("col", filter="scores[0] > 90", limit=10)
 | Scalar types | `INT8/16/32/64`, `FLOAT`, `DOUBLE`, `VARCHAR`, `BOOL`, `JSON`, `ARRAY` |
 | Search | Dense ANN, sparse BM25, hybrid (multi-vector + reranker), range search, group-by |
 | Filter | Comparison, logical, IN, LIKE, arithmetic, IS NULL, $meta, text_match, array ops |
-| CRUD | Insert (upsert), delete (by ID or filter), get, query, search |
+| CRUD | Insert, upsert (partial update), delete (by ID or filter), get, query, search |
 | Partitions | Create, drop, list, per-partition insert/search |
 | Pagination | `offset` parameter, query/search iterators |
 | Auto ID | `auto_id=True` on INT64 primary key |
-| Dynamic fields | `enable_dynamic_field=True` + `$meta["key"]` filtering |
+| Default values | `default_value` on schema fields, auto-filled on insert |
+| Dynamic fields | `enable_dynamic_field=True`, filter with bare field names or `$meta["key"]` |
 | BM25 | `Function(type=BM25)` auto-generates sparse vectors, per-segment inverted index |
 | Text Embedding | `Function(type=TEXT_EMBEDDING)` auto text-to-vector via OpenAI API (insert + search) |
 | Rerank | `Function(type=RERANK)` — semantic reranking (Cohere API) and decay reranking (gauss/exp/linear) |
 | Nullable fields | Nullable scalars and vectors |
+| Rename collection | `client.rename_collection("old", "new")` |
 | gRPC | 25+ Milvus RPCs, pymilvus fully compatible |
 
 # Known Limitations
@@ -403,7 +406,7 @@ This entire project — architecture design, implementation, test suite, documen
 The development process:
 1. **Design** — discuss architecture in natural language, produce design docs
 2. **Implement** — describe what to build, review and iterate on generated code
-3. **Test** — 1660+ tests including recall validation and Milvus compatibility suites
+3. **Test** — 1700+ tests including recall validation and Milvus compatibility suites
 4. **Iterate** — fix bugs, optimize performance, add features — all through conversation
 
 No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human with a vision and an AI that codes.
@@ -411,7 +414,7 @@ No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human wit
 # Testing
 
 ```bash
-pytest                                  # 1660+ tests
+pytest                                  # 1700+ tests
 pytest tests/adapter/ -k "grpc"         # gRPC integration tests
 pytest tests/index/test_index_differential.py  # recall validation
 pytest --cov=litevecdb                  # with coverage
