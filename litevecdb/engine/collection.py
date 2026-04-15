@@ -1250,6 +1250,11 @@ class Collection:
         because dropping a partition means there is no longer any
         live data row those tombstones could shadow.
         """
+        if self._partition_key_field is not None:
+            raise SchemaValidationError(
+                "cannot drop partitions when partition key is set "
+                f"(partition_key field: {self._partition_key_field!r})"
+            )
         # Validate first so we don't trigger an unnecessary flush.
         if not self._manifest.has_partition(partition_name):
             raise PartitionNotFoundError(partition_name)

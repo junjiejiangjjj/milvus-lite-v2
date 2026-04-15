@@ -103,11 +103,19 @@ def test_search_across_all_buckets(tmp_path, pk_schema):
     col.close()
 
 
-def test_manual_partition_blocked(tmp_path, pk_schema):
+def test_manual_create_partition_blocked(tmp_path, pk_schema):
     """Cannot create manual partitions when partition key is set."""
     col = Collection("test", str(tmp_path / "data"), pk_schema)
     with pytest.raises(SchemaValidationError, match="partition key"):
         col.create_partition("custom")
+    col.close()
+
+
+def test_manual_drop_partition_blocked(tmp_path, pk_schema):
+    """Cannot drop bucket partitions when partition key is set (issue #18)."""
+    col = Collection("test", str(tmp_path / "data"), pk_schema)
+    with pytest.raises(SchemaValidationError, match="partition key"):
+        col.drop_partition("_pk_0")
     col.close()
 
 
