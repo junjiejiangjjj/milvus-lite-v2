@@ -362,13 +362,13 @@ Benchmarked using the Cohere 100K dataset from [VectorDBBench](https://github.co
 | **Insert throughput** | 4,461 records/s |
 | **Index build** | 9.32s (HNSW) |
 | **Search QPS (nq=1)** | 48.6 |
-| **Search QPS (nq=10)** | 340.7 |
+| **Search VPS (nq=10)** | 340.7 |
 | **Search latency P50** | 20.36 ms |
 | **Search latency P95** | 21.22 ms |
 | **Search latency P99** | 27.62 ms |
 | **Recall@10** | **91.18%** |
 
-> As a pure-Python embedded vector database, LiteVecDB delivers solid search quality (91% recall) with stable latency (P50 to P95 gap is only ~1ms). Batch queries (nq=10) reach 340+ QPS thanks to FAISS HNSW batch processing.
+> As a pure-Python embedded vector database, LiteVecDB delivers solid search quality (91% recall) with stable latency (P50 to P95 gap is only ~1ms). Batch queries (nq=10) reach 340+ VPS (vectors per second) thanks to FAISS HNSW batch processing.
 
 # Known Limitations
 
