@@ -134,6 +134,76 @@ class CompiledExpr:
 
 
 # ---------------------------------------------------------------------------
+# Dynamic field rewriting
+# ---------------------------------------------------------------------------
+
+_RESERVED_FIELD_NAMES = frozenset({"_seq", "_partition", "$meta"})
+
+
+def _rewrite_dynamic_field_refs(
+    node: Expr,
+    schema_fields: Dict[str, FieldSchema],
+) -> Expr:
+    """Replace FieldRef nodes for unknown fields with MetaAccess nodes.
+
+    When ``enable_dynamic_field=True``, a bare ``color == "red"`` should
+    behave like ``$meta["color"] == "red"``.  This function walks the AST
+    and performs that rewrite BEFORE semantic checking so the existing
+    MetaAccess handling (type inference + hybrid backend) works unchanged.
+    """
+    if isinstance(node, FieldRef):
+        if node.name not in schema_fields and node.name not in _RESERVED_FIELD_NAMES:
+            return MetaAccess(key=node.name, pos=node.pos)
+        return node
+    if isinstance(node, CmpOp):
+        return CmpOp(
+            op=node.op,
+            left=_rewrite_dynamic_field_refs(node.left, schema_fields),
+            right=_rewrite_dynamic_field_refs(node.right, schema_fields),
+            pos=node.pos,
+        )
+    if isinstance(node, ArithOp):
+        return ArithOp(
+            op=node.op,
+            left=_rewrite_dynamic_field_refs(node.left, schema_fields),
+            right=_rewrite_dynamic_field_refs(node.right, schema_fields),
+            pos=node.pos,
+        )
+    if isinstance(node, (And, Or)):
+        cls = type(node)
+        return cls(
+            operands=tuple(
+                _rewrite_dynamic_field_refs(op, schema_fields)
+                for op in node.operands
+            ),
+            pos=node.pos,
+        )
+    if isinstance(node, Not):
+        return Not(
+            operand=_rewrite_dynamic_field_refs(node.operand, schema_fields),
+            pos=node.pos,
+        )
+    if isinstance(node, InOp):
+        new_field = _rewrite_dynamic_field_refs(node.field, schema_fields)
+        return InOp(
+            field=new_field, values=node.values,
+            negate=node.negate, pos=node.pos,
+        )
+    if isinstance(node, LikeOp):
+        return LikeOp(
+            value=_rewrite_dynamic_field_refs(node.value, schema_fields),
+            pattern=node.pattern,
+            pos=node.pos,
+        )
+    if isinstance(node, IsNullOp):
+        new_field = _rewrite_dynamic_field_refs(node.field, schema_fields)
+        return IsNullOp(field=new_field, negate=node.negate, pos=node.pos)
+    # Leaves (literals, MetaAccess, JsonAccess, TextMatchOp, Array*Op)
+    # are returned unchanged.
+    return node
+
+
+# ---------------------------------------------------------------------------
 # Public entry
 # ---------------------------------------------------------------------------
 
@@ -157,6 +227,14 @@ def compile_expr(
     # Build a map of all schema field names → FieldSchema for fast lookup.
     schema_fields: Dict[str, FieldSchema] = {f.name: f for f in schema.fields}
     field_names = [f.name for f in schema.fields]
+
+    # When dynamic fields are enabled, rewrite bare FieldRef nodes for
+    # unknown field names to MetaAccess(key=name) so the hybrid backend
+    # can extract them from the $meta JSON column automatically.
+    # This matches Milvus behavior where `color == "red"` is equivalent
+    # to `$meta["color"] == "red"`.
+    if schema.enable_dynamic_field:
+        expr = _rewrite_dynamic_field_refs(expr, schema_fields)
 
     fields_used: Dict[str, FieldInfo] = {}
     ctx = _CompileCtx(

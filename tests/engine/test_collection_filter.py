@@ -671,6 +671,60 @@ def test_meta_complex_expression(col_dynamic):
 
 
 # ===========================================================================
+# Issue #10 — bare dynamic field names (auto-rewrite to $meta)
+# ===========================================================================
+
+def test_query_dynamic_bare_field_eq(col_dynamic):
+    """color == 'tech' should work without $meta["..."] wrapper."""
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('category == "tech"')
+    ids = {r["id"] for r in out}
+    assert ids == {"a", "c"}
+
+
+def test_query_dynamic_bare_field_compare(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('priority > 2')
+    ids = {r["id"] for r in out}
+    assert ids == {"b", "c"}
+
+
+def test_query_dynamic_bare_combined_with_schema_field(col_dynamic):
+    """Mix schema field (age) and bare dynamic field (category)."""
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('age > 20 and category == "tech"')
+    ids = {r["id"] for r in out}
+    assert ids == {"c"}
+
+
+def test_query_dynamic_bare_in_list(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    out = col_dynamic.query('category in ["tech", "blog"]')
+    ids = {r["id"] for r in out}
+    assert ids == {"a", "c", "d"}
+
+
+def test_search_dynamic_bare_filter(col_dynamic):
+    _populate_dynamic(col_dynamic)
+    results = col_dynamic.search(
+        [[1.0, 0.0, 0.0, 0.0]], top_k=10, metric_type="L2",
+        expr='category == "tech"',
+    )
+    [hits] = results
+    ids = {h["id"] for h in hits}
+    assert ids == {"a", "c"}
+
+
+def test_query_dynamic_bare_after_flush(col_dynamic):
+    """Bare dynamic field filter works on flushed segments too."""
+    _populate_dynamic(col_dynamic)
+    col_dynamic.flush()
+    out = col_dynamic.query('category == "tech"')
+    ids = {r["id"] for r in out}
+    assert ids == {"a", "c"}
+
+
+# ===========================================================================
 # Phase F2c — filter expression cache
 # ===========================================================================
 
