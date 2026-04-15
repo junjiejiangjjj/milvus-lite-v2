@@ -344,6 +344,32 @@ client.query("col", filter="scores[0] > 90", limit=10)
 | Rename collection | `client.rename_collection("old", "new")` |
 | gRPC | 25+ Milvus RPCs, pymilvus fully compatible |
 
+# Performance Benchmark
+
+Benchmarked using the Cohere 100K dataset from [VectorDBBench](https://github.com/zilliztech/VectorDBBench) (768-dim, COSINE, with ground truth).
+
+### Environment
+
+- Hardware: Apple Silicon (MacBook)
+- Python: 3.14
+- Index: HNSW (M=16, efConstruction=200, ef=128)
+
+### Results
+
+| Metric | Result |
+|--------|--------|
+| **Dataset** | 100,000 vectors (768-dim) |
+| **Insert throughput** | 4,461 records/s |
+| **Index build** | 9.32s (HNSW) |
+| **Search QPS (nq=1)** | 48.6 |
+| **Search QPS (nq=10)** | 340.7 |
+| **Search latency P50** | 20.36 ms |
+| **Search latency P95** | 21.22 ms |
+| **Search latency P99** | 27.62 ms |
+| **Recall@10** | **91.18%** |
+
+> As a pure-Python embedded vector database, LiteVecDB delivers solid search quality (91% recall) with stable latency (P50 to P95 gap is only ~1ms). Batch queries (nq=10) reach 340+ QPS thanks to FAISS HNSW batch processing.
+
 # Known Limitations
 
 - **Single-process only** — one process per `data_dir` (file-level lock)
