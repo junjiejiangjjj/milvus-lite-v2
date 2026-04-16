@@ -188,7 +188,10 @@ def main():
         avg_recall = statistics.mean(recalls) if recalls else 0
         print(f"  Recall@{top_k}: {avg_recall:.4f} ({avg_recall*100:.2f}%)")
 
-        # ── 额外: 批量查询 QPS ──
+        # ── 额外: 批量查询 ──
+        # 说明:
+        #   batch_rps = 每秒 RPC 调用数 (严格 QPS 定义, nq=10 时通常低于 nq=1 QPS)
+        #   batch_vector_throughput = 每秒处理的向量查询总数 (throughput 视角)
         print(f"\n[Bonus] Batch search (nq=10)...")
         batch_latencies = []
         n_batches = n_test // 10
@@ -201,9 +204,11 @@ def main():
             batch_latencies.append((t1 - t0) * 1000)
 
         total_batch = sum(batch_latencies) / 1000
-        batch_qps = (n_batches * 10) / total_batch
-        print(f"  QPS (nq=10): {batch_qps:.1f}")
-        print(f"  Batch latency avg: {statistics.mean(batch_latencies):.2f} ms")
+        batch_rps = n_batches / total_batch
+        batch_vec_throughput = (n_batches * 10) / total_batch
+        print(f"  RPS (nq=10, per-RPC):       {batch_rps:.1f}")
+        print(f"  Vector throughput (nq=10):  {batch_vec_throughput:.1f} vec/s")
+        print(f"  Batch latency avg:          {statistics.mean(batch_latencies):.2f} ms")
 
         # ── Summary ──
         print("\n" + "=" * 70)
@@ -214,8 +219,9 @@ def main():
               f"({insert_qps:.0f} rec/s)")
         print(f"  Index (HNSW):    {index_time:.2f}s "
               f"(M=16, efConstruction=200)")
-        print(f"  Search QPS:      {search_qps:.1f} (nq=1, top10, ef=128)")
-        print(f"  Batch QPS:       {batch_qps:.1f} (nq=10, top10, ef=128)")
+        print(f"  QPS (nq=1):      {search_qps:.1f} (top10, ef=128)")
+        print(f"  RPS (nq=10):     {batch_rps:.1f} (batched RPC throughput)")
+        print(f"  Vec throughput:  {batch_vec_throughput:.1f} vec/s (nq=10 batched)")
         print(f"  Latency P50:     {percentile(latencies, 50):.2f} ms")
         print(f"  Latency P95:     {percentile(latencies, 95):.2f} ms")
         print(f"  Latency P99:     {percentile(latencies, 99):.2f} ms")
