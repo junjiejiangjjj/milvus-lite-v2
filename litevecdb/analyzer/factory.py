@@ -41,7 +41,7 @@ def create_analyzer(params: Optional[Dict[str, Any]] = None) -> Analyzer:
     if params is None:
         return StandardAnalyzer()
 
-    tokenizer = params.get("tokenizer", "standard")
+    tokenizer = params.get("tokenizer") or params.get("type", "standard")
     stop_words = _extract_stop_words(params)
 
     # String form: "standard" / "jieba"

@@ -329,6 +329,46 @@ def _extract_sparse_vector_column(fd, num_rows: int) -> List[Any]:
     return column
 
 
+def _build_dynamic_field_data(fname: str, column: list):
+    """Build a typed FieldData for a dynamic field column.
+
+    Infers the proto type from the first non-None value so that
+    integer and float dynamic fields are returned with their real
+    types instead of being stringified.
+    """
+    fd = schema_pb2.FieldData()
+    fd.field_name = fname
+    fd.is_dynamic = True
+
+    # Find the representative type from the first non-None value
+    sample = next((v for v in column if v is not None), None)
+
+    if isinstance(sample, bool):
+        fd.type = 1  # Bool
+        fd.scalars.bool_data.data.extend(
+            bool(v) if v is not None else False for v in column
+        )
+    elif isinstance(sample, int):
+        fd.type = 5  # Int64
+        fd.scalars.long_data.data.extend(
+            int(v) if v is not None else 0 for v in column
+        )
+    elif isinstance(sample, float):
+        fd.type = 11  # Double
+        fd.scalars.double_data.data.extend(
+            float(v) if v is not None else 0.0 for v in column
+        )
+    else:
+        # Default to VARCHAR for strings, None-only columns, and complex types
+        import json
+        fd.type = 21  # VARCHAR
+        fd.scalars.string_data.data.extend(
+            (json.dumps(v) if not isinstance(v, str) and v is not None else (v or ""))
+            for v in column
+        )
+    return fd
+
+
 # ── records → Milvus (Query / Get / Search response path) ───────────
 
 def records_to_fields_data(
@@ -378,20 +418,8 @@ def records_to_fields_data(
         for fname in output_fields:
             if fname in schema_names or fname == pk_name:
                 continue
-            # Dynamic field: emit as JSON (VARCHAR) FieldData
             column = [r.get(fname) for r in records]
-            # Build a simple VARCHAR FieldData for the dynamic values
-            import json
-            str_column = [
-                json.dumps(v) if not isinstance(v, str) and v is not None else (v or "")
-                for v in column
-            ]
-            fd = schema_pb2.FieldData()
-            fd.field_name = fname
-            fd.type = 21  # DataType.VARCHAR
-            fd.is_dynamic = True
-            sd = fd.scalars.string_data
-            sd.data.extend(str_column)
+            fd = _build_dynamic_field_data(fname, column)
             fields_data.append(fd)
 
     return fields_data
