@@ -46,7 +46,10 @@ except ImportError:
 
 # Index types that REQUIRE faiss-cpu. BRUTE_FORCE is intentionally NOT
 # in this set — it always works.
-_FAISS_INDEX_TYPES = frozenset({"HNSW", "IVF_FLAT", "IVF_SQ8", "IVF_PQ"})
+_FAISS_INDEX_TYPES = frozenset({
+    "HNSW", "HNSW_SQ",
+    "IVF_FLAT", "IVF_SQ8", "IVF_PQ",
+})
 
 
 def is_faiss_available() -> bool:
@@ -93,9 +96,15 @@ def build_index_from_spec(
         if index_type == "IVF_FLAT":
             from litevecdb.index.faiss_ivf_flat import FaissIvfFlatIndex
             return FaissIvfFlatIndex.build(vectors, spec.metric_type, spec.build_params)
+        if index_type == "IVF_SQ8":
+            from litevecdb.index.faiss_ivf_sq8 import FaissIvfSq8Index
+            return FaissIvfSq8Index.build(vectors, spec.metric_type, spec.build_params)
+        if index_type == "HNSW_SQ":
+            from litevecdb.index.faiss_hnsw_sq import FaissHnswSqIndex
+            return FaissHnswSqIndex.build(vectors, spec.metric_type, spec.build_params)
         raise NotImplementedError(
             f"index_type={index_type!r} is reserved for a future phase; "
-            f"only HNSW, IVF_FLAT, and BRUTE_FORCE are supported"
+            f"supported: HNSW, HNSW_SQ, IVF_FLAT, IVF_SQ8, BRUTE_FORCE"
         )
     raise ValueError(f"unknown index_type: {index_type!r}")
 
@@ -126,6 +135,12 @@ def load_index_from_spec(
         if index_type == "IVF_FLAT":
             from litevecdb.index.faiss_ivf_flat import FaissIvfFlatIndex
             return FaissIvfFlatIndex.load(path, spec.metric_type, dim)
+        if index_type == "IVF_SQ8":
+            from litevecdb.index.faiss_ivf_sq8 import FaissIvfSq8Index
+            return FaissIvfSq8Index.load(path, spec.metric_type, dim)
+        if index_type == "HNSW_SQ":
+            from litevecdb.index.faiss_hnsw_sq import FaissHnswSqIndex
+            return FaissHnswSqIndex.load(path, spec.metric_type, dim)
         raise NotImplementedError(
             f"index_type={index_type!r} is reserved for a future phase"
         )
