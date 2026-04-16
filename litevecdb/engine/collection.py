@@ -1423,9 +1423,10 @@ class Collection:
                 for seg in self._segment_cache.values():
                     seg.release_index(field_name=spec.field_name)
 
-            # Delete on-disk .idx files matching the dropped index_type(s).
+            # Delete on-disk .idx files matching the dropped (field, type)
+            # pair. File format: <stem>.<field>.<type>.idx
             for spec in drop_specs:
-                suffix = f".{spec.index_type.lower()}.idx"
+                suffix = f".{spec.field_name}.{spec.index_type.lower()}.idx"
                 for partition in self._manifest.list_partitions():
                     index_dir = self._index_dir(partition)
                     if not os.path.exists(index_dir):
@@ -1763,8 +1764,10 @@ class Collection:
         if not self._index_specs:
             return
 
-        suffixes = {
-            f".{spec.index_type.lower()}.idx"
+        # File format: <data_stem>.<field>.<index_type>.idx
+        # Build {field → index_type_lower} so we can validate both parts.
+        expected: Dict[str, str] = {
+            spec.field_name: spec.index_type.lower()
             for spec in self._index_specs.values()
         }
         for partition, data_files in self._manifest.get_all_data_files().items():
@@ -1775,17 +1778,22 @@ class Collection:
                 os.path.splitext(os.path.basename(df))[0] for df in data_files
             }
             for entry in os.listdir(index_dir):
-                if not any(entry.endswith(s) for s in suffixes):
+                if not entry.endswith(".idx"):
                     continue
-                for s in suffixes:
-                    if entry.endswith(s):
-                        stem = entry[: -len(s)]
-                        if stem not in valid_stems:
-                            try:
-                                os.remove(os.path.join(index_dir, entry))
-                            except OSError:
-                                pass
-                        break
+                base = entry[: -len(".idx")]
+                stem_field, _, idx_type = base.rpartition(".")
+                stem, _, field = stem_field.rpartition(".")
+                # Drop if (a) source data gone, or (b) field/type no
+                # longer in the active index_specs (dropped index).
+                if (
+                    not stem
+                    or stem not in valid_stems
+                    or expected.get(field) != idx_type
+                ):
+                    try:
+                        os.remove(os.path.join(index_dir, entry))
+                    except OSError:
+                        pass
 
     def _segments_snapshot(self) -> Tuple["Segment", ...]:
         """Atomic snapshot of the segment cache values.

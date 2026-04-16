@@ -63,7 +63,7 @@ def test_load_writes_idx_files(col, tmp_path):
 
     files = _index_files_for_partition(str(tmp_path / "data"), "_default")
     assert len(files) >= 1
-    assert all(f.endswith(".brute_force.idx") for f in files)
+    assert all(f.endswith(".vec.brute_force.idx") for f in files)
 
 
 def test_load_writes_one_idx_per_segment(tmp_path, schema):
@@ -99,9 +99,9 @@ def test_idx_filename_matches_data_stem(col, tmp_path):
 
     data_stems = {os.path.splitext(f)[0] for f in data_files}
     for idx in idx_files:
-        # Strip ".brute_force.idx"
-        assert idx.endswith(".brute_force.idx")
-        stem = idx[: -len(".brute_force.idx")]
+        # New format: <stem>.<field>.<type>.idx → ".vec.brute_force.idx"
+        assert idx.endswith(".vec.brute_force.idx")
+        stem = idx[: -len(".vec.brute_force.idx")]
         assert stem in data_stems
 
 
@@ -243,7 +243,7 @@ def test_compaction_replaces_idx_files(tmp_path, schema, monkeypatch):
 
         # 1:1 — every data file has exactly one .idx and vice versa.
         data_stems = {os.path.splitext(f)[0] for f in data_files}
-        idx_stems = {f[: -len(".brute_force.idx")] for f in files}
+        idx_stems = {f[: -len(".vec.brute_force.idx")] for f in files}
         assert data_stems == idx_stems
     finally:
         c.close()
@@ -311,7 +311,7 @@ def test_recovery_cleans_orphan_idx(tmp_path, schema):
 
     # Plant an orphan .idx in the indexes/ dir.
     indexes_dir = os.path.join(str(tmp_path / "data"), "partitions", "_default", "indexes")
-    orphan = os.path.join(indexes_dir, "data_999999_999999.brute_force.idx")
+    orphan = os.path.join(indexes_dir, "data_999999_999999.vec.brute_force.idx")
     with open(orphan, "wb") as f:
         np.save(f, np.zeros((1, 4), dtype=np.float32), allow_pickle=False)
     assert os.path.exists(orphan)

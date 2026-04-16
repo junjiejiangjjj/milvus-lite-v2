@@ -88,7 +88,7 @@ def test_hnsw_idx_files_persisted_on_disk(tmp_path, schema):
 
         idx_dir = os.path.join(str(tmp_path / "data"), "partitions", "_default", "indexes")
         files = sorted(os.listdir(idx_dir))
-        assert all(f.endswith(".hnsw.idx") for f in files)
+        assert all(f.endswith(".vec.hnsw.idx") for f in files)
         assert len(files) >= 1
     finally:
         c.close()
@@ -199,9 +199,10 @@ def test_hnsw_survives_compaction(tmp_path, schema, monkeypatch):
         c._wait_for_bg()  # compaction + index rebuild on bg worker
 
         # Verify .idx files match data files 1:1
+        # New format: <stem>.<field>.<type>.idx → strip .vec.hnsw.idx
         idx_dir = os.path.join(str(tmp_path / "data"), "partitions", "_default", "indexes")
         data_dir = os.path.join(str(tmp_path / "data"), "partitions", "_default", "data")
-        idx_stems = {f[: -len(".hnsw.idx")] for f in os.listdir(idx_dir)}
+        idx_stems = {f[: -len(".vec.hnsw.idx")] for f in os.listdir(idx_dir)}
         data_stems = {os.path.splitext(f)[0] for f in os.listdir(data_dir)}
         assert idx_stems == data_stems
 
@@ -227,7 +228,7 @@ def test_drop_index_removes_hnsw_files(tmp_path, schema):
         c.create_index("vec", HNSW_PARAMS)
 
         idx_dir = os.path.join(str(tmp_path / "data"), "partitions", "_default", "indexes")
-        assert any(f.endswith(".hnsw.idx") for f in os.listdir(idx_dir))
+        assert any(f.endswith(".vec.hnsw.idx") for f in os.listdir(idx_dir))
 
         c.release()  # drop_index requires released state
         c.drop_index("vec")

@@ -198,23 +198,31 @@ class Segment:
             if field_name == self._vector_field:
                 self.index = None
 
-    def index_file_path(self, index_dir: str, index_type: str) -> str:
-        """Return the canonical .idx path for this segment.
+    def index_file_path(
+        self, index_dir: str, index_type: str, field_name: str,
+    ) -> str:
+        """Return the canonical .idx path for (segment, field, index_type).
 
-        Naming convention (Phase 9.4 — architectural invariant §11):
-            ``<index_dir>/<segment_filename_stem>.<index_type_lower>.idx``
+        Naming convention (architectural invariant §11):
+            ``<index_dir>/<segment_stem>.<field_name>.<index_type>.idx``
 
-        Example: data file ``data_000001_000500.parquet`` with index
-        type ``HNSW`` → ``indexes/data_000001_000500.hnsw.idx``.
+        Example: data file ``data_000001_000500.parquet`` with an HNSW
+        index on the ``dense_vec`` field →
+        ``indexes/data_000001_000500.dense_vec.hnsw.idx``.
 
-        The 1:1 stem correspondence is what makes orphan cleanup at
-        recovery time work — given an .idx, we can recover the source
-        data file's stem just by stripping the suffix and looking it
-        up in the manifest.
+        field_name is part of the filename so a single segment can hold
+        multiple indexes (e.g. hybrid-search collections with multiple
+        FLOAT_VECTOR fields, each with its own HNSW).
+
+        Orphan cleanup reverses the parse: strip the .idx suffix, then
+        rpartition twice to recover (stem, field, index_type).
         """
         import os
         stem = os.path.splitext(os.path.basename(self.file_path))[0]
-        return os.path.join(index_dir, f"{stem}.{index_type.lower()}.idx")
+        return os.path.join(
+            index_dir,
+            f"{stem}.{field_name}.{index_type.lower()}.idx",
+        )
 
     def build_or_load_index(
         self,
@@ -247,7 +255,7 @@ class Segment:
             load_index_from_spec,
         )
 
-        path = self.index_file_path(index_dir, spec.index_type)
+        path = self.index_file_path(index_dir, spec.index_type, field_name)
 
         if os.path.exists(path):
             idx = load_index_from_spec(spec, path, self.vector_dim)

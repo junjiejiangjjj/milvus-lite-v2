@@ -239,19 +239,22 @@ def _cleanup_orphan_files(data_dir: str, manifest: "Manifest") -> None:
         if os.path.isdir(index_subdir):
             valid_stems = referenced_data_stems.get(partition, set())
             for fn in os.listdir(index_subdir):
-                # Index filename convention: <data_stem>.<index_type_lower>.idx
-                # The data stem is everything before the second-to-last dot.
-                # E.g. "data_000001_000050.brute_force.idx" → stem
-                # "data_000001_000050".
+                # Index filename convention:
+                #   <data_stem>.<field_name>.<index_type_lower>.idx
+                # Strip .idx, then rpartition twice to peel off index_type
+                # and field_name, leaving the data_stem.
+                # E.g. "data_000001_000050.dense.hnsw.idx"
+                #  → base = "data_000001_000050.dense.hnsw"
+                #  → after first rpartition: ("data_000001_000050.dense", "hnsw")
+                #  → after second rpartition: ("data_000001_000050", "dense")
                 if not fn.endswith(".idx"):
                     continue
-                base = fn[:-len(".idx")]  # strip ".idx"
-                # Now base is "data_000001_000050.brute_force" → split off
-                # the index_type tag.
-                stem, _dot, _index_type = base.rpartition(".")
+                base = fn[:-len(".idx")]
+                stem_field, _, _index_type = base.rpartition(".")
+                stem, _, _field_name = stem_field.rpartition(".")
                 if not stem:
                     # Malformed name; remove defensively.
-                    stem = base
+                    stem = stem_field or base
                 if stem not in valid_stems:
                     abs_path = os.path.join(index_subdir, fn)
                     try:
