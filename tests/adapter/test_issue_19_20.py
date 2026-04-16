@@ -81,6 +81,40 @@ class TestDynamicFieldTypes:
         assert abs(res[0]["ratio"] - 0.5) < 0.01
         assert res[0]["flag"] is False
 
+    def test_dynamic_list_value_returned(self, milvus_client):
+        schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=True)
+        schema.add_field("id", DataType.INT64, is_primary=True)
+        schema.add_field("vec", DataType.FLOAT_VECTOR, dim=DIM)
+
+        idx = milvus_client.prepare_index_params()
+        idx.add_index(field_name="vec", index_type="FLAT", metric_type="COSINE")
+        milvus_client.create_collection("dyn_list", schema=schema, index_params=idx)
+        milvus_client.insert("dyn_list", [
+            {"id": 1, "vec": [0.1] * DIM, "tags": [1, 2, 3]},
+        ])
+        milvus_client.load_collection("dyn_list")
+        res = milvus_client.query("dyn_list", filter="id == 1",
+                                  output_fields=["tags"])
+        assert res[0]["tags"] == [1, 2, 3]
+        assert isinstance(res[0]["tags"], list)
+
+    def test_dynamic_dict_value_returned(self, milvus_client):
+        schema = MilvusClient.create_schema(auto_id=False, enable_dynamic_field=True)
+        schema.add_field("id", DataType.INT64, is_primary=True)
+        schema.add_field("vec", DataType.FLOAT_VECTOR, dim=DIM)
+
+        idx = milvus_client.prepare_index_params()
+        idx.add_index(field_name="vec", index_type="FLAT", metric_type="COSINE")
+        milvus_client.create_collection("dyn_dict", schema=schema, index_params=idx)
+        milvus_client.insert("dyn_dict", [
+            {"id": 1, "vec": [0.1] * DIM, "info": {"nested": "val", "n": 42}},
+        ])
+        milvus_client.load_collection("dyn_dict")
+        res = milvus_client.query("dyn_dict", filter="id == 1",
+                                  output_fields=["info"])
+        assert res[0]["info"] == {"nested": "val", "n": 42}
+        assert isinstance(res[0]["info"], dict)
+
 
 class TestJiebaAnalyzerKey:
     """Issue #20: analyzer_params with 'type' key should work like 'tokenizer'."""

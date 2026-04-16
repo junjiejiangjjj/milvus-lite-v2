@@ -329,46 +329,6 @@ def _extract_sparse_vector_column(fd, num_rows: int) -> List[Any]:
     return column
 
 
-def _build_dynamic_field_data(fname: str, column: list):
-    """Build a typed FieldData for a dynamic field column.
-
-    Infers the proto type from the first non-None value so that
-    integer and float dynamic fields are returned with their real
-    types instead of being stringified.
-    """
-    fd = schema_pb2.FieldData()
-    fd.field_name = fname
-    fd.is_dynamic = True
-
-    # Find the representative type from the first non-None value
-    sample = next((v for v in column if v is not None), None)
-
-    if isinstance(sample, bool):
-        fd.type = 1  # Bool
-        fd.scalars.bool_data.data.extend(
-            bool(v) if v is not None else False for v in column
-        )
-    elif isinstance(sample, int):
-        fd.type = 5  # Int64
-        fd.scalars.long_data.data.extend(
-            int(v) if v is not None else 0 for v in column
-        )
-    elif isinstance(sample, float):
-        fd.type = 11  # Double
-        fd.scalars.double_data.data.extend(
-            float(v) if v is not None else 0.0 for v in column
-        )
-    else:
-        # Default to VARCHAR for strings, None-only columns, and complex types
-        import json
-        fd.type = 21  # VARCHAR
-        fd.scalars.string_data.data.extend(
-            (json.dumps(v) if not isinstance(v, str) and v is not None else (v or ""))
-            for v in column
-        )
-    return fd
-
-
 # ── records → Milvus (Query / Get / Search response path) ───────────
 
 def records_to_fields_data(
@@ -412,15 +372,27 @@ def records_to_fields_data(
         fd = _build_field_data(fname, fschema, column)
         fields_data.append(fd)
 
-    # Emit dynamic fields (not in schema but present in records)
-    if output_fields is not None and schema.enable_dynamic_field:
+    # Emit $meta JSON column for dynamic fields.
+    # Milvus returns a single $meta FieldData (type=JSON, is_dynamic=True)
+    # containing all dynamic field values. pymilvus unpacks individual
+    # fields on the client side, preserving original types (int/float/
+    # bool/list/dict).
+    if schema.enable_dynamic_field:
+        import json
         schema_names = {f.name for f in schema.fields}
-        for fname in output_fields:
-            if fname in schema_names or fname == pk_name:
-                continue
-            column = [r.get(fname) for r in records]
-            fd = _build_dynamic_field_data(fname, column)
-            fields_data.append(fd)
+        meta_column: list[bytes] = []
+        for r in records:
+            meta_dict = {
+                k: v for k, v in r.items()
+                if k not in schema_names and k != "$meta"
+            }
+            meta_column.append(json.dumps(meta_dict).encode("utf-8"))
+        fd = schema_pb2.FieldData()
+        fd.field_name = "$meta"
+        fd.type = 23  # JSON
+        fd.is_dynamic = True
+        fd.scalars.json_data.data.extend(meta_column)
+        fields_data.append(fd)
 
     return fields_data
 
