@@ -296,7 +296,7 @@ def test_dangling_operator():
 
 def test_unknown_function_call_rejected():
     with pytest.raises(FilterParseError, match="unknown function"):
-        parse_expr("json_contains(meta, 'x')")
+        parse_expr("unknown_func(meta, 'x')")
 
 
 def test_unary_minus_on_field_now_works():

@@ -271,7 +271,7 @@ def _eval_row(node, row: dict) -> Any:
 
     # ── Array functions ─────────────────────────────────────────
     if isinstance(node, ArrayContainsOp):
-        arr = row.get(node.field.name)
+        arr = _eval_row(node.field, row)
         if arr is None or not isinstance(arr, (list, tuple)):
             return False
         if node.mode == "any_one":

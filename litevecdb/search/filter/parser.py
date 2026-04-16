@@ -364,7 +364,7 @@ class Parser:
         )
 
     def _parse_array_contains(self, func_tok: Token, mode: str) -> Expr:
-        """``array_contains(field, value)`` or ``array_contains_all/any(field, [values])``."""
+        """``array_contains(field, value)`` or ``json_contains(field["key"], value)``."""
         self._consume()  # '('
         field_tok = self._peek()
         if field_tok.kind != TokenKind.IDENT:
@@ -373,7 +373,11 @@ class Parser:
                 self.source, field_tok.pos,
             )
         self._consume()
-        field = FieldRef(name=field_tok.text, pos=field_tok.pos)
+        # Support json_contains(info["tags"], val) — parse bracket access
+        if self._peek().kind == TokenKind.LBRACKET:
+            field = self._parse_bracket_access(field_tok)
+        else:
+            field = FieldRef(name=field_tok.text, pos=field_tok.pos)
         if self._peek().kind != TokenKind.COMMA:
             raise FilterParseError(
                 f"{func_tok.text}: expected ','",
@@ -479,19 +483,19 @@ class Parser:
                 fn_name = tok.text.lower()
                 if fn_name == "text_match":
                     return self._parse_text_match(tok)
-                if fn_name == "array_contains":
+                if fn_name in ("array_contains", "json_contains"):
                     return self._parse_array_contains(tok, "any_one")
-                if fn_name == "array_contains_all":
+                if fn_name in ("array_contains_all", "json_contains_all"):
                     return self._parse_array_contains(tok, "all")
-                if fn_name == "array_contains_any":
+                if fn_name in ("array_contains_any", "json_contains_any"):
                     return self._parse_array_contains(tok, "any")
                 if fn_name == "array_length":
                     return self._parse_array_length(tok)
                 raise FilterParseError(
                     f"unknown function {tok.text!r}",
                     self.source, tok.pos, span=len(tok.text),
-                    hint="supported: text_match, array_contains, array_contains_all, "
-                         "array_contains_any, array_length",
+                    hint="supported: text_match, array_contains, json_contains, "
+                         "array_contains_all, array_contains_any, array_length",
                 )
             # field[...] access: JSON path or array index
             if self._peek().kind == TokenKind.LBRACKET:
