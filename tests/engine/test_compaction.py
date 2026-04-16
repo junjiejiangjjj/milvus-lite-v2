@@ -94,31 +94,97 @@ def test_bucket_index_boundaries():
     assert CompactionManager._bucket_index(1_000_000_000) == 3
 
 
-def test_select_target_no_trigger():
+def _make_files(harness, n_files, rows_per_file=10):
+    """Create *n_files* tiny parquet files and return (partition_dir, names)."""
+    names = []
+    for i in range(n_files):
+        rows = [(i * rows_per_file + j, f"pk_{i}_{j}", [0.1, 0.2], None)
+                for j in range(rows_per_file)]
+        rel = _write_data_file_with_records(
+            harness, rows,
+            seq_min=i * rows_per_file,
+            seq_max=i * rows_per_file + rows_per_file - 1,
+        )
+        names.append(rel)
+    partition_dir = os.path.join(
+        harness["data_dir"], "partitions", DEFAULT_PARTITION
+    )
+    return partition_dir, names
+
+
+def test_select_target_no_trigger(harness):
     """No bucket has enough files, total below MAX → no target."""
-    buckets = [[("a", 100)], [("b", 200)], [], []]
-    target = CompactionManager._select_target(buckets, total_files=2)
+    partition_dir, names = _make_files(harness, 2)
+    buckets = [[(names[0], 100)], [(names[1], 200)], [], []]
+    target = CompactionManager._select_target(buckets, total_files=2,
+                                              partition_dir=partition_dir)
     assert target is None
 
 
-def test_select_target_full_bucket():
+def test_select_target_full_bucket(harness):
     """Bucket 0 has 4 files → target is those 4."""
+    partition_dir, names = _make_files(harness, 4)
     buckets = [
-        [("a", 100), ("b", 200), ("c", 300), ("d", 400)],
-        [],
-        [],
-        [],
+        [(names[0], 100), (names[1], 200), (names[2], 300), (names[3], 400)],
+        [], [], [],
     ]
-    target = CompactionManager._select_target(buckets, total_files=4)
-    assert target == ["a", "b", "c", "d"]
+    target = CompactionManager._select_target(buckets, total_files=4,
+                                              partition_dir=partition_dir)
+    assert target == names
 
 
-def test_select_target_force_compact_total_exceeds_max():
+def test_select_target_force_compact_total_exceeds_max(harness):
     """No bucket fully fills, but total > MAX_DATA_FILES → take all files."""
-    buckets = [[(f"f{i}", 100) for i in range(MAX_DATA_FILES + 1)], [], [], []]
-    target = CompactionManager._select_target(buckets, total_files=MAX_DATA_FILES + 1)
+    partition_dir, names = _make_files(harness, MAX_DATA_FILES + 1)
+    # Spread across buckets (not 4+ in any single bucket)
+    buckets = [[(n, 100)] for n in names[:4]]
+    buckets.extend([[(n, 100)] for n in names[4:]])
+    # Flatten into single-file-per-bucket style to avoid triggering the
+    # bucket-full path. Use 1 file per bucket (buckets has 4 slots).
+    buckets = [[], [], [], [(n, 100) for n in names]]
+    target = CompactionManager._select_target(
+        buckets, total_files=MAX_DATA_FILES + 1,
+        partition_dir=partition_dir,
+    )
     assert target is not None
-    assert len(target) == MAX_DATA_FILES + 1
+    assert len(target) >= 2
+
+
+def test_select_target_respects_max_segment_rows(harness, monkeypatch):
+    """Merge group should not exceed MAX_SEGMENT_ROWS."""
+    import litevecdb.engine.compaction as comp_mod
+    # Temporarily lower the cap so we can assert behavior without
+    # needing to write millions of rows.
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 30)
+    # 4 files × 10 rows each = 40 rows total. With cap=30, should pick
+    # only 3 files (30 rows) — but MIN_FILES_PER_BUCKET=4, so nothing
+    # gets merged from this bucket.
+    partition_dir, names = _make_files(harness, 4, rows_per_file=10)
+    buckets = [
+        [(n, 100) for n in names],
+        [], [], [],
+    ]
+    target = comp_mod.CompactionManager._select_target(
+        buckets, total_files=4, partition_dir=partition_dir,
+    )
+    # Only 3 files fit under cap → below MIN_FILES_PER_BUCKET → no merge
+    assert target is None
+
+
+def test_select_target_skips_over_cap_files(harness, monkeypatch):
+    """Files already over MAX_SEGMENT_ROWS are skipped entirely."""
+    import litevecdb.engine.compaction as comp_mod
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 15)
+    # Each file has 20 rows, all already > cap (15) → nothing to merge.
+    partition_dir, names = _make_files(harness, 4, rows_per_file=20)
+    buckets = [
+        [(n, 100) for n in names],
+        [], [], [],
+    ]
+    target = comp_mod.CompactionManager._select_target(
+        buckets, total_files=4, partition_dir=partition_dir,
+    )
+    assert target is None
 
 
 # ---------------------------------------------------------------------------

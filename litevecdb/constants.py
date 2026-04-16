@@ -6,6 +6,12 @@ MAX_DATA_FILES = 32
 COMPACTION_MIN_FILES_PER_BUCKET = 4
 COMPACTION_BUCKET_BOUNDARIES = [1_000_000, 10_000_000, 100_000_000]  # bytes
 
+# Max rows a single post-compaction segment may hold. Compaction skips
+# merge groups whose combined row count would exceed this limit. Keeps
+# per-segment index build cost bounded — critical for HNSW_SQ / HNSW_PQ
+# where build time is super-linear in segment size.
+MAX_SEGMENT_ROWS = 100_000
+
 # ── File naming ──
 SEQ_FORMAT_WIDTH = 6
 DATA_FILE_TEMPLATE = "data_{min:0{w}d}_{max:0{w}d}.parquet"

@@ -46,6 +46,7 @@ from litevecdb.constants import (
     COMPACTION_BUCKET_BOUNDARIES,
     COMPACTION_MIN_FILES_PER_BUCKET,
     MAX_DATA_FILES,
+    MAX_SEGMENT_ROWS,
 )
 from litevecdb.schema.arrow_builder import (
     build_data_schema,
@@ -97,7 +98,7 @@ class CompactionManager:
 
         partition_dir = os.path.join(self._data_dir, "partitions", partition)
         buckets = self._bucket_files(partition_dir, files)
-        target = self._select_target(buckets, len(files))
+        target = self._select_target(buckets, len(files), partition_dir)
         if target is None:
             return False
 
@@ -140,25 +141,56 @@ class CompactionManager:
     def _select_target(
         buckets: List[List[Tuple[str, int]]],
         total_files: int,
+        partition_dir: str,
     ) -> Optional[List[str]]:
         """Pick the set of files to compact.
 
         Strategy:
             - First, look for a bucket with >= MIN_FILES_PER_BUCKET.
-              If found, return all files in that bucket.
-            - Else, if total file count > MAX_DATA_FILES, return ALL files
-              (force-compact across buckets).
+              Take as many files as fit under MAX_SEGMENT_ROWS.
+            - Else, if total file count > MAX_DATA_FILES, greedily pack
+              smallest-first across buckets, capped at MAX_SEGMENT_ROWS.
             - Else None.
         """
         for bucket in buckets:
             if len(bucket) >= COMPACTION_MIN_FILES_PER_BUCKET:
-                return [fn for fn, _ in bucket]
+                picked = CompactionManager._cap_by_row_limit(
+                    [fn for fn, _ in bucket], partition_dir,
+                )
+                if len(picked) >= COMPACTION_MIN_FILES_PER_BUCKET:
+                    return picked
         if total_files > MAX_DATA_FILES:
             all_files: List[str] = []
             for bucket in buckets:
                 all_files.extend(fn for fn, _ in bucket)
-            return all_files
+            picked = CompactionManager._cap_by_row_limit(all_files, partition_dir)
+            if len(picked) >= 2:
+                return picked
         return None
+
+    @staticmethod
+    def _cap_by_row_limit(
+        files: List[str], partition_dir: str,
+    ) -> List[str]:
+        """Select a prefix of *files* whose combined row count fits
+        under MAX_SEGMENT_ROWS. Skips any single file already above
+        the limit — it's a terminal segment that shouldn't be compacted."""
+        import pyarrow.parquet as pq
+        out: List[str] = []
+        total = 0
+        for fn in files:
+            abs_path = os.path.join(partition_dir, fn)
+            try:
+                n = pq.ParquetFile(abs_path).metadata.num_rows
+            except Exception:
+                continue
+            if n >= MAX_SEGMENT_ROWS:
+                continue  # already at/over the cap — skip
+            if total + n > MAX_SEGMENT_ROWS:
+                break
+            out.append(fn)
+            total += n
+        return out
 
     # ── core compaction ─────────────────────────────────────────
 
