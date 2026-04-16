@@ -41,6 +41,7 @@ import sys
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from litevecdb.constants import (
     COMPACTION_BUCKET_BOUNDARIES,
@@ -173,9 +174,16 @@ class CompactionManager:
         files: List[str], partition_dir: str,
     ) -> List[str]:
         """Select a prefix of *files* whose combined row count fits
-        under MAX_SEGMENT_ROWS. Skips any single file already above
-        the limit — it's a terminal segment that shouldn't be compacted."""
+        under 2×MAX_SEGMENT_ROWS.
+
+        The 2x budget gives compaction room for shrinkage from dedup
+        and tombstone filtering — if the merged live rows exceed
+        MAX_SEGMENT_ROWS, _compact_files splits the output into
+        multiple segments, each under the cap. The 2x budget also
+        bounds per-compaction memory/IO.
+        """
         import pyarrow.parquet as pq
+        budget = 2 * MAX_SEGMENT_ROWS
         out: List[str] = []
         total = 0
         for fn in files:
@@ -184,9 +192,9 @@ class CompactionManager:
                 n = pq.ParquetFile(abs_path).metadata.num_rows
             except Exception:
                 continue
-            if n >= MAX_SEGMENT_ROWS:
-                continue  # already at/over the cap — skip
-            if total + n > MAX_SEGMENT_ROWS:
+            if n >= budget:
+                continue  # single file already too large — terminal, skip
+            if total + n > budget:
                 break
             out.append(fn)
             total += n
@@ -217,31 +225,42 @@ class CompactionManager:
         # 3. Filter rows that have a tombstone with strictly larger seq.
         filtered = self._filter_deleted(deduped, delta_index)
 
-        # 4. Write the merged file (or skip if filtered is empty).
-        new_rel: Optional[str] = None
+        # 4. Write merged file(s). If the live-row count exceeds
+        # MAX_SEGMENT_ROWS (after dedup + tombstone filtering), split
+        # into multiple segments under the cap. The split is in seq
+        # order so each output file has a contiguous seq range.
+        new_rels: List[str] = []
         if filtered.num_rows > 0:
-            # Use the CONTENT seq_min for the merged filename. This is
-            # the tightest safe lower bound on the smallest seq actually
-            # present in the file, which lets _global_min_active_data_seq
-            # advance after every compaction and lets tombstone GC make
-            # progress. seq_max is an upper bound only and is bumped by
-            # _pick_unique_seq_range when the natural name would collide
-            # with an existing file (the bump has no GC impact because
-            # seq_max is not used in that calculation).
-            seqs = filtered.column("_seq").to_pylist()
-            content_seq_min = min(seqs)
-            content_seq_max = max(seqs)
-            unique_min, unique_max = self._pick_unique_seq_range(
-                partition_dir, content_seq_min, content_seq_max,
-            )
-            new_rel = write_data_file(
-                filtered, partition_dir, seq_min=unique_min, seq_max=unique_max,
-            )
+            # Sort by _seq so slices have monotonic seq ranges.
+            sort_idx = pc.sort_indices(filtered, sort_keys=[("_seq", "ascending")])
+            filtered = filtered.take(sort_idx)
+
+            chunk_size = MAX_SEGMENT_ROWS
+            total_rows = filtered.num_rows
+            if total_rows <= chunk_size:
+                chunks = [filtered]
+            else:
+                chunks = [
+                    filtered.slice(i, min(chunk_size, total_rows - i))
+                    for i in range(0, total_rows, chunk_size)
+                ]
+
+            for chunk in chunks:
+                seqs = chunk.column("_seq").to_pylist()
+                content_seq_min = min(seqs)
+                content_seq_max = max(seqs)
+                unique_min, unique_max = self._pick_unique_seq_range(
+                    partition_dir, content_seq_min, content_seq_max,
+                )
+                rel = write_data_file(
+                    chunk, partition_dir, seq_min=unique_min, seq_max=unique_max,
+                )
+                new_rels.append(rel)
 
         # 5. Atomic manifest update.
         manifest.remove_data_files(partition, files_to_compact)
-        if new_rel is not None:
-            manifest.add_data_file(partition, new_rel)
+        for rel in new_rels:
+            manifest.add_data_file(partition, rel)
         manifest.save()
 
         # 6. Delete old files from disk. Past this point a crash leaves

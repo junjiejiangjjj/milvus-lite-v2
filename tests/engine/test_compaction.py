@@ -150,15 +150,12 @@ def test_select_target_force_compact_total_exceeds_max(harness):
     assert len(target) >= 2
 
 
-def test_select_target_respects_max_segment_rows(harness, monkeypatch):
-    """Merge group should not exceed MAX_SEGMENT_ROWS."""
+def test_select_target_respects_2x_budget(harness, monkeypatch):
+    """Merge group is bounded by 2x MAX_SEGMENT_ROWS (room for shrinkage)."""
     import litevecdb.engine.compaction as comp_mod
-    # Temporarily lower the cap so we can assert behavior without
-    # needing to write millions of rows.
-    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 30)
-    # 4 files × 10 rows each = 40 rows total. With cap=30, should pick
-    # only 3 files (30 rows) — but MIN_FILES_PER_BUCKET=4, so nothing
-    # gets merged from this bucket.
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 10)
+    # Budget = 20. 4 files × 10 rows = 40 > budget → pick only 2.
+    # But MIN_FILES=4 → no merge since only 2 fit.
     partition_dir, names = _make_files(harness, 4, rows_per_file=10)
     buckets = [
         [(n, 100) for n in names],
@@ -167,15 +164,14 @@ def test_select_target_respects_max_segment_rows(harness, monkeypatch):
     target = comp_mod.CompactionManager._select_target(
         buckets, total_files=4, partition_dir=partition_dir,
     )
-    # Only 3 files fit under cap → below MIN_FILES_PER_BUCKET → no merge
     assert target is None
 
 
-def test_select_target_skips_over_cap_files(harness, monkeypatch):
-    """Files already over MAX_SEGMENT_ROWS are skipped entirely."""
+def test_select_target_skips_over_budget_files(harness, monkeypatch):
+    """Files already over 2×MAX_SEGMENT_ROWS are skipped entirely."""
     import litevecdb.engine.compaction as comp_mod
-    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 15)
-    # Each file has 20 rows, all already > cap (15) → nothing to merge.
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
+    # Each file has 20 rows, budget = 10 → all skipped.
     partition_dir, names = _make_files(harness, 4, rows_per_file=20)
     buckets = [
         [(n, 100) for n in names],
@@ -185,6 +181,137 @@ def test_select_target_skips_over_cap_files(harness, monkeypatch):
         buckets, total_files=4, partition_dir=partition_dir,
     )
     assert target is None
+
+
+def test_compaction_splits_oversized_output(harness, monkeypatch):
+    """When merged live rows > MAX_SEGMENT_ROWS, output is split."""
+    import litevecdb.engine.compaction as comp_mod
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
+
+    # 4 files × 3 rows = 12 rows total. Budget = 10. Only 3 files fit,
+    # giving 9 rows → below MIN=4, so bucket path won't trigger.
+    # Force-compact path kicks in at total > MAX_DATA_FILES. Use
+    # smaller files to fit under budget and test split behavior.
+    partition_dir, names = _make_files(harness, 4, rows_per_file=3)
+    buckets = [
+        [(n, 100) for n in names],
+        [], [], [],
+    ]
+    target = comp_mod.CompactionManager._select_target(
+        buckets, total_files=4, partition_dir=partition_dir,
+    )
+    # 4 × 3 = 12 rows. Budget = 2×5 = 10. Only first 3 files (9 rows) picked.
+    # Below MIN=4 → None.
+    assert target is None
+
+
+def test_compact_files_splits_when_live_rows_exceed_cap(harness, monkeypatch):
+    """End-to-end: compaction output is split when merged rows > cap."""
+    import litevecdb.engine.compaction as comp_mod
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
+
+    # Create 2 files × 6 rows each = 12 live rows (no deletes, no overlap).
+    # Post-compaction: 12 rows > cap(5) → should produce 3 output files
+    # of sizes [5, 5, 2].
+    _write_data_file_with_records(
+        harness,
+        [(i, f"pk_{i}", [0.1, 0.2], None) for i in range(6)],
+        seq_min=0, seq_max=5,
+    )
+    _write_data_file_with_records(
+        harness,
+        [(i + 6, f"pk_{i + 6}", [0.1, 0.2], None) for i in range(6)],
+        seq_min=6, seq_max=11,
+    )
+
+    partition_dir = os.path.join(
+        harness["data_dir"], "partitions", DEFAULT_PARTITION
+    )
+    files = harness["manifest"].get_data_files(DEFAULT_PARTITION)
+    harness["mgr"]._compact_files(
+        DEFAULT_PARTITION, partition_dir, list(files),
+        harness["manifest"], harness["delta_index"],
+    )
+
+    # Output: 12 rows split into chunks of 5 → 3 files.
+    new_files = harness["manifest"].get_data_files(DEFAULT_PARTITION)
+    assert len(new_files) == 3
+    import pyarrow.parquet as pq
+    row_counts = [
+        pq.ParquetFile(os.path.join(partition_dir, fn)).metadata.num_rows
+        for fn in new_files
+    ]
+    assert sorted(row_counts) == [2, 5, 5]
+
+
+def test_compact_files_single_output_when_under_cap(harness, monkeypatch):
+    """No split when merged rows fit under cap (normal case)."""
+    import litevecdb.engine.compaction as comp_mod
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 20)
+
+    # 2 files × 5 rows = 10 total < cap(20) → single output file.
+    _write_data_file_with_records(
+        harness,
+        [(i, f"pk_{i}", [0.1, 0.2], None) for i in range(5)],
+        seq_min=0, seq_max=4,
+    )
+    _write_data_file_with_records(
+        harness,
+        [(i + 5, f"pk_{i + 5}", [0.1, 0.2], None) for i in range(5)],
+        seq_min=5, seq_max=9,
+    )
+
+    partition_dir = os.path.join(
+        harness["data_dir"], "partitions", DEFAULT_PARTITION
+    )
+    files = harness["manifest"].get_data_files(DEFAULT_PARTITION)
+    harness["mgr"]._compact_files(
+        DEFAULT_PARTITION, partition_dir, list(files),
+        harness["manifest"], harness["delta_index"],
+    )
+
+    new_files = harness["manifest"].get_data_files(DEFAULT_PARTITION)
+    assert len(new_files) == 1
+
+
+def test_compact_files_tombstones_shrink_to_single_output(harness, monkeypatch):
+    """Scenario A: two full segments with many deletes → single merged output."""
+    import litevecdb.engine.compaction as comp_mod
+    monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
+
+    # 2 files × 6 rows each = 12 raw rows. Delete 8 of them → 4 live rows
+    # → fits in single output file under cap=5.
+    _write_data_file_with_records(
+        harness,
+        [(i, f"pk_{i}", [0.1, 0.2], None) for i in range(6)],
+        seq_min=0, seq_max=5,
+    )
+    _write_data_file_with_records(
+        harness,
+        [(i + 6, f"pk_{i + 6}", [0.1, 0.2], None) for i in range(6)],
+        seq_min=6, seq_max=11,
+    )
+    # Add tombstones with seq > file seqs, deleting pk_0..pk_7 (8 deletes).
+    for i in range(8):
+        harness["delta_index"]._map[f"pk_{i}"] = 100
+
+    partition_dir = os.path.join(
+        harness["data_dir"], "partitions", DEFAULT_PARTITION
+    )
+    files = harness["manifest"].get_data_files(DEFAULT_PARTITION)
+    harness["mgr"]._compact_files(
+        DEFAULT_PARTITION, partition_dir, list(files),
+        harness["manifest"], harness["delta_index"],
+    )
+
+    # Only 4 live rows after filtering tombstones → single output ≤ cap.
+    new_files = harness["manifest"].get_data_files(DEFAULT_PARTITION)
+    assert len(new_files) == 1
+    import pyarrow.parquet as pq
+    n_rows = pq.ParquetFile(
+        os.path.join(partition_dir, new_files[0])
+    ).metadata.num_rows
+    assert n_rows == 4
 
 
 # ---------------------------------------------------------------------------
