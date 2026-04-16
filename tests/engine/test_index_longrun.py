@@ -52,9 +52,16 @@ def _data_stems(data_dir: str, partition: str) -> set:
     return {os.path.splitext(f)[0] for f in os.listdir(p)}
 
 
-def _assert_one_to_one(data_dir: str, partition: str, suffix: str) -> None:
+def _assert_one_to_one(data_dir: str, partition: str, suffix: str,
+                       col: "Collection" = None) -> None:
     """Architectural invariant §11: every data file has an .idx, every
-    .idx has a data file, and the stems match exactly."""
+    .idx has a data file, and the stems match exactly.
+
+    Waits for pending background index builds before asserting, since
+    flush is now async and .idx files appear after some delay.
+    """
+    if col is not None:
+        col._wait_for_bg()
     idx_files = _index_files(data_dir, partition, suffix)
     idx_stems = {f[: -len(suffix)] for f in idx_files}
     data_stems = _data_stems(data_dir, partition)
@@ -100,7 +107,7 @@ def test_index_lifecycle_long_run_brute_force(tmp_path, schema, monkeypatch):
             # Insert triggers a flush at MEMTABLE_SIZE_LIMIT, which
             # in turn may trigger compaction. After each insert
             # the invariant must hold.
-            _assert_one_to_one(data_dir, "_default", ".brute_force.idx")
+            _assert_one_to_one(data_dir, "_default", ".brute_force.idx", c)
 
         # Final state: every record still queryable.
         for i in range(0, n_records, 50):
@@ -136,11 +143,11 @@ def test_index_lifecycle_with_deletes_brute_force(tmp_path, schema, monkeypatch)
             if i % 4 == 0:
                 c.delete([i])
                 deleted.add(i)
-            _assert_one_to_one(data_dir, "_default", ".brute_force.idx")
+            _assert_one_to_one(data_dir, "_default", ".brute_force.idx", c)
 
         # Force a final flush so any in-memory state goes to disk.
         c.flush()
-        _assert_one_to_one(data_dir, "_default", ".brute_force.idx")
+        _assert_one_to_one(data_dir, "_default", ".brute_force.idx", c)
 
         # Tombstones must remain effective.
         for i in sorted(deleted):
@@ -178,7 +185,7 @@ def test_restart_after_long_run_brute_force(tmp_path, schema, monkeypatch):
     for i in range(n):
         c.insert([{"id": i, "vec": _vec(i), "title": "x"}])
     c.flush()
-    _assert_one_to_one(data_dir, "_default", ".brute_force.idx")
+    _assert_one_to_one(data_dir, "_default", ".brute_force.idx", c)
 
     expected = c.search([_vec(150)], top_k=5)
     expected_ids = [r["id"] for r in expected[0]]
@@ -189,7 +196,7 @@ def test_restart_after_long_run_brute_force(tmp_path, schema, monkeypatch):
         assert c2.load_state == "released"
         c2.load()
         # Invariant still holds after recovery
-        _assert_one_to_one(data_dir, "_default", ".brute_force.idx")
+        _assert_one_to_one(data_dir, "_default", ".brute_force.idx", c2)
         actual = c2.search([_vec(150)], top_k=5)
         assert [r["id"] for r in actual[0]] == expected_ids
     finally:
@@ -224,10 +231,10 @@ def test_index_lifecycle_long_run_hnsw(tmp_path, schema, monkeypatch):
         n_records = 200
         for i in range(n_records):
             c.insert([{"id": i, "vec": _vec(i), "title": "x"}])
-            _assert_one_to_one(data_dir, "_default", ".hnsw.idx")
+            _assert_one_to_one(data_dir, "_default", ".hnsw.idx", c)
 
         c.flush()
-        _assert_one_to_one(data_dir, "_default", ".hnsw.idx")
+        _assert_one_to_one(data_dir, "_default", ".hnsw.idx", c)
 
         # Sample a few queries — HNSW recall@1 ≥ 0.95 typically; we
         # check that the self-query returns SOME hit (not empty).

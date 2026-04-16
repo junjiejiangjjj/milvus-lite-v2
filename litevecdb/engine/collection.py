@@ -25,11 +25,16 @@ storage layer free of engine-layer types.
 
 from __future__ import annotations
 
+import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyarrow as pa
+
+logger = logging.getLogger(__name__)
 
 from litevecdb.constants import (
     ALL_PARTITIONS,
@@ -166,6 +171,19 @@ class Collection:
 
         # ── 5. compaction manager ───────────────────────────────
         self._compaction_mgr = CompactionManager(data_dir, schema)
+
+        # Maintenance lock serializes mutations to manifest, segment
+        # cache, and delta_index between the user thread (flush) and
+        # the background worker (compaction + index build).
+        self._maintenance_lock: threading.RLock = threading.RLock()
+        # Single-threaded executor for background compaction + index
+        # build. Insert returns as soon as data is persisted; heavy
+        # work happens off the user thread.
+        self._bg_executor: ThreadPoolExecutor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix=f"litevecdb-{name}",
+        )
+        self._bg_closed: bool = False
 
         # ── 6. filter expression cache (Phase F2c) ──────────────
         # LRU on (expr_string → CompiledExpr) — schema is implicit since
@@ -407,7 +425,7 @@ class Collection:
         best_seq = -1
         best_segment = None
         best_row_idx = -1
-        for seg in self._segment_cache.values():
+        for seg in self._segments_snapshot():
             row_idx = seg.find_row(pk)
             if row_idx is None:
                 continue
@@ -518,7 +536,7 @@ class Collection:
                 best_seq = -1
                 best_segment: Optional[Segment] = None
                 best_row_idx: int = -1
-                for segment in self._segment_cache.values():
+                for segment in self._segments_snapshot():
                     if partition_filter is not None and segment.partition not in partition_filter:
                         continue
                     row_idx = segment.find_row(pk)
@@ -665,7 +683,7 @@ class Collection:
             compiled_filter = self._compile_filter(expr) if expr else None
             raw_results = execute_search_with_index(
             query_vectors=q_arr,
-            segments=self._segment_cache.values(),
+            segments=self._segments_snapshot(),
             memtable=self._memtable,
             delta_index=self._delta_index,
             top_k=effective_top_k,
@@ -798,7 +816,7 @@ class Collection:
         per_query_candidates: List[List[Candidate]] = [[] for _ in range(nq)]
 
         # ── Per-segment search (cached indexes) ──────────────────
-        for seg in self._segment_cache.values():
+        for seg in self._segments_snapshot():
             if partition_filter is not None:
                 seg_part = seg.partition_name if hasattr(seg, 'partition_name') else None
                 if seg_part is not None and seg_part not in partition_filter:
@@ -1116,7 +1134,7 @@ class Collection:
         compiled_filter = self._compile_filter(expr) if expr else None
 
         all_pks, all_seqs, _all_vectors, all_rec_sources, filter_mask = assemble_candidates(
-            segments=self._segment_cache.values(),
+            segments=self._segments_snapshot(),
             memtable=self._memtable,
             vector_field=self._vector_name,
             partition_names=partition_names,
@@ -1322,44 +1340,44 @@ class Collection:
         must call ``load()`` to actually build segment indexes and
         re-enable search.
         """
-        if field_name in self._index_specs:
-            raise IndexAlreadyExistsError(
-                f"index already exists for field {field_name!r}; "
-                f"call drop_index first"
+        with self._maintenance_lock:
+            if field_name in self._index_specs:
+                raise IndexAlreadyExistsError(
+                    f"index already exists for field {field_name!r}; "
+                    f"call drop_index first"
+                )
+
+            # Validate the field is in the schema and is a vector type.
+            target = next((f for f in self._schema.fields if f.name == field_name), None)
+            if target is None:
+                raise SchemaValidationError(
+                    f"unknown field {field_name!r} for create_index"
+                )
+            if target.dtype not in (DataType.FLOAT_VECTOR, DataType.SPARSE_FLOAT_VECTOR):
+                raise SchemaValidationError(
+                    f"field {field_name!r} has type {target.dtype.name}; "
+                    f"create_index only supports vector fields"
+                )
+
+            spec = IndexSpec(
+                field_name=field_name,
+                index_type=index_params["index_type"],
+                metric_type=index_params["metric_type"],
+                build_params=dict(index_params.get("params") or {}),
+                search_params=dict(index_params.get("search_params") or {}),
             )
 
-        # Validate the field is in the schema and is a vector type.
-        target = next((f for f in self._schema.fields if f.name == field_name), None)
-        if target is None:
-            raise SchemaValidationError(
-                f"unknown field {field_name!r} for create_index"
-            )
-        if target.dtype not in (DataType.FLOAT_VECTOR, DataType.SPARSE_FLOAT_VECTOR):
-            raise SchemaValidationError(
-                f"field {field_name!r} has type {target.dtype.name}; "
-                f"create_index only supports vector fields"
-            )
+            self._index_specs[field_name] = spec
+            self._manifest.set_index_spec(spec)
+            self._manifest.save()
 
-        spec = IndexSpec(
-            field_name=field_name,
-            index_type=index_params["index_type"],
-            metric_type=index_params["metric_type"],
-            build_params=dict(index_params.get("params") or {}),
-            search_params=dict(index_params.get("search_params") or {}),
-        )
-
-        self._index_specs[field_name] = spec
-        self._manifest.set_index_spec(spec)
-        self._manifest.save()
-
-        # Milvus semantics: create_index preserves load state. If the
-        # collection is currently loaded, build the new index inline
-        # for all existing segments so search works immediately. If
-        # released, the index will be built lazily on next load().
-        if self._load_state == "loaded":
-            for seg in self._segment_cache.values():
-                if seg.num_rows > 0:
-                    seg.build_or_load_index(spec, self._index_dir(seg.partition))
+            # Milvus semantics: create_index preserves load state. If
+            # loaded, build indexes inline for existing segments so search
+            # works immediately. If released, the build is lazy on load().
+            if self._load_state == "loaded":
+                for seg in self._segment_cache.values():
+                    if seg.num_rows > 0:
+                        seg.build_or_load_index(spec, self._index_dir(seg.partition))
 
     def drop_index(self, field_name: Optional[str] = None) -> None:
         """Remove the IndexSpec, release in-memory indexes, and delete
@@ -1378,55 +1396,56 @@ class Collection:
         Other index_type files (if any — currently impossible since we
         only support one index per Collection) are left alone.
         """
-        if not self._index_specs:
-            raise IndexNotFoundError("no index to drop")
-        if field_name is not None and field_name not in self._index_specs:
-            raise IndexNotFoundError(
-                f"no index on field {field_name!r}; "
-                f"indexed fields: {list(self._index_specs.keys())}"
-            )
-        # Milvus semantics: drop_index is blocked when the collection
-        # is loaded. Caller must release() first.
-        if self._load_state == "loaded":
-            raise SchemaValidationError(
-                "vector index cannot be dropped on loaded collection; "
-                "call release() first"
-            )
+        with self._maintenance_lock:
+            if not self._index_specs:
+                raise IndexNotFoundError("no index to drop")
+            if field_name is not None and field_name not in self._index_specs:
+                raise IndexNotFoundError(
+                    f"no index on field {field_name!r}; "
+                    f"indexed fields: {list(self._index_specs.keys())}"
+                )
+            # Milvus semantics: drop_index is blocked when the collection
+            # is loaded. Caller must release() first.
+            if self._load_state == "loaded":
+                raise SchemaValidationError(
+                    "vector index cannot be dropped on loaded collection; "
+                    "call release() first"
+                )
 
-        # Determine which spec(s) to drop
-        if field_name is not None:
-            drop_specs = [self._index_specs[field_name]]
-        else:
-            drop_specs = list(self._index_specs.values())
+            # Determine which spec(s) to drop
+            if field_name is not None:
+                drop_specs = [self._index_specs[field_name]]
+            else:
+                drop_specs = list(self._index_specs.values())
 
-        # Release in-memory indexes for the affected fields.
-        for spec in drop_specs:
-            for seg in self._segment_cache.values():
-                seg.release_index(field_name=spec.field_name)
+            # Release in-memory indexes for the affected fields.
+            for spec in drop_specs:
+                for seg in self._segment_cache.values():
+                    seg.release_index(field_name=spec.field_name)
 
-        # Delete on-disk .idx files matching the dropped index_type(s).
-        for spec in drop_specs:
-            suffix = f".{spec.index_type.lower()}.idx"
-            for partition in self._manifest.list_partitions():
-                index_dir = self._index_dir(partition)
-                if not os.path.exists(index_dir):
-                    continue
-                for entry in os.listdir(index_dir):
-                    if entry.endswith(suffix):
-                        try:
-                            os.remove(os.path.join(index_dir, entry))
-                        except OSError:
-                            pass
+            # Delete on-disk .idx files matching the dropped index_type(s).
+            for spec in drop_specs:
+                suffix = f".{spec.index_type.lower()}.idx"
+                for partition in self._manifest.list_partitions():
+                    index_dir = self._index_dir(partition)
+                    if not os.path.exists(index_dir):
+                        continue
+                    for entry in os.listdir(index_dir):
+                        if entry.endswith(suffix):
+                            try:
+                                os.remove(os.path.join(index_dir, entry))
+                            except OSError:
+                                pass
 
-        # Remove from specs
-        for spec in drop_specs:
-            del self._index_specs[spec.field_name]
-            self._manifest.remove_index_spec(spec.field_name)
-        self._manifest.save()
+            # Remove from specs
+            for spec in drop_specs:
+                del self._index_specs[spec.field_name]
+                self._manifest.remove_index_spec(spec.field_name)
+            self._manifest.save()
 
-        # If no indexes remain, auto-load (backward compat).
-        if not self._index_specs:
-            self._load_state = "loaded"
+            # If no indexes remain, auto-load (backward compat).
+            if not self._index_specs:
+                self._load_state = "loaded"
 
     def has_index(self, field_name: Optional[str] = None) -> bool:
         """True iff create_index has been called (and not dropped).
@@ -1459,21 +1478,22 @@ class Collection:
         Raises any exception encountered during build, with the state
         machine rolled back to released.
         """
-        if self._load_state == "loaded":
-            return
-        self._load_state = "loading"
-        try:
-            for spec in self._index_specs.values():
-                for seg in self._segment_cache.values():
-                    if seg.num_rows == 0:
-                        continue
-                    seg.build_or_load_index(
-                        spec, self._index_dir(seg.partition)
-                    )
-            self._load_state = "loaded"
-        except Exception:
-            self._load_state = "released"
-            raise
+        with self._maintenance_lock:
+            if self._load_state == "loaded":
+                return
+            self._load_state = "loading"
+            try:
+                for spec in self._index_specs.values():
+                    for seg in self._segment_cache.values():
+                        if seg.num_rows == 0:
+                            continue
+                        seg.build_or_load_index(
+                            spec, self._index_dir(seg.partition)
+                        )
+                self._load_state = "loaded"
+            except Exception:
+                self._load_state = "released"
+                raise
 
     def release(self) -> None:
         """Drop all in-memory segment indexes; subsequent search() raises
@@ -1482,11 +1502,12 @@ class Collection:
         No-op if there's no IndexSpec (such collections never enter
         the released state — see Collection.__init__ for the rationale).
         """
-        if not self._index_specs:
-            return
-        for seg in self._segment_cache.values():
-            seg.release_index()
-        self._load_state = "released"
+        with self._maintenance_lock:
+            if not self._index_specs:
+                return
+            for seg in self._segment_cache.values():
+                seg.release_index()
+            self._load_state = "released"
 
     @property
     def load_state(self) -> str:
@@ -1523,7 +1544,7 @@ class Collection:
         pk_chunks: List[List[Any]] = []
         seq_chunks: List[np.ndarray] = []
 
-        for seg in self._segment_cache.values():
+        for seg in self._segments_snapshot():
             if seg.num_rows == 0:
                 continue
             pk_chunks.append(list(seg.pks))
@@ -1600,20 +1621,28 @@ class Collection:
             self._memtable.apply_delete(op.batch)
 
     def _trigger_flush(self) -> None:
-        """Step 1 of the flush pipeline + execute_flush for Steps 2-7.
+        """Flush pipeline — synchronous up to data persistence, then
+        compaction + index build are offloaded to the background worker.
 
-        Step 1 (here): freeze the current (MemTable, WAL), swap in fresh
-        ones on the Collection. Then call execute_flush on the frozen
-        pair, which handles disk writes, manifest commit, WAL cleanup.
+        Synchronous (user thread blocks):
+            1. Freeze MemTable + WAL, swap in fresh ones
+            2. Write data/delta parquet files
+            3. Atomic manifest commit
+            4. Refresh segment cache for newly flushed segments
+            5. Build index for newly flushed segments (fast, small segments)
+
+        Asynchronous (background thread):
+            6. Run compaction (can merge up to 200K rows, minutes of IO)
+            7. Build index on merged segments (can be slow for HNSW_SQ)
+
+        Insert throughput is bounded by the sync path only. The bg queue
+        is single-threaded so compaction tasks serialize naturally.
         """
         # ── Step 1: freeze ──────────────────────────────────────
         frozen_memtable = self._memtable
         frozen_wal = self._wal
         new_wal_number = frozen_wal.number + 1
 
-        # Swap in fresh ones BEFORE running execute_flush so that any
-        # subsequent insert calls (in case of async future) hit the new
-        # MemTable. In sync mode this is order-preserving anyway.
         self._memtable = MemTable(self._schema)
         wal_dir = os.path.join(self._data_dir, "wal")
         self._wal = WAL(
@@ -1623,37 +1652,77 @@ class Collection:
             wal_number=new_wal_number,
         )
 
-        # ── Steps 2-7: execute_flush ────────────────────────────
-        execute_flush(
-            frozen_memtable=frozen_memtable,
-            frozen_wal=frozen_wal,
-            data_dir=self._data_dir,
-            schema=self._schema,
-            manifest=self._manifest,
-            delta_index=self._delta_index,
-            new_wal_number=new_wal_number,
-        )
-
-        # ── post-flush: maybe trigger compaction per partition ──
-        # maybe_compact() is a no-op for partitions below the trigger
-        # threshold, so we can call it on all known partitions cheaply.
-        for partition in self._manifest.list_partitions():
-            self._compaction_mgr.maybe_compact(
-                partition, self._manifest, self._delta_index
+        # ── Steps 2-4: sync execute_flush under the maintenance lock.
+        # Only data persistence + cache swap happen here. Index building
+        # (even for small newly-flushed segments) is deferred to the bg
+        # worker so insert latency is bounded by parquet/manifest IO only.
+        with self._maintenance_lock:
+            execute_flush(
+                frozen_memtable=frozen_memtable,
+                frozen_wal=frozen_wal,
+                data_dir=self._data_dir,
+                schema=self._schema,
+                manifest=self._manifest,
+                delta_index=self._delta_index,
+                new_wal_number=new_wal_number,
             )
+            self._refresh_segment_cache()
 
-        # ── refresh segment cache (picks up flushed + compacted) ─
-        self._refresh_segment_cache()
+        # ── Steps 5-7: async compaction + index build
+        self._schedule_bg_maintenance()
 
-        # ── Phase 9.4: index hook ─────────────────────────────────
-        # If the Collection is loaded, attach an index to any newly
-        # created segments. This covers BOTH the flush case (new
-        # data parquet → new index) AND the compaction case (new
-        # merged segment → new index; the old segments and their
-        # .idx files were already evicted in _refresh_segment_cache
-        # via _cleanup_orphan_index_files below).
-        self._cleanup_orphan_index_files()
-        self._ensure_loaded_segments_indexed()
+    def _schedule_bg_maintenance(self) -> None:
+        """Submit compaction + post-compaction index build to bg worker.
+
+        Single-threaded executor serializes tasks so compaction steps
+        across partitions run in order. Exceptions are logged but not
+        propagated to the user thread.
+        """
+        if self._bg_closed:
+            return
+        self._bg_executor.submit(self._bg_compact_and_index)
+
+    def _wait_for_bg(self, timeout: Optional[float] = None) -> None:
+        """Block until all pending background tasks complete.
+
+        Intended for tests and for explicit drain points (e.g. before
+        a manifest snapshot). Does not prevent new tasks from being
+        scheduled after it returns.
+        """
+        # Submitting a no-op future and waiting on it forces serial
+        # draining through the single-threaded executor.
+        if self._bg_closed:
+            return
+        fut = self._bg_executor.submit(lambda: None)
+        fut.result(timeout=timeout)
+
+    def _bg_compact_and_index(self) -> None:
+        """Background worker body. Serialized by the single-worker pool.
+
+        Lock scope is tight: compaction (manifest mutation + cache swap)
+        holds the lock, then releases it during the slow index-build
+        step. This keeps concurrent user-thread flushes short-blocked
+        even when HNSW/HNSW_SQ builds take minutes.
+        """
+        try:
+            # Phase A: compaction (manifest + cache mutation) — under lock.
+            with self._maintenance_lock:
+                for partition in self._manifest.list_partitions():
+                    self._compaction_mgr.maybe_compact(
+                        partition, self._manifest, self._delta_index
+                    )
+                self._refresh_segment_cache()
+                self._cleanup_orphan_index_files()
+
+            # Phase B: index build — outside the lock. build_or_load_index
+            # operates on an immutable Segment and writes a dedicated .idx
+            # file, so concurrent user-thread flushes are safe.
+            self._ensure_loaded_segments_indexed()
+        except Exception:
+            logger.exception(
+                "background compaction/index build failed; will retry "
+                "on next flush"
+            )
 
     def _ensure_loaded_segments_indexed(self) -> None:
         """Phase 9.4: post-flush / post-compaction index hook.
@@ -1712,6 +1781,21 @@ class Collection:
                             except OSError:
                                 pass
                         break
+
+    def _segments_snapshot(self) -> Tuple["Segment", ...]:
+        """Atomic snapshot of the segment cache values.
+
+        ``dict.values()`` is a live view — iterating it while the bg
+        worker mutates ``_segment_cache`` raises RuntimeError. Readers
+        (search/query/get/num_entities) take a snapshot once so they
+        aren't perturbed by concurrent compaction.
+
+        Segment objects themselves are immutable w.r.t. their data
+        (pks/seqs/vectors/table are frozen after load), so operating on
+        an evicted Segment is still correct — just a slightly stale
+        view of the dataset.
+        """
+        return tuple(self._segment_cache.values())
 
     def _refresh_segment_cache(self) -> None:
         """Reconcile self._segment_cache with the manifest's data files.
@@ -1888,8 +1972,9 @@ class Collection:
     def close(self) -> None:
         """Flush any pending state and shut down the WAL.
 
-        Phase-3 close runs a final flush so the on-disk state is
-        consistent with whatever insert calls returned successfully.
+        Runs a final flush if the MemTable has data, waits for any
+        in-flight background compaction/index tasks, then shuts down
+        the background executor.
         """
         if self._memtable.size() > 0:
             self._trigger_flush()
@@ -1897,6 +1982,11 @@ class Collection:
             # Even an empty MemTable needs WAL cleanup so we don't leave
             # an empty wal file behind.
             self._wal.close_and_delete()
+
+        # Drain background tasks so manifest / cache / index state
+        # are all committed before the Collection is considered closed.
+        self._bg_closed = True
+        self._bg_executor.shutdown(wait=True)
 
     # ── introspection ───────────────────────────────────────────
 

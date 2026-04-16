@@ -50,6 +50,9 @@ def test_repeated_flush_triggers_compaction(tmp_path, schema, monkeypatch):
     for i in range(0, 2 * COMPACTION_MIN_FILES_PER_BUCKET, 2):
         col.insert([_rec(i), _rec(i + 1)])
 
+    # Compaction runs on the background worker — wait for it to drain.
+    col._wait_for_bg()
+
     files = col._manifest.get_data_files(DEFAULT_PARTITION)
     # After compaction, the 4 small files should have been merged.
     assert len(files) == 1, f"expected 1 merged file, got {len(files)}: {files}"
@@ -146,11 +149,16 @@ def test_crash_during_compaction_manifest_save(tmp_path, schema, monkeypatch):
     monkeypatch.setattr(manifest_mod.Manifest, "save", crashing_save)
 
     # This insert triggers a flush (1 save) + compaction (raises on 2nd save).
-    with pytest.raises(SystemExit):
-        col.insert([_rec(100), _rec(101)])
+    # Compaction runs in bg, so the SystemExit surfaces when we drain.
+    col.insert([_rec(100), _rec(101)])
+    # Wait for bg — the crashing save logs via exception handler in
+    # _bg_compact_and_index (doesn't re-raise to the main thread, but
+    # manifest.save failure does leave the new merged parquet as orphan).
+    col._wait_for_bg()
 
-    del col
+    # Restore save for shutdown path.
     monkeypatch.setattr(manifest_mod.Manifest, "save", real_save)
+    del col
 
     # Restart — recovery should clean up any orphan compaction file
     # and leave the system in a consistent state.

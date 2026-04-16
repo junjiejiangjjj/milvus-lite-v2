@@ -58,7 +58,14 @@ def _simulate_crash(col):
 
     Important: do not let close() run via __del__ either. Python's GC may
     or may not run __del__; we just stop using the object.
+
+    Stop the background executor (wait for any in-flight task to finish,
+    then cancel pending ones) — a real process crash kills all threads
+    at once; Python can't do that safely, so we drain to the nearest
+    atomic boundary.
     """
+    col._bg_closed = True
+    col._bg_executor.shutdown(wait=True, cancel_futures=True)
     del col
 
 

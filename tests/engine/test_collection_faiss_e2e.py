@@ -196,6 +196,7 @@ def test_hnsw_survives_compaction(tmp_path, schema, monkeypatch):
                 for i in range(10)
             ])
             c.flush()
+        c._wait_for_bg()  # compaction + index rebuild on bg worker
 
         # Verify .idx files match data files 1:1
         idx_dir = os.path.join(str(tmp_path / "data"), "partitions", "_default", "indexes")

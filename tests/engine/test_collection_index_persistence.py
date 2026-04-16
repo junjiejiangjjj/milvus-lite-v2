@@ -180,6 +180,7 @@ def test_flush_after_load_indexes_new_segments(tmp_path, schema):
         # Insert + flush again → new segment.
         c.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(100, 110)])
         c.flush()
+        c._wait_for_bg()  # index build runs on bg worker
 
         files_after = set(_index_files_for_partition(str(tmp_path / "data"), "_default"))
         assert files_after - files_before, "no new .idx file appeared after flush"
@@ -233,6 +234,7 @@ def test_compaction_replaces_idx_files(tmp_path, schema, monkeypatch):
                 for i in range(5)
             ])
             c.flush()
+        c._wait_for_bg()  # compaction + index rebuild on bg worker
 
         files = _index_files_for_partition(str(tmp_path / "data"), "_default")
 
