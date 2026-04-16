@@ -67,7 +67,7 @@ def test_drop_nonexistent_is_idempotent(milvus_client):
     milvus_client.drop_collection("ghost")  # no error
 
 
-def test_search_before_load_reports_not_loaded(milvus_client):
+def test_search_after_release_reports_not_loaded(milvus_client):
     schema = MilvusClient.create_schema(auto_id=False)
     schema.add_field("id", DataType.INT64, is_primary=True)
     schema.add_field("vec", DataType.FLOAT_VECTOR, dim=4)
@@ -79,7 +79,7 @@ def test_search_before_load_reports_not_loaded(milvus_client):
     idx.add_index(field_name="vec", index_type="BRUTE_FORCE",
                   metric_type="L2", params={})
     milvus_client.create_index("demo", idx)
-    # NOT loaded
+    milvus_client.release_collection("demo")
     with pytest.raises(Exception) as exc_info:
         milvus_client.search("demo", data=[[1.0, 0.0, 0.0, 0.0]], limit=1)
     assert "load" in str(exc_info.value).lower()

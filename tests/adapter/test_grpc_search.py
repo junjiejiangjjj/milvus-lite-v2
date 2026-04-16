@@ -168,13 +168,13 @@ def test_search_with_filter_no_match(loaded_collection):
 # Loaded state guard
 # ---------------------------------------------------------------------------
 
-def test_search_before_load_raises(milvus_client):
+def test_search_after_release_raises(milvus_client):
     milvus_client.create_collection("demo", schema=_make_schema())
     milvus_client.insert("demo", [
         {"id": 1, "vec": [1.0, 2.0, 0.0, 0.0], "title": "a", "score": 0.1, "active": True}
     ])
     milvus_client.create_index("demo", _hnsw_idx(milvus_client))
-    # Note: index created but NOT loaded
+    milvus_client.release_collection("demo")
     with pytest.raises(Exception) as exc_info:
         milvus_client.search("demo", data=[[1.0, 2.0, 0.0, 0.0]], limit=1)
     # Error mentions "not loaded" / "load"

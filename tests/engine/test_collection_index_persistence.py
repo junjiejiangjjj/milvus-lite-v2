@@ -196,7 +196,7 @@ def test_flush_in_released_state_does_not_build_index(tmp_path, schema):
     c = Collection("t", str(tmp_path / "data"), schema)
     try:
         c.create_index("vec", BRUTE_PARAMS)
-        # Released state.
+        c.release()  # Now explicitly in released state.
         c.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
         c.flush()
         # No .idx files should exist yet — we never called load().
@@ -281,11 +281,11 @@ def test_drop_index_removes_idx_files(tmp_path, schema):
         c.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
         c.flush()
         c.create_index("vec", BRUTE_PARAMS)
-        c.load()
 
         files = _index_files_for_partition(str(tmp_path / "data"), "_default")
         assert len(files) >= 1
 
+        c.release()  # drop_index requires released state
         c.drop_index("vec")
         files_after = _index_files_for_partition(str(tmp_path / "data"), "_default")
         assert files_after == []

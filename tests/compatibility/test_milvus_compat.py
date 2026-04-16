@@ -521,6 +521,7 @@ class TestIndexManagement:
                                metric_type="COSINE",
                                params={"M": 16, "efConstruction": 64})
         client.create_index("idx_drop", index_params)
+        client.release_collection("idx_drop")
         client.drop_index("idx_drop", index_name="vec")
 
     def test_autoindex(self, client: MilvusClient):

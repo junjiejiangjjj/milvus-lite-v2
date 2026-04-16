@@ -100,6 +100,7 @@ class TestMultiIndexEngine:
                 "index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25",
                 "params": {},
             })
+            col.release()  # drop_index requires released state (Milvus semantics)
             col.drop_index("sparse")
             assert col.has_index("dense")
             assert not col.has_index("sparse")
@@ -188,6 +189,8 @@ def test_grpc_drop_one_index(milvus_client):
                   metric_type="BM25", params={})
     milvus_client.create_index("mi_drop", idx)
 
+    # Drop requires released state (Milvus semantics).
+    milvus_client.release_collection("mi_drop")
     # Drop only sparse index
     milvus_client.drop_index("mi_drop", index_name="sparse_idx")
 

@@ -59,9 +59,8 @@ def test_create_index_load_search_full_flow(tmp_path, schema):
 
         c.create_index("vec", HNSW_PARAMS)
         assert c.has_index() is True
-        assert c.load_state == "released"
-
-        c.load()
+        # create_index preserves load state — already loaded since
+        # Collection auto-loads when no prior index spec exists.
         assert c.load_state == "loaded"
 
         # Every segment should now have a FaissHnswIndex attached
@@ -225,11 +224,11 @@ def test_drop_index_removes_hnsw_files(tmp_path, schema):
         ])
         c.flush()
         c.create_index("vec", HNSW_PARAMS)
-        c.load()
 
         idx_dir = os.path.join(str(tmp_path / "data"), "partitions", "_default", "indexes")
         assert any(f.endswith(".hnsw.idx") for f in os.listdir(idx_dir))
 
+        c.release()  # drop_index requires released state
         c.drop_index("vec")
         assert os.listdir(idx_dir) == []
     finally:

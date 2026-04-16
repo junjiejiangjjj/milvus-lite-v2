@@ -1352,13 +1352,14 @@ class Collection:
         self._manifest.set_index_spec(spec)
         self._manifest.save()
 
-        # Phase 9.3 semantics: an index now exists but is not built
-        # → user must explicitly load() before searching.
-        # Drop any in-memory indexes that may have been attached to
-        # segments (e.g. left over from a previous load + drop_index).
-        for seg in self._segment_cache.values():
-            seg.release_index()
-        self._load_state = "released"
+        # Milvus semantics: create_index preserves load state. If the
+        # collection is currently loaded, build the new index inline
+        # for all existing segments so search works immediately. If
+        # released, the index will be built lazily on next load().
+        if self._load_state == "loaded":
+            for seg in self._segment_cache.values():
+                if seg.num_rows > 0:
+                    seg.build_or_load_index(spec, self._index_dir(seg.partition))
 
     def drop_index(self, field_name: Optional[str] = None) -> None:
         """Remove the IndexSpec, release in-memory indexes, and delete
@@ -1383,6 +1384,13 @@ class Collection:
             raise IndexNotFoundError(
                 f"no index on field {field_name!r}; "
                 f"indexed fields: {list(self._index_specs.keys())}"
+            )
+        # Milvus semantics: drop_index is blocked when the collection
+        # is loaded. Caller must release() first.
+        if self._load_state == "loaded":
+            raise SchemaValidationError(
+                "vector index cannot be dropped on loaded collection; "
+                "call release() first"
             )
 
         # Determine which spec(s) to drop

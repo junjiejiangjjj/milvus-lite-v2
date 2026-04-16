@@ -1,14 +1,14 @@
 """Phase 9.3 — Collection.create_index / drop_index / load / release tests.
 
 Validates the state machine and the search/get/query loaded-guard.
-The semantics chosen for backward compatibility:
+Milvus-aligned semantics:
 
     - Collection without IndexSpec → auto-loaded on construction
-      (preserves all pre-Phase-9 tests; matches "no index = no
-      need to load" intuition)
-    - After create_index → released; user must call load() before
-      search/get/query (mirrors Milvus)
-    - After drop_index → loaded again
+      (matches "no index = no need to load" intuition)
+    - create_index preserves load state. When loaded, indexes are built
+      inline for existing segments so search continues to work.
+    - drop_index is blocked when loaded; caller must release() first.
+    - After drop_index (from released), state stays released.
     - After release → released
 """
 
@@ -88,9 +88,12 @@ def test_create_index_persists_spec(col):
     assert info["field_name"] == "vec"
 
 
-def test_create_index_moves_to_released(col):
+def test_create_index_preserves_load_state(col):
+    """Milvus semantics: create_index does not change load state.
+    Builds indexes inline when the collection is loaded."""
+    assert col.load_state == "loaded"
     col.create_index("vec", HNSW_PARAMS)
-    assert col.load_state == "released"
+    assert col.load_state == "loaded"
 
 
 def test_create_index_persists_across_restart(tmp_path, schema):
@@ -103,7 +106,7 @@ def test_create_index_persists_across_restart(tmp_path, schema):
         assert c2.has_index() is True
         info = c2.get_index_info()
         assert info["index_type"] == "HNSW"
-        # Restart with index should default to released — must call load.
+        # Restart with index spec defaults to released — must call load.
         assert c2.load_state == "released"
     finally:
         c2.close()
@@ -140,27 +143,42 @@ def test_create_index_passthrough_search_params(col):
 # drop_index
 # ---------------------------------------------------------------------------
 
+def test_drop_index_blocked_when_loaded(col):
+    """Milvus semantics: drop_index requires release() first."""
+    col.create_index("vec", HNSW_PARAMS)
+    # create_index keeps state loaded
+    assert col.load_state == "loaded"
+    with pytest.raises(SchemaValidationError, match="loaded"):
+        col.drop_index("vec")
+
+
 def test_drop_index_clears_spec(col):
     col.create_index("vec", HNSW_PARAMS)
+    col.release()
     col.drop_index("vec")
     assert col.has_index() is False
     assert col.get_index_info() is None
 
 
-def test_drop_index_moves_back_to_loaded(col):
+def test_drop_index_stays_released(col):
+    """After drop_index from released, stays released."""
     col.create_index("vec", HNSW_PARAMS)
+    col.release()
     col.drop_index("vec")
+    # No indexes → auto-loaded path since there's nothing to load
     assert col.load_state == "loaded"
 
 
 def test_drop_index_no_args_drops_existing(col):
     col.create_index("vec", HNSW_PARAMS)
+    col.release()
     col.drop_index()
     assert col.has_index() is False
 
 
 def test_drop_index_with_wrong_field_raises(col):
     col.create_index("vec", HNSW_PARAMS)
+    col.release()
     with pytest.raises(IndexNotFoundError):
         col.drop_index("ghost")
 
@@ -173,6 +191,7 @@ def test_drop_index_when_no_index_raises(col):
 def test_drop_index_persists_across_restart(tmp_path, schema):
     c = Collection("t", str(tmp_path / "data"), schema)
     c.create_index("vec", HNSW_PARAMS)
+    c.release()
     c.drop_index("vec")
     c.close()
 
@@ -189,10 +208,11 @@ def test_drop_index_persists_across_restart(tmp_path, schema):
 # load / release / state machine
 # ---------------------------------------------------------------------------
 
-def test_load_after_create_index(col):
+def test_load_after_release_create_index(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.flush()
-    col.create_index("vec", BRUTE_PARAMS)
+    col.create_index("vec", BRUTE_PARAMS)  # state stays loaded, indexes built
+    col.release()
     assert col.load_state == "released"
     col.load()
     assert col.load_state == "loaded"
@@ -201,7 +221,8 @@ def test_load_after_create_index(col):
 def test_load_attaches_index_to_segments(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.flush()
-    col.create_index("vec", BRUTE_PARAMS)
+    col.create_index("vec", BRUTE_PARAMS)  # builds inline
+    col.release()
     # Pre-load: no segment has an attached index.
     for seg in col._segment_cache.values():
         assert seg.index is None
@@ -214,10 +235,23 @@ def test_load_attaches_index_to_segments(col):
         assert seg.index.metric == "L2"
 
 
+def test_create_index_builds_inline_when_loaded(col):
+    """Milvus semantics: create_index while loaded attaches indexes immediately."""
+    col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
+    col.flush()
+    assert col.load_state == "loaded"
+    col.create_index("vec", BRUTE_PARAMS)
+    # State unchanged, and segments have indexes attached.
+    assert col.load_state == "loaded"
+    for seg in col._segment_cache.values():
+        assert seg.index is not None
+
+
 def test_load_is_idempotent(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.flush()
     col.create_index("vec", BRUTE_PARAMS)
+    col.release()
     col.load()
     state1 = col.load_state
     col.load()  # second load should be a no-op
@@ -235,7 +269,6 @@ def test_release_drops_segment_indexes(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.flush()
     col.create_index("vec", BRUTE_PARAMS)
-    col.load()
     col.release()
     assert col.load_state == "released"
     for seg in col._segment_cache.values():
@@ -252,6 +285,7 @@ def test_load_release_cycle(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.flush()
     col.create_index("vec", BRUTE_PARAMS)
+    col.release()
     for _ in range(3):
         col.load()
         assert col.load_state == "loaded"
@@ -263,23 +297,26 @@ def test_load_release_cycle(col):
 # search/get/query loaded guard
 # ---------------------------------------------------------------------------
 
-def test_search_after_create_index_raises(col):
+def test_search_after_release_raises(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.create_index("vec", BRUTE_PARAMS)
+    col.release()
     with pytest.raises(CollectionNotLoadedError):
         col.search([_vec(0)], top_k=3)
 
 
-def test_get_after_create_index_raises(col):
+def test_get_after_release_raises(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.create_index("vec", BRUTE_PARAMS)
+    col.release()
     with pytest.raises(CollectionNotLoadedError):
         col.get([0, 1, 2])
 
 
-def test_query_after_create_index_raises(col):
+def test_query_after_release_raises(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.create_index("vec", BRUTE_PARAMS)
+    col.release()
     with pytest.raises(CollectionNotLoadedError):
         col.query("id >= 0")
 
@@ -288,16 +325,16 @@ def test_search_after_load_works(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.flush()
     col.create_index("vec", BRUTE_PARAMS)
+    col.release()
     col.load()
     res = col.search([_vec(0)], top_k=3)
     assert len(res[0]) == 3
 
 
-def test_search_after_release_raises(col):
+def test_search_after_create_release_raises(col):
     col.insert([{"id": i, "vec": _vec(i), "title": "x"} for i in range(5)])
     col.flush()
     col.create_index("vec", BRUTE_PARAMS)
-    col.load()
     col.release()
     with pytest.raises(CollectionNotLoadedError):
         col.search([_vec(0)], top_k=3)
@@ -306,6 +343,7 @@ def test_search_after_release_raises(col):
 def test_insert_delete_work_in_released_state(col):
     """Writes should NOT require loaded state — only reads do."""
     col.create_index("vec", BRUTE_PARAMS)
+    col.release()
     assert col.load_state == "released"
     # Both should succeed without raising.
     col.insert([{"id": 99, "vec": _vec(99), "title": "x"}])
@@ -319,7 +357,7 @@ def test_describe_includes_load_state_and_index_spec(col):
 
     col.create_index("vec", HNSW_PARAMS)
     d2 = col.describe()
-    assert d2["load_state"] == "released"
+    assert d2["load_state"] == "loaded"  # create_index preserves state
     assert "vec" in d2["index_specs"]
     assert d2["index_specs"]["vec"]["index_type"] == "HNSW"
     assert d2["index_specs"]["vec"]["metric_type"] == "COSINE"

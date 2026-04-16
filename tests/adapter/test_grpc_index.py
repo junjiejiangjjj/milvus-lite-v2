@@ -42,7 +42,7 @@ def _brute_params(client):
 
 @pytest.fixture
 def populated(milvus_client):
-    """A collection with 10 records and a HNSW index, but NOT loaded."""
+    """A collection with 10 records and a HNSW index; state=loaded."""
     milvus_client.create_collection("demo", schema=_make_schema())
     milvus_client.insert("demo", [
         {"id": i, "vec": [float(i), float(i+1), 0.0, 0.0], "title": f"t{i}"}
@@ -92,6 +92,8 @@ def test_create_index_metric_round_trip(populated):
 # ---------------------------------------------------------------------------
 
 def test_drop_index(populated):
+    # Milvus semantics: drop_index requires released state.
+    populated.release_collection("demo")
     populated.drop_index("demo", "vec")
     # After drop, describe_index returns None (pymilvus parses
     # INDEX_NOT_FOUND status as None, not as a raise)
@@ -119,9 +121,10 @@ def test_load_state_before_create_index(milvus_client):
     assert "Loaded" in str(state["state"])
 
 
-def test_load_state_after_create_index_is_not_loaded(populated):
+def test_load_state_after_create_index_is_loaded(populated):
+    """Milvus semantics: create_index preserves load state."""
     state = populated.get_load_state("demo")
-    assert "NotLoad" in str(state["state"])
+    assert "Loaded" in str(state["state"])
 
 
 def test_load_collection(populated):
