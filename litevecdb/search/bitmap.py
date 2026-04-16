@@ -23,6 +23,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from litevecdb.storage.delta_index import DeltaIndex
+    from litevecdb.storage.memtable import MemTable
 
 
 def build_valid_mask(
@@ -30,6 +31,7 @@ def build_valid_mask(
     all_seqs: np.ndarray,
     delta_index: "DeltaIndex",
     filter_mask: Optional[np.ndarray] = None,
+    memtable: Optional["MemTable"] = None,
 ) -> np.ndarray:
     """Return a boolean mask over the candidate rows.
 
@@ -37,9 +39,14 @@ def build_valid_mask(
         all_pks: list of pk values, length N. Python list (not numpy)
             because pk dtype may be string or int.
         all_seqs: np.ndarray[uint64], shape (N,)
-        delta_index: tombstone source.
+        delta_index: tombstone source (already-flushed deletes).
         filter_mask: optional Phase-8 scalar filter result, length N.
             If provided, AND'd into the final mask.
+        memtable: optional live MemTable. Its _delete_index is consulted
+            for tombstones applied but not yet flushed to delta_index —
+            without this, deletes targeting already-flushed segment data
+            would remain invisible to search/query until the next flush
+            (issue #21).
 
     Returns:
         np.ndarray[bool] shape (N,). True means "this row is the latest
@@ -72,6 +79,10 @@ def build_valid_mask(
 
     # Step 2: build mask — keep rows whose seq is the max for their pk AND
     # whose pk is not tombstoned with a larger seq.
+    # MemTable's local _delete_index holds tombstones applied but not
+    # yet folded into delta_index (which happens at flush time). We
+    # must also consult it so recent deletes are visible to readers.
+    mt_deletes = memtable._delete_index if memtable is not None else {}
     mask = np.zeros(n, dtype=bool)
     for i in range(n):
         pk = all_pks[i]
@@ -80,6 +91,9 @@ def build_valid_mask(
             continue  # an older version of this pk exists later in the array
         if delta_index.is_deleted(pk, seq):
             continue
+        mt_entry = mt_deletes.get(pk)
+        if mt_entry is not None and mt_entry[0] > seq:
+            continue  # MemTable-local tombstone shadows this row
         mask[i] = True
 
     # Step 3: AND in the scalar filter mask, if provided.

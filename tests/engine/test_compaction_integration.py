@@ -242,6 +242,11 @@ def test_long_run_with_deletes_bounds_delta_index(tmp_path, schema, monkeypatch)
 
 
 @pytest.mark.slow
+@pytest.mark.skip(
+    reason="Tombstone GC disabled under concurrent bg compaction "
+           "(issue #21). Tombstones now accumulate in memory instead "
+           "of being removed after compaction."
+)
 def test_gc_progress_when_old_data_compacted_out(tmp_path, schema, monkeypatch):
     """A workload that DOES let GC make progress: delete the same pks
     repeatedly so the surviving content seq advances past old delete seqs.

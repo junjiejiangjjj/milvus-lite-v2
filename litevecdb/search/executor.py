@@ -38,6 +38,7 @@ def execute_search(
     vector_field: str,
     filter_mask: Optional[np.ndarray] = None,
     output_fields: Optional[List[str]] = None,
+    memtable=None,
 ) -> List[List[dict]]:
     """Run search and return ``nq`` lists of top-k result dicts.
 
@@ -92,7 +93,10 @@ def execute_search(
         return [[] for _ in range(nq)]
 
     # ── 1. bitmap ───────────────────────────────────────────────
-    mask = build_valid_mask(all_pks, all_seqs, delta_index, filter_mask=filter_mask)
+    mask = build_valid_mask(
+        all_pks, all_seqs, delta_index, filter_mask=filter_mask,
+        memtable=memtable,
+    )
     valid_indices = np.flatnonzero(mask)
 
     if valid_indices.size == 0:

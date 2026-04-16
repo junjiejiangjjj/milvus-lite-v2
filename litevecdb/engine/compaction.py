@@ -105,10 +105,14 @@ class CompactionManager:
 
         self._compact_files(partition, partition_dir, target, manifest, delta_index)
 
-        # Tombstone GC after compaction. Uses the GLOBAL min_active_data_seq
-        # because a tombstone for pk X may need to filter rows in any
-        # partition's data files.
-        self._gc_tombstones(manifest, delta_index)
+        # Tombstone GC is NOT called here. With background compaction,
+        # a reader may hold a pre-compaction segment snapshot while this
+        # method runs; calling gc_below would remove tombstones those
+        # readers still need to filter out deleted rows in the old
+        # segments they're iterating, producing "ghost data" results
+        # (issue #21). Tombstones accumulate in memory instead (~50B
+        # per unique deleted pk, bounded by the collection lifetime).
+        # A generation/refcount-based safe-GC scheme is deferred.
         return True
 
     # ── bucketing + selection ───────────────────────────────────

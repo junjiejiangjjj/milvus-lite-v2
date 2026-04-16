@@ -150,6 +150,10 @@ def execute_search_with_index(
     # Sources are numbered 0..N-1 = segments, then N = memtable.
     sources: List[Tuple[List[Any], np.ndarray, np.ndarray]] = []
 
+    # MemTable-local tombstones for pks already flushed to segments —
+    # not yet in delta_index (folded at next flush). See issue #21.
+    mt_deletes = memtable._delete_index  # {pk: (seq, partition)}
+
     def _build_local_mask(
         pks: List[Any],
         seqs: np.ndarray,
@@ -165,6 +169,9 @@ def execute_search_with_index(
                 continue
             # Tombstone: a strictly larger delete_seq shadows this row.
             if delta_index.is_deleted(pk, seq):
+                continue
+            mt_entry = mt_deletes.get(pk)
+            if mt_entry is not None and mt_entry[0] > seq:
                 continue
             local_mask[i] = True
         if filter_mask is not None:

@@ -136,6 +136,7 @@ def _run_old_path(
         vector_field=col._vector_name,         # noqa: SLF001
         filter_mask=filter_mask,
         output_fields=output_fields,
+        memtable=col._memtable,                # noqa: SLF001
     )
 
 

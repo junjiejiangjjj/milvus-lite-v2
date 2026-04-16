@@ -1149,6 +1149,7 @@ class Collection:
         from litevecdb.search.assembler import materialize_record
         mask = build_valid_mask(
             all_pks, all_seqs, self._delta_index, filter_mask=filter_mask,
+            memtable=self._memtable,
         )
 
         # Deferred materialization: only materialize records that pass the mask.
@@ -1568,7 +1569,9 @@ class Collection:
         all_seqs = np.concatenate(seq_chunks)
 
         from litevecdb.search.bitmap import build_valid_mask
-        mask = build_valid_mask(all_pks, all_seqs, self._delta_index)
+        mask = build_valid_mask(
+            all_pks, all_seqs, self._delta_index, memtable=self._memtable,
+        )
         return int(mask.sum())
 
     def describe(self) -> dict:
