@@ -1736,8 +1736,13 @@ class Collection:
         """
         if self._load_state != "loaded" or not self._index_specs:
             return
-        for spec in self._index_specs.values():
-            for seg in self._segment_cache.values():
+        # Snapshot both collections — bg index build runs without the
+        # maintenance lock, so the main thread may concurrently add
+        # new segments to _segment_cache or touch _index_specs.
+        specs = tuple(self._index_specs.values())
+        segs = self._segments_snapshot()
+        for spec in specs:
+            for seg in segs:
                 if spec.field_name not in seg.indexes and seg.num_rows > 0:
                     seg.build_or_load_index(
                         spec, self._index_dir(seg.partition)

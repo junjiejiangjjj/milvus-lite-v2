@@ -129,6 +129,63 @@ def test_close_drains_bg_tasks(tmp_path, schema, monkeypatch):
     col2.close()
 
 
+def test_bg_index_build_survives_concurrent_flush(tmp_path, schema, monkeypatch):
+    """Regression: `_ensure_loaded_segments_indexed` used to iterate
+    `_segment_cache.values()` directly, which raises RuntimeError if
+    the main thread adds a new segment mid-iteration. Must snapshot."""
+    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
+
+    col = Collection("c", str(tmp_path / "d"), schema)
+    col.create_index("vec", {
+        "index_type": "BRUTE_FORCE", "metric_type": "COSINE", "params": {},
+    })
+
+    # Slow per-segment index build forces the bg thread to spend time
+    # in the iteration, during which the main thread flushes more
+    # segments. Without a snapshot, `dict changed size during iteration`
+    # raises and the bg task aborts, leaving segments unindexed.
+    from litevecdb.storage.segment import Segment
+    real_build = Segment.build_or_load_index
+
+    def slow_build(self, spec, index_dir):
+        time.sleep(0.05)
+        return real_build(self, spec, index_dir)
+
+    monkeypatch.setattr(Segment, "build_or_load_index", slow_build)
+
+    # Log capture: watch for the "background compaction/index build failed"
+    # error that the bug produces.
+    import logging
+    bg_errors = []
+
+    class BgErrorHandler(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.ERROR:
+                bg_errors.append(record.getMessage())
+
+    handler = BgErrorHandler()
+    logging.getLogger("litevecdb.engine.collection").addHandler(handler)
+    try:
+        # Fire many flushes in a tight loop — each enqueues a bg task,
+        # and the bg task iterates the cache which is being mutated.
+        for i in range(30):
+            col.insert(_records(i * 3, 3))
+        col._wait_for_bg()
+    finally:
+        logging.getLogger("litevecdb.engine.collection").removeHandler(handler)
+
+    assert not bg_errors, f"bg worker raised errors: {bg_errors}"
+
+    # Every segment should have its index attached after draining.
+    col.load()
+    for seg in col._segment_cache.values():
+        if seg.num_rows > 0:
+            assert seg.index is not None, (
+                f"segment {seg.file_path} missing index after drain"
+            )
+    col.close()
+
+
 def test_wait_for_bg_drains_pending(tmp_path, schema, monkeypatch):
     """_wait_for_bg blocks until all queued tasks finish."""
     monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
