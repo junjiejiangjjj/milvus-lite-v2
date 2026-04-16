@@ -422,6 +422,7 @@ class Collection:
             return None
 
         # 2. Segments
+        delta_snap = self._delta_index.frozen_copy()
         best_seq = -1
         best_segment = None
         best_row_idx = -1
@@ -436,7 +437,7 @@ class Collection:
                 best_row_idx = row_idx
 
         if best_segment is not None:
-            if not self._delta_index.is_deleted(pk, best_seq):
+            if not delta_snap.is_deleted(pk, best_seq):
                 rec = best_segment.row_to_dict(best_row_idx)
                 rec.pop("$meta", None)
                 return rec
@@ -518,6 +519,10 @@ class Collection:
 
         partition_filter = set(partition_names) if partition_names else None
         compiled_filter = self._compile_filter(expr) if expr else None
+        # Snapshot tombstones so the bg worker's gc_below doesn't
+        # invalidate entries we rely on during this read.
+        delta_snap = self._delta_index.frozen_copy()
+        seg_snap = self._segments_snapshot()
 
         out: List[dict] = []
 
@@ -536,7 +541,7 @@ class Collection:
                 best_seq = -1
                 best_segment: Optional[Segment] = None
                 best_row_idx: int = -1
-                for segment in self._segments_snapshot():
+                for segment in seg_snap:
                     if partition_filter is not None and segment.partition not in partition_filter:
                         continue
                     row_idx = segment.find_row(pk)
@@ -549,7 +554,7 @@ class Collection:
                         best_row_idx = row_idx
 
                 if best_segment is not None:
-                    if not self._delta_index.is_deleted(pk, best_seq):
+                    if not delta_snap.is_deleted(pk, best_seq):
                         rec = best_segment.row_to_dict(best_row_idx)
 
             if rec is None:
@@ -685,7 +690,7 @@ class Collection:
             query_vectors=q_arr,
             segments=self._segments_snapshot(),
             memtable=self._memtable,
-            delta_index=self._delta_index,
+            delta_index=self._delta_index.frozen_copy(),
             top_k=effective_top_k,
             metric_type=metric_type,
             pk_field=self._pk_name,
@@ -815,6 +820,9 @@ class Collection:
         Candidate = Tuple[float, Any, Any]  # (dist, pk, (tbl, row_idx))
         per_query_candidates: List[List[Candidate]] = [[] for _ in range(nq)]
 
+        # Tombstone snapshot — protects us from concurrent gc_below.
+        delta_snap = self._delta_index.frozen_copy()
+
         # ── Per-segment search (cached indexes) ──────────────────
         for seg in self._segments_snapshot():
             if partition_filter is not None:
@@ -845,7 +853,7 @@ class Collection:
             valid_mask = np.ones(n, dtype=bool)
             for i in range(n):
                 pk, seq = pks[i], int(seqs[i])
-                if self._delta_index.is_deleted(pk, seq):
+                if delta_snap.is_deleted(pk, seq):
                     valid_mask[i] = False
 
             # Apply scalar filter
@@ -893,7 +901,7 @@ class Collection:
             for i, pk in enumerate(mt_pks):
                 # Memtable rows: check if overridden by a segment with higher seq
                 # (simplified — memtable rows always have highest seq for their pk)
-                if self._delta_index.is_deleted(pk, 0):
+                if delta_snap.is_deleted(pk, 0):
                     # Use seq=0 as sentinel; is_deleted checks delete_seq > row_seq
                     pass  # memtable rows have latest seq, typically not deleted via delta
 
@@ -1147,9 +1155,10 @@ class Collection:
         # Combine bitmap (dedup + tombstone) with filter_mask via build_valid_mask.
         from litevecdb.search.bitmap import build_valid_mask
         from litevecdb.search.assembler import materialize_record
+        # Snapshot tombstones — bg gc_below may mutate delta_index.
         mask = build_valid_mask(
-            all_pks, all_seqs, self._delta_index, filter_mask=filter_mask,
-            memtable=self._memtable,
+            all_pks, all_seqs, self._delta_index.frozen_copy(),
+            filter_mask=filter_mask, memtable=self._memtable,
         )
 
         # Deferred materialization: only materialize records that pass the mask.
@@ -1570,7 +1579,8 @@ class Collection:
 
         from litevecdb.search.bitmap import build_valid_mask
         mask = build_valid_mask(
-            all_pks, all_seqs, self._delta_index, memtable=self._memtable,
+            all_pks, all_seqs, self._delta_index.frozen_copy(),
+            memtable=self._memtable,
         )
         return int(mask.sum())
 

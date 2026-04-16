@@ -82,6 +82,23 @@ class DeltaIndex:
             return False
         return existing > data_seq
 
+    def frozen_copy(self) -> "DeltaIndex":
+        """Return a frozen copy suitable for concurrent read-only use.
+
+        The search/query/num_entities paths call this once per request,
+        then use the returned DeltaIndex for tombstone checks. That
+        insulates them from the live DeltaIndex being mutated
+        concurrently by the background compaction worker (which runs
+        ``add_batch`` during delta absorption and ``gc_below`` after
+        compaction).
+
+        The cost is an O(N tombstones) dict copy, which is sub-ms for
+        realistic tombstone volumes.
+        """
+        copy = DeltaIndex(self._pk_name)
+        copy._map = dict(self._map)
+        return copy
+
     # ── GC ──────────────────────────────────────────────────────
 
     def gc_below(self, min_active_data_seq: int) -> int:

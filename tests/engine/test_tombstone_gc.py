@@ -93,11 +93,6 @@ def test_global_min_across_partitions(tmp_path, schema):
 # gc_below correctness via compaction trigger
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skip(
-    reason="Tombstone GC disabled under concurrent bg compaction "
-           "(issue #21). Tombstones accumulate in memory instead of "
-           "being removed after compaction."
-)
 def test_compaction_runs_gc_below(harness, schema):
     """Set up: 4 data files at seq 100..103, plus tombstones at seqs
     50, 80, 200. After compaction (min_active_data_seq = 100),

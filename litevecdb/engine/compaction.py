@@ -105,14 +105,13 @@ class CompactionManager:
 
         self._compact_files(partition, partition_dir, target, manifest, delta_index)
 
-        # Tombstone GC is NOT called here. With background compaction,
-        # a reader may hold a pre-compaction segment snapshot while this
-        # method runs; calling gc_below would remove tombstones those
-        # readers still need to filter out deleted rows in the old
-        # segments they're iterating, producing "ghost data" results
-        # (issue #21). Tombstones accumulate in memory instead (~50B
-        # per unique deleted pk, bounded by the collection lifetime).
-        # A generation/refcount-based safe-GC scheme is deferred.
+        # Tombstone GC: safe under concurrent reads because all read
+        # paths call DeltaIndex.snapshot() at the start of a request
+        # (see Collection.get/search/query/num_entities). gc_below
+        # mutates the live DeltaIndex; in-flight readers still hold
+        # their own frozen dict copies so they correctly filter
+        # deleted rows from the segment snapshots they're iterating.
+        self._gc_tombstones(manifest, delta_index)
         return True
 
     # ── bucketing + selection ───────────────────────────────────
