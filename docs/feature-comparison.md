@@ -15,6 +15,9 @@
 | BinaryVector | - | Y |
 | Float16Vector | - | Y |
 | BFloat16Vector | - | Y |
+| Geometry | - | Y |
+| TimestampTZ | - | Y |
+| Int8Vector | - | Y |
 
 ## Index Types
 
@@ -23,7 +26,7 @@
 | FLAT / BRUTE_FORCE | Y | Y |
 | HNSW | Y (FAISS) | Y |
 | IVF_FLAT | Y (FAISS) | Y |
-| IVF_SQ8 | - | Y |
+| IVF_SQ8 | Y (FAISS) | Y |
 | IVF_PQ | - | Y |
 | SCANN | - | Y |
 | DISKANN | - | Y |
@@ -31,8 +34,9 @@
 | SPARSE_INVERTED_INDEX | Y | Y |
 | SPARSE_WAND | - | Y |
 | BIN_FLAT / BIN_IVF_FLAT | - | Y |
+| IVF_RABITQ | - | Y |
 | GPU_IVF_FLAT / GPU_IVF_PQ / GPU_CAGRA | - | Y |
-| Scalar index (INVERTED / BITMAP / Trie) | - | Y |
+| Scalar index (INVERTED / BITMAP / Trie / STL_SORT / NGRAM) | - | Y |
 
 ## Metric Types
 
@@ -62,6 +66,12 @@
 | Query iterator | Y | Y |
 | Multi-query (nq > 1) | Y | Y |
 | Text match (tokenized keyword filter) | Y | Y |
+| phrase_match (ordered phrase matching) | - | Y |
+| Search result highlighting | - | Y |
+| Boost ranker / FunctionScore | - | Y |
+| Query order_by (scalar field sorting) | - | Y |
+| Multiple vector fields per collection | Y | Y |
+| count(*) aggregation | Y | Y |
 
 ## Filter Expressions
 
@@ -96,6 +106,9 @@
 | Partition key | Y (auto-bucket routing) | Y |
 | Clustering key | - | Y |
 | Field-level analyzer config | Y | Y |
+| Schema functions (MINHASH) | - | Y |
+| Add field to existing collection | - | Y |
+| Field-level mmap config | - | Y |
 
 ## Collection Management
 
@@ -151,6 +164,9 @@
 | Text embedding (auto text-to-vector) | Y | Y |
 | Semantic reranking (Cohere) | Y | Y |
 | Decay reranking (gauss/exp/linear) | Y | Y |
+| phrase_match (ordered phrase matching) | - | Y |
+| Lexical highlighter | - | Y |
+| Multi-analyzer (multi-language routing) | - | Y |
 
 ## Enterprise / Operations
 
@@ -167,6 +183,9 @@
 | RESTful API | - | Y |
 | Web GUI (Attu) | - | Y |
 | Clustering compaction | - | Y |
+| Snapshot (backup / restore point) | - | Y |
+| Warmup (preload data) | - | Y |
+| Data integrity checks | - | Y |
 
 ## Architecture
 
@@ -190,11 +209,14 @@
 
 **Milvus 的优势：**
 - 分布式架构，支持十亿级向量
-- 更多索引类型（DISKANN, IVF_PQ, IVF_SQ8, SCANN, GPU 系列）
-- 更多向量类型（BinaryVector, Float16Vector, BFloat16Vector）
-- 企业级功能（RBAC, CDC, 备份恢复, 多副本, 一致性级别）
+- 更多索引类型（DISKANN, IVF_PQ, IVF_RABITQ, SCANN, GPU 系列）
+- 更多向量类型（BinaryVector, Float16Vector, BFloat16Vector, Int8Vector）
+- 更多数据类型（Geometry, TimestampTZ）
+- 企业级功能（RBAC, CDC, 备份恢复, 多副本, 一致性级别, Snapshot）
 - GPU 加速
-- Scalar index（INVERTED, BITMAP, Trie）
+- Scalar index（INVERTED, BITMAP, Trie, STL_SORT, NGRAM）
+- phrase_match / Highlighter / Boost Ranker / query order_by
+- Schema 动态变更（Add field, Alter collection）
 - RESTful API + Web GUI
 
 **定位：** LiteVecDB 面向原型开发、测试、小规模应用（<1M 向量），作为 Milvus 的轻量替代。功能覆盖了 pymilvus 常用 API 的 90%+，是开发阶段的理想选择。
