@@ -51,9 +51,6 @@ MANIFEST_FILENAME = "manifest.json"
 MANIFEST_PREV_FILENAME = "manifest.json.prev"
 MANIFEST_TMP_FILENAME = "manifest.json.tmp"
 
-# v1 → v2 (Phase 9.3): added optional `index_spec` field. v1 manifests
-# load fine — index_spec defaults to None, and the next save() upgrades
-# the on-disk file to v2 transparently.
 MANIFEST_FORMAT_VERSION = 2
 
 
@@ -220,8 +217,6 @@ class Manifest:
         if DEFAULT_PARTITION not in m._partitions:
             m._partitions[DEFAULT_PARTITION] = {"data_files": [], "delta_files": []}
 
-        # Load index_specs dict (Phase 18).
-        # Backward compat: old "index_spec" (singular) → migrate to dict.
         from litevecdb.index.spec import IndexSpec
         specs_dict = payload.get("index_specs")
         if specs_dict and isinstance(specs_dict, dict):
@@ -229,13 +224,7 @@ class Manifest:
                 k: IndexSpec.from_dict(v) for k, v in specs_dict.items()
             }
         else:
-            # v1/v2 backward compat: singular "index_spec"
-            spec_dict = payload.get("index_spec")
-            if spec_dict is not None:
-                spec = IndexSpec.from_dict(spec_dict)
-                m._index_specs = {spec.field_name: spec}
-            else:
-                m._index_specs = {}
+            m._index_specs = {}
 
         return m
 
@@ -366,15 +355,7 @@ class Manifest:
     def data_dir(self) -> str:
         return self._data_dir
 
-    # ── index specs (Phase 9.3 / Phase 18) ─────────────────────
-
-    @property
-    def index_spec(self) -> Optional["IndexSpec"]:
-        """Backward-compat: return the first IndexSpec or None.
-        Prefer index_specs dict for multi-index code."""
-        if not self._index_specs:
-            return None
-        return next(iter(self._index_specs.values()))
+    # ── index specs ─────────────────────────────────────────────
 
     @property
     def index_specs(self) -> Dict[str, "IndexSpec"]:
@@ -395,7 +376,5 @@ class Manifest:
 
     @property
     def format_version(self) -> int:
-        """The on-disk manifest format version. Phase 9.3 bumped from 1
-        to 2 to add the index_spec field. v1 manifests load fine and
-        upgrade transparently on the next save."""
+        """The on-disk manifest format version."""
         return MANIFEST_FORMAT_VERSION

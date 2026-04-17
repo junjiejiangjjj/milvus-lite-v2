@@ -1598,8 +1598,6 @@ class Collection:
         Mirrors the shape Milvus returns: collection name + schema +
         partition list + row count + index info + load state.
 
-        Phase 9.3 added ``load_state`` and ``index_spec``. The
-        ``index_spec`` field is None when no index has been created.
         """
         return {
             "name": self._name,

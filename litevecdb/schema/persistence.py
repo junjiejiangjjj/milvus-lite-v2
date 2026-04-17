@@ -111,7 +111,6 @@ def load_schema(path: str) -> Tuple[str, CollectionSchema]:
 
     fields = [_field_from_dict(d, path) for d in fields_raw]
 
-    # Functions (v2+)
     functions_raw = payload.get("functions", [])
     functions = [_function_from_dict(fd, path) for fd in functions_raw]
 
@@ -141,7 +140,7 @@ def _field_to_dict(f: FieldSchema) -> dict:
         "nullable": f.nullable,
         "default_value": f.default_value,
     }
-    # Only persist FTS attributes when non-default to keep v1 compat
+    # Only persist FTS attributes when non-default to reduce JSON size
     if f.enable_analyzer:
         d["enable_analyzer"] = True
     if f.analyzer_params:
