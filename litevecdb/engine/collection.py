@@ -1731,14 +1731,21 @@ class Collection:
             # Phase B: index build — outside the lock. build_or_load_index
             # operates on an immutable Segment and writes a dedicated .idx
             # file, so concurrent user-thread flushes are safe.
-            self._ensure_loaded_segments_indexed()
+            import time as _time
+            t0 = _time.monotonic()
+            built = self._ensure_loaded_segments_indexed()
+            if built > 0:
+                logger.info(
+                    "bg: built %d segment indexes in %.2fs",
+                    built, _time.monotonic() - t0,
+                )
         except Exception:
             logger.exception(
                 "background compaction/index build failed; will retry "
                 "on next flush"
             )
 
-    def _ensure_loaded_segments_indexed(self) -> None:
+    def _ensure_loaded_segments_indexed(self) -> int:
         """Phase 9.4: post-flush / post-compaction index hook.
 
         For every segment in the cache that lacks an attached index,
@@ -1747,20 +1754,25 @@ class Collection:
             - Collection is not in 'loaded' state (the user explicitly
               released, so we don't bring it back)
         Already-attached segments are skipped by build_or_load_index.
+
+        Returns number of indexes built/loaded.
         """
         if self._load_state != "loaded" or not self._index_specs:
-            return
+            return 0
         # Snapshot both collections — bg index build runs without the
         # maintenance lock, so the main thread may concurrently add
         # new segments to _segment_cache or touch _index_specs.
         specs = tuple(self._index_specs.values())
         segs = self._segments_snapshot()
+        built = 0
         for spec in specs:
             for seg in segs:
                 if spec.field_name not in seg.indexes and seg.num_rows > 0:
                     seg.build_or_load_index(
                         spec, self._index_dir(seg.partition)
                     )
+                    built += 1
+        return built
 
     def _cleanup_orphan_index_files(self) -> None:
         """Phase 9.4: delete .idx files whose source segment is gone.

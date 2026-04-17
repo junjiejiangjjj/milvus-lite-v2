@@ -103,6 +103,10 @@ class CompactionManager:
         if target is None:
             return False
 
+        logger.info(
+            "compaction: partition=%s, merging %d files",
+            partition, len(target),
+        )
         self._compact_files(partition, partition_dir, target, manifest, delta_index)
 
         # Tombstone GC: safe under concurrent reads because all read
@@ -213,6 +217,9 @@ class CompactionManager:
         manifest: "Manifest",
         delta_index: "DeltaIndex",
     ) -> None:
+        import time as _time
+        t0 = _time.monotonic()
+
         # 1. Read all input files.
         tables: List[pa.Table] = []
         for fn in files_to_compact:
@@ -221,6 +228,7 @@ class CompactionManager:
         if not tables:
             return
         combined = pa.concat_tables(tables)
+        input_rows = combined.num_rows
 
         # 2. Dedup by pk (keep max _seq).
         deduped = self._dedup_max_seq(combined)
@@ -275,6 +283,16 @@ class CompactionManager:
                     os.remove(abs_path)
                 except OSError as e:
                     logger.warning("compaction: failed to remove %s: %s", abs_path, e)
+
+        elapsed = _time.monotonic() - t0
+        output_rows = sum(c.num_rows for c in chunks) if filtered.num_rows > 0 else 0
+        logger.info(
+            "compaction: partition=%s done in %.2fs — "
+            "%d input files (%d rows) → %d output files (%d rows, %d removed)",
+            partition, elapsed,
+            len(files_to_compact), input_rows,
+            len(new_rels), output_rows, input_rows - output_rows,
+        )
 
     @staticmethod
     def _pick_unique_seq_range(
@@ -393,6 +411,13 @@ class CompactionManager:
 
         if any_delta_removed:
             manifest.save()
+
+        if removed > 0 or any_delta_removed:
+            logger.info(
+                "tombstone GC: threshold=%d, %d in-memory entries removed, "
+                "delta files purged=%s",
+                global_min, removed, any_delta_removed,
+            )
 
         return removed
 
