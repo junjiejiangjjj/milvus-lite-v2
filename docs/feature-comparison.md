@@ -113,7 +113,7 @@
 |---|:---:|:---:|
 | Insert | Y | Y |
 | Upsert (full replace) | Y | Y |
-| Upsert (partial update) | Y | - |
+| Upsert (partial update) | Y | Y |
 | Delete (by PK) | Y | Y |
 | Delete (by filter expression) | Y | Y |
 | Get (point read by PK) | Y | Y |
@@ -139,7 +139,7 @@
 | Create / Drop / Has / List partitions | Y | Y |
 | Per-partition insert / search / query | Y | Y |
 | Partition-level load/release | - | Y |
-| Partition key (auto-routing) | - | Y |
+| Partition key (auto-routing) | Y | Y |
 
 ## Text Search & Analysis
 
@@ -149,8 +149,8 @@
 | Standard analyzer (regex tokenizer) | Y | Y |
 | Jieba analyzer (Chinese) | Y | Y |
 | Text embedding (auto text-to-vector) | Y | Y |
-| Semantic reranking (Cohere) | Y | - |
-| Decay reranking (gauss/exp/linear) | Y | - |
+| Semantic reranking (Cohere) | Y | Y |
+| Decay reranking (gauss/exp/linear) | Y | Y |
 
 ## Enterprise / Operations
 
@@ -185,8 +185,6 @@
 
 **LiteVecDB 的优势：**
 - 纯 Python，跨平台（Windows/macOS/Linux），安装简单
-- 支持 partial update upsert（Milvus 不支持）
-- 内置语义 reranking（Cohere）和 decay reranking
 - 代码可读、可调试、可扩展
 - 启动快（0.07s vs 0.57s）
 
