@@ -297,9 +297,14 @@ class MemTable:
             indices.append(offsets[batch_idx] + row_idx)
 
         if not indices:
-            return full.slice(0, 0)
+            return self._data_schema.empty_table()
 
-        return full.take(pa.array(indices, type=pa.int64()))
+        result = full.take(pa.array(indices, type=pa.int64()))
+        # Drop WAL-only columns to match _data_schema layout
+        for col_name in ("_partition",):
+            if col_name in result.column_names:
+                result = result.drop(col_name)
+        return result
 
     def size(self) -> int:
         """Active pk count + tombstone count.

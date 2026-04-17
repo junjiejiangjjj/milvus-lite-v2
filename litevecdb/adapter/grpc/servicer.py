@@ -825,9 +825,16 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     first_spec = next(iter(all_specs.values()), None)
                     sub_default_metric = first_spec.metric_type if first_spec else "COSINE"
                 parsed = parse_search_request(sub_req, default_metric_type=sub_default_metric)
+                # When group_by is applied post-rerank, increase sub-search top_k
+                # to ensure enough diverse groups are fetched for the final merge.
+                sub_top_k = parsed["top_k"]
+                gb_field = rp.get("group_by_field")
+                if gb_field is not None:
+                    gb_size = rp.get("group_size") or 1
+                    sub_top_k = max(sub_top_k, rp["limit"] * gb_size * 3)
                 results = col.search(
                     query_vectors=parsed["query_vectors"],
-                    top_k=parsed["top_k"],
+                    top_k=sub_top_k,
                     metric_type=parsed["metric_type"],
                     partition_names=parsed.get("partition_names") or (
                         list(request.partition_names) or None

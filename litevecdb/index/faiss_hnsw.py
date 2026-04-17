@@ -53,8 +53,10 @@ import numpy as np
 # without faiss installed, an ImportError is the right answer.
 import faiss
 
+from litevecdb.index.protocol import VectorIndex
 
-class FaissHnswIndex:
+
+class FaissHnswIndex(VectorIndex):
     """FAISS HNSW per-segment index.
 
     Construction-time params (from IndexSpec.build_params):

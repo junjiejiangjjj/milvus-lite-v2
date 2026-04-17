@@ -126,6 +126,10 @@ def validate_schema(schema: CollectionSchema) -> None:
         )
     if pk_key_fields:
         pkf = pk_key_fields[0]
+        if pkf.is_primary:
+            raise SchemaValidationError(
+                f"partition key {pkf.name!r} must not be the primary key"
+            )
         if pkf.dtype not in (DataType.INT64, DataType.VARCHAR):
             raise SchemaValidationError(
                 f"partition key {pkf.name!r} must be INT64 or VARCHAR, "
@@ -133,7 +137,20 @@ def validate_schema(schema: CollectionSchema) -> None:
             )
 
     # Validate functions
+    func_names_seen: set = set()
+    func_outputs_seen: set = set()
     for func in schema.functions:
+        if func.name in func_names_seen:
+            raise SchemaValidationError(
+                f"duplicate function name {func.name!r}"
+            )
+        func_names_seen.add(func.name)
+        for out_name in func.output_field_names:
+            if out_name in func_outputs_seen:
+                raise SchemaValidationError(
+                    f"function output field {out_name!r} is used by multiple functions"
+                )
+            func_outputs_seen.add(out_name)
         _validate_function(func, field_by_name)
 
 
@@ -422,6 +439,11 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
                         f"ARRAY field {f.name!r} must be list/tuple, "
                         f"got {type(val).__name__}"
                     )
+                if f.max_capacity is not None and len(val) > f.max_capacity:
+                    raise SchemaValidationError(
+                        f"ARRAY field {f.name!r} has {len(val)} elements, "
+                        f"exceeds max_capacity={f.max_capacity}"
+                    )
             elif not f.nullable and f.default_value is None:
                 raise SchemaValidationError(
                     f"ARRAY field {f.name!r} missing and not nullable / no default"
@@ -455,6 +477,13 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
                     f"field {f.name!r} is None but not nullable"
                 )
             continue
+        # VARCHAR max_length check
+        if f.dtype == DataType.VARCHAR and f.max_length is not None:
+            if isinstance(value, str) and len(value) > f.max_length:
+                raise SchemaValidationError(
+                    f"VARCHAR field {f.name!r} value length {len(value)} "
+                    f"exceeds max_length={f.max_length}"
+                )
         check = _DTYPE_PYTHON_CHECK.get(f.dtype)
         if check is None:
             continue

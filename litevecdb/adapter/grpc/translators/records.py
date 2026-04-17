@@ -146,17 +146,20 @@ def _extract_column(fd, num_rows: int) -> List[Any]:
     """
     dtype_int = int(fd.type)
 
+    is_vector = False
     if fd.HasField("scalars"):
         column = _extract_scalar_column(fd, dtype_int)
     elif fd.HasField("vectors"):
         column = _extract_vector_column(fd, dtype_int, num_rows)
+        is_vector = True
     else:
         raise SchemaValidationError(
             f"FieldData {fd.field_name!r} has neither scalars nor vectors"
         )
 
     # Apply valid_data null mask if present (nullable fields).
-    valid_list = list(fd.valid_data)
+    # Skip for vector columns — _extract_vector_column already handles valid_data.
+    valid_list = list(fd.valid_data) if not is_vector else []
     if valid_list:
         if len(valid_list) != num_rows:
             raise SchemaValidationError(

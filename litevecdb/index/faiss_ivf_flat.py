@@ -31,8 +31,10 @@ from typing import Optional, Tuple
 import numpy as np
 import faiss
 
+from litevecdb.index.protocol import VectorIndex
 
-class FaissIvfFlatIndex:
+
+class FaissIvfFlatIndex(VectorIndex):
     """FAISS IVF Flat per-segment index.
 
     Construction-time params (from IndexSpec.build_params):

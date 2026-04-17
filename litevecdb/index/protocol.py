@@ -39,6 +39,8 @@ class VectorIndex(ABC):
     or `build` classmethod.
     """
 
+    __slots__ = ()
+
     metric: str       # "COSINE" | "L2" | "IP"
     num_vectors: int
     dim: int

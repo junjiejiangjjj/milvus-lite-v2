@@ -229,13 +229,14 @@ class Manifest:
         return m
 
     def _to_payload(self) -> Dict[str, Any]:
+        import copy
         return {
             "manifest_format_version": MANIFEST_FORMAT_VERSION,
             "version": self._version,
             "current_seq": self._current_seq,
             "schema_version": self._schema_version,
             "active_wal_number": self._active_wal_number,
-            "partitions": self._partitions,
+            "partitions": copy.deepcopy(self._partitions),
             "index_specs": {
                 k: v.to_dict() for k, v in self._index_specs.items()
             },
@@ -359,8 +360,8 @@ class Manifest:
 
     @property
     def index_specs(self) -> Dict[str, "IndexSpec"]:
-        """All persisted IndexSpecs, keyed by field_name."""
-        return self._index_specs
+        """All persisted IndexSpecs, keyed by field_name (defensive copy)."""
+        return dict(self._index_specs)
 
     def set_index_spec(self, spec: Optional["IndexSpec"]) -> None:
         """Set or clear an IndexSpec by field_name.

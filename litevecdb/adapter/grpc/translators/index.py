@@ -113,8 +113,8 @@ def index_spec_to_kv_pairs(spec: IndexSpec) -> List:
     _add("index_type", spec.index_type)
     _add("metric_type", spec.metric_type)
     if spec.build_params:
-        _add("params", json.dumps(spec.build_params, sort_keys=True))
+        _add("params", json.dumps(dict(spec.build_params), sort_keys=True))
     if spec.search_params:
-        _add("search_params", json.dumps(spec.search_params, sort_keys=True))
+        _add("search_params", json.dumps(dict(spec.search_params), sort_keys=True))
 
     return pairs

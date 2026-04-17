@@ -23,6 +23,7 @@ Why build_params is a typed dict and not a typed dataclass per index_type:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Dict
 
 
@@ -60,10 +61,15 @@ class IndexSpec:
             raise ValueError(
                 f"metric_type must be one of COSINE/L2/IP/BM25, got {self.metric_type!r}"
             )
-        if not isinstance(self.build_params, dict):
+        if not isinstance(self.build_params, (dict, MappingProxyType)):
             raise TypeError(f"build_params must be a dict, got {type(self.build_params).__name__}")
-        if not isinstance(self.search_params, dict):
+        if not isinstance(self.search_params, (dict, MappingProxyType)):
             raise TypeError(f"search_params must be a dict, got {type(self.search_params).__name__}")
+        # Freeze mutable dicts to prevent accidental mutation of shared state
+        if isinstance(self.build_params, dict):
+            object.__setattr__(self, "build_params", MappingProxyType(self.build_params))
+        if isinstance(self.search_params, dict):
+            object.__setattr__(self, "search_params", MappingProxyType(self.search_params))
 
     def to_dict(self) -> dict:
         """Serialize to a JSON-friendly dict for Manifest persistence."""

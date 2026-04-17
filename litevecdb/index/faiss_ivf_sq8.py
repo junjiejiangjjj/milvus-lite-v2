@@ -17,8 +17,10 @@ from typing import Optional, Tuple
 import numpy as np
 import faiss
 
+from litevecdb.index.protocol import VectorIndex
 
-class FaissIvfSq8Index:
+
+class FaissIvfSq8Index(VectorIndex):
     """FAISS IVF + 8-bit scalar quantizer.
 
     Construction-time params (from IndexSpec.build_params):

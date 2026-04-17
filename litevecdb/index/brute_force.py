@@ -27,10 +27,11 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from litevecdb.index.protocol import VectorIndex
 from litevecdb.search.distance import compute_distances
 
 
-class BruteForceIndex:
+class BruteForceIndex(VectorIndex):
     """NumPy brute-force per-segment index.
 
     Stores a (potentially shared) reference to the segment's vector

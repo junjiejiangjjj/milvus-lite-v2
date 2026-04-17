@@ -53,7 +53,7 @@ def cosine_distance(query: np.ndarray, candidates: np.ndarray) -> np.ndarray:
         q_unit = query / q_norms_safe
         sims = q_unit @ c_unit.T  # (nq, n)
 
-    return 1.0 - sims
+    return np.maximum(1.0 - sims, 0.0)
 
 
 # ---------------------------------------------------------------------------

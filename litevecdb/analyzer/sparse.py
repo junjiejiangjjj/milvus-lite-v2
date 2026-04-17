@@ -49,6 +49,10 @@ def bytes_to_sparse(b: bytes) -> Dict[int, float]:
     """
     if not b:
         return {}
+    if len(b) % 8 != 0:
+        raise ValueError(
+            f"sparse vector bytes length {len(b)} is not a multiple of 8"
+        )
     n = len(b) // 8
     result: Dict[int, float] = {}
     for i in range(n):

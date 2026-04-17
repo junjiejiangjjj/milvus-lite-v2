@@ -17,8 +17,10 @@ from typing import Optional, Tuple
 import numpy as np
 import faiss
 
+from litevecdb.index.protocol import VectorIndex
 
-class FaissHnswSqIndex:
+
+class FaissHnswSqIndex(VectorIndex):
     """FAISS HNSW + 8-bit scalar quantizer.
 
     Construction-time params (from IndexSpec.build_params):

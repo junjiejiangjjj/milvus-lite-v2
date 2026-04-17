@@ -267,8 +267,12 @@ class LiteVecDB:
             raise ValueError("collection name must not be empty")
         # Forbid path separators and dot segments — names map directly to
         # filesystem paths, so leakage outside collections/ is unsafe.
-        if "/" in name or "\\" in name or name in (".", ".."):
+        if "/" in name or "\\" in name or name in (".", "..") or "\x00" in name:
             raise ValueError(f"invalid collection name: {name!r}")
+        if len(name.encode("utf-8")) > 255:
+            raise ValueError(
+                f"collection name too long ({len(name.encode('utf-8'))} bytes, max 255)"
+            )
 
     def _acquire_lock(self) -> None:
         """Acquire an exclusive non-blocking lock on LOCK_FILENAME.

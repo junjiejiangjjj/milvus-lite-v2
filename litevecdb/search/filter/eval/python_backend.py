@@ -11,6 +11,7 @@ BooleanArray with no null entries.
 
 from __future__ import annotations
 
+import functools
 import json
 import operator
 import re
@@ -84,16 +85,10 @@ def _like_to_regex(pattern: str) -> "re.Pattern[str]":
 
 
 # Cache compiled LIKE patterns to avoid recompiling per row.
-_LIKE_CACHE: dict[str, "re.Pattern[str]"] = {}
-
-
+# Use functools.lru_cache to bound memory in long-running processes.
+@functools.lru_cache(maxsize=1024)
 def _get_like_regex(pattern: str) -> "re.Pattern[str]":
-    cached = _LIKE_CACHE.get(pattern)
-    if cached is not None:
-        return cached
-    compiled = _like_to_regex(pattern)
-    _LIKE_CACHE[pattern] = compiled
-    return compiled
+    return _like_to_regex(pattern)
 
 
 def evaluate_python(

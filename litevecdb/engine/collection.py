@@ -2039,6 +2039,8 @@ class Collection:
         """
         if self._memtable.size() > 0:
             self._trigger_flush()
+            # _trigger_flush creates a new empty WAL; clean it up too
+            self._wal.close_and_delete()
         else:
             # Even an empty MemTable needs WAL cleanup so we don't leave
             # an empty wal file behind.
@@ -2052,16 +2054,8 @@ class Collection:
     # ── introspection ───────────────────────────────────────────
 
     @property
-    def name(self) -> str:
-        return self._name
-
-    @property
     def data_dir(self) -> str:
         return self._data_dir
-
-    @property
-    def schema(self) -> CollectionSchema:
-        return self._schema
 
     @property
     def pk_field(self) -> str:
