@@ -47,12 +47,19 @@ class OpenAIProvider(EmbeddingProvider):
                 "OpenAI API key is required. Pass api_key param or set "
                 "OPENAI_API_KEY environment variable."
             )
-        self._dimensions = dimensions
         self._base_url = (base_url or _DEFAULT_BASE_URL).rstrip("/")
+        self._user_dimensions = dimensions  # None if user did not specify
+
+        # Validate: ada-002 does not support custom dimensions
+        if dimensions is not None and self._model == "text-embedding-ada-002":
+            if dimensions != 1536:
+                raise ValueError(
+                    f"text-embedding-ada-002 does not support custom dimensions "
+                    f"(always 1536). Got dimensions={dimensions}."
+                )
 
         # Infer default dimension from model if not specified
-        if self._dimensions is None:
-            self._dimensions = _default_dimension(self._model)
+        self._dimensions = dimensions if dimensions is not None else _default_dimension(self._model)
 
     @property
     def dimension(self) -> int:
@@ -80,8 +87,8 @@ class OpenAIProvider(EmbeddingProvider):
             "input": texts,
             "model": self._model,
         }
-        if self._dimensions is not None and self._model != "text-embedding-ada-002":
-            body["dimensions"] = self._dimensions
+        if self._user_dimensions is not None and self._model != "text-embedding-ada-002":
+            body["dimensions"] = self._user_dimensions
 
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(

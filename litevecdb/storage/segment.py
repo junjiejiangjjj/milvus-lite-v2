@@ -260,7 +260,12 @@ class Segment:
         if os.path.exists(path):
             idx = load_index_from_spec(spec, path, self.vector_dim)
         else:
-            idx = build_index_from_spec(spec, self.vectors)
+            # Use the correct vector data for the requested field
+            if field_name == self._vector_field:
+                vectors = self.vectors
+            else:
+                vectors, _ = _extract_vector_array(self.table.column(field_name))
+            idx = build_index_from_spec(spec, vectors)
             os.makedirs(index_dir, exist_ok=True)
             idx.save(path)
 

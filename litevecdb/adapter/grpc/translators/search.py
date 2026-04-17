@@ -158,7 +158,9 @@ def _decode_placeholder_group(placeholder_group_bytes: bytes) -> List[List[float
         out: List = []
         for blob in pv.values:
             if not blob:
-                continue
+                raise SchemaValidationError(
+                    "PlaceholderValue contains an empty FloatVector blob"
+                )
             n_floats = len(blob) // 4
             if n_floats * 4 != len(blob):
                 raise SchemaValidationError(
@@ -184,8 +186,7 @@ def _decode_placeholder_group(placeholder_group_bytes: bytes) -> List[List[float
         # Text queries: each value is UTF-8 encoded string
         out = []
         for blob in pv.values:
-            if blob:
-                out.append(blob.decode("utf-8"))
+            out.append(blob.decode("utf-8") if blob else "")
         if not out:
             raise SchemaValidationError("PlaceholderGroup has no query vectors")
         return out

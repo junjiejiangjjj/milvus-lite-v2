@@ -340,30 +340,34 @@ class Collection:
         field = self._partition_key_field
         n = self._num_partition_buckets
 
-        # Group records by bucket
-        buckets: Dict[str, List[dict]] = {}
-        for r in records:
+        # Group records by bucket, tracking original indices for ordered PK return
+        buckets: Dict[str, List[tuple]] = {}  # bucket → [(orig_idx, record)]
+        for orig_idx, r in enumerate(records):
             val = r.get(field)
             # Hash: consistent bucket assignment
             h = int(hashlib.md5(str(val).encode()).hexdigest(), 16) % n
             bucket_name = f"{PARTITION_KEY_BUCKET_PREFIX}{h}"
-            buckets.setdefault(bucket_name, []).append(r)
+            buckets.setdefault(bucket_name, []).append((orig_idx, r))
 
         # Insert each bucket's records
-        all_pks: List[Any] = []
-        for bucket_name, bucket_records in buckets.items():
+        ordered_pks: List[tuple] = []  # [(orig_idx, pk)]
+        for bucket_name, bucket_entries in buckets.items():
+            bucket_records = [r for _, r in bucket_entries]
             seq_start = self._next_seq
             self._next_seq += len(bucket_records)
             seqs = list(range(seq_start, seq_start + len(bucket_records)))
             batch = self._build_wal_data_batch(bucket_records, bucket_name, seqs)
             op = InsertOp(partition=bucket_name, batch=batch)
             self._apply(op)
-            all_pks.extend(r[self._pk_name] for r in bucket_records)
+            for (orig_idx, r) in bucket_entries:
+                ordered_pks.append((orig_idx, r[self._pk_name]))
 
         if self._memtable.size() >= MEMTABLE_SIZE_LIMIT:
             self._trigger_flush()
 
-        return all_pks
+        # Return PKs in original input order
+        ordered_pks.sort(key=lambda x: x[0])
+        return [pk for _, pk in ordered_pks]
 
     def upsert(
         self,
@@ -530,7 +534,7 @@ class Collection:
             rec: Optional[dict] = None
 
             # Step 1: live insert in MemTable.
-            mt_rec = self._memtable.get(pk)
+            mt_rec = self._memtable.get(pk, partition_filter=partition_filter)
             if mt_rec is not None:
                 rec = mt_rec
             elif self._memtable.is_locally_deleted(pk):
@@ -823,11 +827,25 @@ class Collection:
         # Tombstone snapshot — protects us from concurrent gc_below.
         delta_snap = self._delta_index.frozen_copy()
 
-        # ── Per-segment search (cached indexes) ──────────────────
-        for seg in self._segments_snapshot():
+        # ── Build global pk→best_seq map for cross-segment dedup ──
+        seg_snapshot = self._segments_snapshot()
+        global_pk_seq: Dict[Any, int] = {}
+        for seg in seg_snapshot:
             if partition_filter is not None:
-                seg_part = seg.partition_name if hasattr(seg, 'partition_name') else None
-                if seg_part is not None and seg_part not in partition_filter:
+                if seg.partition not in partition_filter:
+                    continue
+            for i, pk in enumerate(seg.pks):
+                seq = int(seg.seqs[i])
+                if pk not in global_pk_seq or seq > global_pk_seq[pk]:
+                    global_pk_seq[pk] = seq
+        # Memtable pks always win (highest seq)
+        for pk, (_, _, seq) in self._memtable._pk_index.items():
+            global_pk_seq[pk] = max(seq, global_pk_seq.get(pk, -1))
+
+        # ── Per-segment search (cached indexes) ──────────────────
+        for seg in seg_snapshot:
+            if partition_filter is not None:
+                if seg.partition not in partition_filter:
                     continue
             table = seg.table
             if table is None or len(table) == 0:
@@ -854,6 +872,9 @@ class Collection:
             for i in range(n):
                 pk, seq = pks[i], int(seqs[i])
                 if delta_snap.is_deleted(pk, seq):
+                    valid_mask[i] = False
+                elif global_pk_seq.get(pk, -1) > seq:
+                    # Stale version — a newer version exists in another segment or memtable
                     valid_mask[i] = False
 
             # Apply scalar filter
@@ -896,14 +917,7 @@ class Collection:
             mt_refs.append((batch, row_idx))
 
         if mt_pks:
-            # Check tombstone for memtable rows
             mt_valid = np.ones(len(mt_pks), dtype=bool)
-            for i, pk in enumerate(mt_pks):
-                # Memtable rows: check if overridden by a segment with higher seq
-                # (simplified — memtable rows always have highest seq for their pk)
-                if delta_snap.is_deleted(pk, 0):
-                    # Use seq=0 as sentinel; is_deleted checks delete_seq > row_seq
-                    pass  # memtable rows have latest seq, typically not deleted via delta
 
             if expr:
                 compiled = self._compile_filter(expr)
@@ -933,18 +947,22 @@ class Collection:
 
         # ── Global merge + dedup + materialize ────────────────────
         # Dedup: if same pk appears from segment + memtable, keep
-        # the one with better (smaller) distance.
+        # the one with the highest seq (latest version).
         results: List[List[dict]] = []
         for qi in range(nq):
             candidates = per_query_candidates[qi]
+            # First, deduplicate by pk keeping the latest version (highest seq).
+            pk_best: dict = {}  # pk → (dist, pk, (tbl, row_i))
+            for cand in candidates:
+                dist, pk, (tbl, row_i) = cand
+                seq = int(tbl.column("_seq")[row_i].as_py())
+                if pk not in pk_best or seq > pk_best[pk][0]:
+                    pk_best[pk] = (seq, cand)
+            deduped = [v[1] for v in pk_best.values()]
             # Sort by distance ascending (smaller = better)
-            candidates.sort(key=lambda c: c[0])
-            seen_pks: set = set()
+            deduped.sort(key=lambda c: c[0])
             hits: list = []
-            for dist, pk, (tbl, row_i) in candidates:
-                if pk in seen_pks:
-                    continue
-                seen_pks.add(pk)
+            for dist, pk, (tbl, row_i) in deduped:
                 # Deferred materialization
                 entity = {}
                 if output_fields is None:

@@ -53,7 +53,7 @@ class JiebaAnalyzer(Analyzer):
         else:
             raw = self._jieba.cut(text)
 
-        tokens = [t.strip() for t in raw if t.strip()]
+        tokens = [t.strip().lower() for t in raw if t.strip()]
         if self._stop_words:
             tokens = [t for t in tokens if t not in self._stop_words]
         return tokens

@@ -197,12 +197,16 @@ def test_keyword_forms(text, expected_kind):
     assert tokenize(text)[0].kind == expected_kind
 
 
-def test_keyword_mixed_case_treated_as_identifier():
-    """And / Or / Not / In are NOT recognized as keywords (just identifiers).
-    This matches Milvus Plan.g4 — only lowercase and uppercase forms are
-    keywords, not mixed-case variants."""
-    assert tokenize("And")[0].kind == TokenKind.IDENT
-    assert tokenize("Or")[0].kind == TokenKind.IDENT
+def test_keyword_mixed_case_recognized():
+    """And / Or / Not / In in mixed case ARE recognized as keywords.
+    This matches Milvus behavior — keywords are case-insensitive."""
+    assert tokenize("And")[0].kind == TokenKind.AND
+    assert tokenize("Or")[0].kind == TokenKind.OR
+    assert tokenize("Not")[0].kind == TokenKind.NOT
+    assert tokenize("In")[0].kind == TokenKind.IN
+    assert tokenize("Like")[0].kind == TokenKind.LIKE
+    assert tokenize("Is")[0].kind == TokenKind.IS
+    assert tokenize("Null")[0].kind == TokenKind.NULL
 
 
 # ---------------------------------------------------------------------------

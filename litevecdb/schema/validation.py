@@ -365,10 +365,11 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
         )
 
     # Fill default values for missing or None fields before validation.
+    import copy
     for f in schema.fields:
         if f.default_value is not None:
             if f.name not in record or record[f.name] is None:
-                record[f.name] = f.default_value
+                record[f.name] = copy.deepcopy(f.default_value)
 
     schema_field_names = {f.name for f in schema.fields}
     pk = _find_pk(schema)

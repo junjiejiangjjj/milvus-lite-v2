@@ -263,7 +263,7 @@ class WAL:
             return []
 
         numbers: set[int] = set()
-        pattern = re.compile(r"^wal_(data|delta)_(\d{6})\.arrow$")
+        pattern = re.compile(r"^wal_(data|delta)_(\d+)\.arrow$")
         for filename in os.listdir(wal_dir):
             m = pattern.match(filename)
             if m:

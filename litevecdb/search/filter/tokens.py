@@ -389,9 +389,10 @@ def _read_ident(source: str, start: int) -> tuple[Token, int]:
             hint=f"did you mean {lower!r}, {lower.capitalize()!r}, or {lower.upper()!r}?",
         )
 
-    # Keywords (case-insensitive forms).
-    if text in _KEYWORD_MAP:
-        return (Token(_KEYWORD_MAP[text], text, start), length)
+    # Keywords (case-insensitive).
+    kw = _KEYWORD_MAP.get(text) or _KEYWORD_MAP.get(lower)
+    if kw is not None:
+        return (Token(kw, text, start), length)
 
     # Plain identifier (case-sensitive).
     return (Token(TokenKind.IDENT, text, start), length)

@@ -111,7 +111,12 @@ class LiteVecDB:
         # exists. has_collection() looks for it.
         save_schema(schema, name, os.path.join(col_dir, SCHEMA_FILENAME))
 
-        col = Collection(name, col_dir, schema)
+        try:
+            col = Collection(name, col_dir, schema)
+        except Exception:
+            # Clean up orphan directory if Collection init fails
+            shutil.rmtree(col_dir, ignore_errors=True)
+            raise
         self._collections[name] = col
         return col
 
@@ -142,10 +147,11 @@ class LiteVecDB:
         # any open file handles before we rmtree the directory.
         if name in self._collections:
             self._collections[name].close()
-            del self._collections[name]
 
         col_dir = self._collection_dir(name)
         shutil.rmtree(col_dir, ignore_errors=False)
+        # Only remove from cache after successful rmtree
+        self._collections.pop(name, None)
 
     def rename_collection(self, old_name: str, new_name: str) -> None:
         """Rename a collection on disk and in the cache."""

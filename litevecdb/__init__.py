@@ -20,8 +20,12 @@ from litevecdb.engine.collection import Collection
 from litevecdb.exceptions import (
     CollectionAlreadyExistsError,
     CollectionNotFoundError,
+    CollectionNotLoadedError,
     DataDirLockedError,
     DefaultPartitionError,
+    IndexAlreadyExistsError,
+    IndexBackendUnavailableError,
+    IndexNotFoundError,
     LiteVecDBError,
     ManifestCorruptedError,
     PartitionAlreadyExistsError,
@@ -57,6 +61,11 @@ __all__ = [
     "WALCorruptedError",
     "ManifestCorruptedError",
     "DataDirLockedError",
+    # Phase 9 index exceptions
+    "CollectionNotLoadedError",
+    "IndexAlreadyExistsError",
+    "IndexNotFoundError",
+    "IndexBackendUnavailableError",
     # Filter expression errors (Phase 8)
     "FilterError",
     "FilterParseError",

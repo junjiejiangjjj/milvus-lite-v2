@@ -279,14 +279,14 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 # Fall back: query to find matching pks, then delete.
                 # Temporarily ensure loaded state for the query, then
                 # restore — delete should not require explicit load().
-                was_loaded = col._load_state == "loaded"
-                if not was_loaded:
+                original_state = col._load_state
+                if original_state != "loaded":
                     col._load_state = "loaded"
                 try:
                     hits = col.query(request.expr, output_fields=[col._pk_name])
                 finally:
-                    if not was_loaded:
-                        col._load_state = "released"
+                    if original_state != "loaded":
+                        col._load_state = original_state
                 pks = [r[col._pk_name] for r in hits]
 
             count = col.delete(pks, partition_name=partition_name)

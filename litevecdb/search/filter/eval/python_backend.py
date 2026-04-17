@@ -205,7 +205,9 @@ def _eval_row(node, row: dict) -> Any:
 
     if isinstance(node, LikeOp):
         value = _eval_row(node.value, row)
-        if value is None or not isinstance(value, str):
+        if value is None:
+            return None
+        if not isinstance(value, str):
             return False
         regex = _get_like_regex(node.pattern.value)
         return regex.match(value) is not None

@@ -106,11 +106,21 @@ class SparseInvertedIndex:
             valid_mask: optional bool mask to further restrict candidates
                 (e.g., from scalar filter). Applied on top of the build-time mask.
 
+        Raises:
+            ValueError: if valid_mask length does not match the number of
+                documents in the index.
+
         Returns:
             (local_ids, distances), each shape (nq, top_k).
             distances = -bm25_score (smaller = more relevant).
             Padded with -1 / +inf for missing slots.
         """
+        if valid_mask is not None and len(valid_mask) != len(self._doc_lengths):
+            raise ValueError(
+                f"valid_mask length ({len(valid_mask)}) != num_docs "
+                f"({len(self._doc_lengths)})"
+            )
+
         nq = len(query_sparse_vectors)
         all_ids = np.full((nq, top_k), -1, dtype=np.int64)
         all_dists = np.full((nq, top_k), float("inf"), dtype=np.float32)

@@ -68,7 +68,7 @@ def save_schema(
         json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
         f.flush()
         os.fsync(f.fileno())
-    os.rename(tmp_path, path)
+    os.replace(tmp_path, path)
 
 
 # ---------------------------------------------------------------------------

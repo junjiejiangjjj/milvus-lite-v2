@@ -65,6 +65,7 @@ def run_server(
         server.wait_for_termination()
     except KeyboardInterrupt:
         print("\nShutting down...")
+    finally:
         server.stop(grace=5)
         db.close()
 

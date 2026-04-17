@@ -144,11 +144,11 @@ class MemTable:
 
     # ── read path ───────────────────────────────────────────────
 
-    def get(self, pk_value: Any) -> Optional[dict]:
+    def get(self, pk_value: Any, partition_filter: Optional[set] = None) -> Optional[dict]:
         """Point read for a single pk.
 
         Returns the live record dict (without _seq / _partition) or None
-        if the pk is unknown or has been deleted.
+        if the pk is unknown, has been deleted, or is not in partition_filter.
         """
         pos = self._pk_index.get(pk_value)
         if pos is None:
@@ -158,6 +158,10 @@ class MemTable:
         # So we can return directly without re-checking _delete_index.
         batch_idx, row_idx, _ = pos
         batch = self._insert_batches[batch_idx]
+        if partition_filter is not None:
+            partition = batch.column("_partition")[row_idx].as_py()
+            if partition not in partition_filter:
+                return None
         return self._row_to_dict(batch, row_idx)
 
     def get_active_records(
@@ -226,7 +230,7 @@ class MemTable:
             # Handle nullable vectors: replace None with zero vectors
             has_none = any(v is None for v in vecs)
             if has_none:
-                dim = next(len(v) for v in vecs if v is not None)
+                dim = next((len(v) for v in vecs if v is not None), 0)
                 zero = [0.0] * dim
                 vecs = [v if v is not None else zero for v in vecs]
             vectors_arr = np.asarray(vecs, dtype=np.float32)

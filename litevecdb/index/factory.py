@@ -83,7 +83,8 @@ def build_index_from_spec(
     if index_type in ("BRUTE_FORCE", "FLAT"):
         return BruteForceIndex.build(vectors, spec.metric_type, spec.build_params)
     if index_type == "AUTOINDEX":
-        # Use HNSW when faiss is available, otherwise fall back to BruteForce
+        # Use HNSW when faiss is available, otherwise fall back to BruteForce.
+        # Load uses try/except to detect actual format on disk.
         if _FAISS_AVAILABLE:
             from litevecdb.index.faiss_hnsw import FaissHnswIndex
             return FaissHnswIndex.build(vectors, spec.metric_type, spec.build_params)
@@ -123,10 +124,22 @@ def load_index_from_spec(
     if index_type in ("BRUTE_FORCE", "FLAT"):
         return BruteForceIndex.load(path, spec.metric_type, dim)
     if index_type == "AUTOINDEX":
+        # Detect actual format on disk by trying FAISS first, then BruteForce.
+        # This handles the case where faiss availability changed since build time.
         if _FAISS_AVAILABLE:
-            from litevecdb.index.faiss_hnsw import FaissHnswIndex
-            return FaissHnswIndex.load(path, spec.metric_type, dim)
-        return BruteForceIndex.load(path, spec.metric_type, dim)
+            try:
+                from litevecdb.index.faiss_hnsw import FaissHnswIndex
+                return FaissHnswIndex.load(path, spec.metric_type, dim)
+            except Exception:
+                return BruteForceIndex.load(path, spec.metric_type, dim)
+        try:
+            return BruteForceIndex.load(path, spec.metric_type, dim)
+        except Exception:
+            raise IndexBackendUnavailableError(
+                f"AUTOINDEX file at {path!r} appears to be a FAISS index, "
+                f"but faiss-cpu is not installed. Install with: "
+                f"`pip install litevecdb[faiss]`"
+            )
     if index_type in _FAISS_INDEX_TYPES:
         _require_faiss(index_type)
         if index_type == "HNSW":

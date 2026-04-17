@@ -99,7 +99,8 @@ def evaluate_hybrid(
         from dataclasses import replace
         tmp = replace(compiled, ast=rewritten, backend="arrow")
         return evaluate_arrow(tmp, augmented)
-    except Exception:
+    except (pa.ArrowInvalid, pa.ArrowTypeError, pa.ArrowNotImplementedError,
+            TypeError, NotImplementedError, KeyError) as _exc:
         # Any failure on the fast path — heterogeneous JSON types,
         # all-null synthetic column with no compatible arrow kernel,
         # or any other type-mismatch surfacing inside evaluate_arrow —
