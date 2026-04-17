@@ -1,17 +1,17 @@
 """Run our compatibility tests against a real Milvus server.
 
 Usage:
-    pytest tests/adapter/test_against_milvus.py -v --tb=short
+    MILVUS_URI=http://host:19530 pytest tests/adapter/test_against_milvus.py -v
 
-Requires a running Milvus at MILVUS_URI (default: http://172.16.70.7:19530).
-Skipped automatically if the server is unreachable.
+Requires a running Milvus at MILVUS_URI env var.
+Skipped automatically if MILVUS_URI is not set or the server is unreachable.
 """
 
 import os
 import numpy as np
 import pytest
 
-MILVUS_URI = os.environ.get("MILVUS_URI", "http://172.16.70.7:19530")
+MILVUS_URI = os.environ.get("MILVUS_URI", "")
 
 pymilvus = pytest.importorskip("pymilvus")
 from pymilvus import DataType, MilvusClient, Function, FunctionType
@@ -23,6 +23,8 @@ from pymilvus import DataType, MilvusClient, Function, FunctionType
 
 @pytest.fixture(scope="module")
 def mclient():
+    if not MILVUS_URI:
+        pytest.skip("MILVUS_URI env var not set")
     try:
         client = MilvusClient(uri=MILVUS_URI)
         client.get_server_version()
