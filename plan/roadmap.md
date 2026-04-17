@@ -821,26 +821,101 @@ Search → top-N 候选 → 按 group_by_field 分组 → 每组 top group_size 
 
 | RPC | 原因 |
 |-----|------|
-| RenameCollection | collection 重命名未支持 |
 | CreateAlias / DropAlias | 别名未在 MVP 范围 |
 | AlterCollection | schema 不可变 |
 | LoadPartitions / ReleasePartitions | 仅支持 collection 级 load/release |
 
-### 功能缺口
+### 与 Milvus 功能对比（2026-04-17 更新）
+
+#### 已对齐
+
+| 功能 | 说明 |
+|------|------|
+| Collection CRUD | create/drop/has/describe/list/rename |
+| Insert / Upsert / Delete | upsert 语义 + partial update（字段合并） |
+| Get / Query / Search | 含 scalar filter 表达式 |
+| Vector Search (dense) | COSINE / L2 / IP |
+| HNSW / HNSW_SQ Index | FAISS HNSW + scalar quantization |
+| IVF_FLAT / IVF_SQ8 Index | FAISS IVF 系列 |
+| AUTOINDEX | 自动选择索引类型 |
+| BruteForce Index | 小 segment fallback + 差分基准 |
+| SPARSE_INVERTED_INDEX | BM25 倒排索引 |
+| Load / Release 状态机 | 对齐 Milvus 行为 |
+| Partition 管理 | create/drop/list/has |
+| Partition Key | 自动哈希分桶路由 |
+| Array 字段类型 | DataType.ARRAY + array_contains/all/any + array_length + 下标访问 |
+| Scalar Filter | `==, !=, <, >, in, and, or, not, like, is null, $meta["key"]` |
+| gRPC 协议兼容 | pymilvus 直连 |
+| BM25 全文检索 | Function(type=BM25) + text_match |
+| TEXT_EMBEDDING Function | 自动文本转向量 |
+| RERANK Function | Cohere + Decay (gauss/exp/linear) |
+| Hybrid Search | WeightedRanker + RRFRanker |
+| Group By Search | group_by_field + group_size |
+| Range Search | radius + range_filter |
+| Auto ID | INT64 自增 |
+| Nullable fields + Default values | 含 is null / is not null |
+| Dynamic fields | enable_dynamic_field + $meta["key"] |
+| Iterator | 客户端侧 pk 游标 / 距离范围分页 |
+| Offset 分页 | search/query(offset=N) |
+| 多向量独立建索引 | 每个向量字段独立 IndexSpec |
+| Compaction | Size-Tiered + tombstone GC |
+| count(\*) 聚合 | query(output_fields=["count(*)"]) |
+| output_fields=["\*"] | 通配符展开 |
+| JSON 字段 + 路径过滤 | field["key"] 语法 |
+| Sparse Vector (BM25) | SPARSE_FLOAT_VECTOR |
+| round_decimal | search 距离四舍五入 |
+| Analyzer | Standard + Jieba 中英文分词 |
+| Crash Recovery | WAL + 崩溃注入测试 |
+| delete(filter=...) 无需 load | 已修复 |
+
+#### 功能缺口
 
 | 功能 | 优先级 | 说明 |
 |------|--------|------|
-| Alias（集合别名） | 低 | name → collection 映射 |
-| query order_by | 低 | 结果排序（Milvus 2.5+） |
-| Array 字段类型 | 低 | DataType.ARRAY + array_contains() |
-| phrase_match | 低 | 有序短语匹配 + slop |
-| partial_update upsert | 低 | 部分字段更新 |
-| Nullable vector Parquet 持久化 | 低 | 当前 null 向量存为零向量，重启后 null 语义丢失 |
+| **索引** | | |
+| DiskANN Index | 中 | 磁盘索引，大数据量场景 |
+| IVF_PQ / OPQ / SCANN | 中 | 量化索引，内存效率 |
+| SPARSE_WAND | 低 | 稀疏向量加速检索 |
+| Scalar Index (INVERTED/BITMAP/Trie) | 低 | 标量字段索引加速 |
+| JSON Path Index | 低 | JSON 字段索引加速 |
+| BIN_FLAT / BIN_IVF_FLAT | 低 | 二值向量索引 |
+| **数据类型** | | |
 | Binary / Float16 / BFloat16 向量 | 低 | 扩展向量类型 |
-| Partition Key | 低 | 自动哈希分区 |
-| 用户/角色/权限 | 不做 | 嵌入式不需要 |
+| Geometry 类型 | 低 | WKT 格式 + 空间查询 |
+| Struct/Array 嵌套 | 低 | 结构化数组字段 |
+| MinHash 向量 | 低 | MinHash 向量类型 |
+| TimestampTZ | 低 | 时区感知时间戳 |
+| **搜索增强** | | |
+| query order_by | 低 | 结果排序（Milvus 2.5+） |
+| phrase_match | 低 | 有序短语匹配 + slop |
+| Boost Ranker | 低 | 加权搜索排名 |
+| Text Highlighter | 低 | 搜索结果高亮 |
+| Search Iterator (server-side v2) | 低 | 当前仅客户端游标 |
+| **集合管理** | | |
+| Alias（集合别名） | 低 | name → collection 映射 |
+| Collection TTL | 低 | 数据自动过期 |
+| Clustering Key | 低 | 聚簇压缩 |
+| LoadPartitions / ReleasePartitions | 低 | 分区级 load/release |
+| **运维能力** | | |
+| Snapshot（备份恢复） | 低 | 集合快照 |
+| Warmup | 低 | 集合预热 |
+| Compact API（显式调用） | 低 | 当前仅自动触发 |
+| Consistency Levels | 低 | Strong/Bounded/Session/Eventually |
+| MMap | 低 | 内存映射存储 |
+| RESTful API | 低 | HTTP 接口 |
+| **数据完整性** | | |
+| Nullable vector Parquet 持久化 | 低 | 当前 null 向量存为零向量，重启后 null 语义丢失 |
+| **明确不做** | | |
+| 用户/角色/权限 (RBAC) | 不做 | 嵌入式不需要 |
 | Database 多实例 | 不做 | 单命名空间足够 |
-| Schema 变更 | 不做 | 架构上不可变 |
+| Schema 变更 (AlterCollection/AddField) | 不做 | 架构上不可变 |
+| GPU Index | 不做 | 嵌入式场景无需 |
+| TLS / mTLS | 不做 | 本地嵌入式 |
+| 多副本 / Resource Group | 不做 | 单进程架构 |
+| 流式 CDC | 不做 | 无分布式消费需求 |
+| Bulk Insert (file import) | 不做 | 嵌入式直接 insert |
+
+**覆盖率**：以 Milvus pymilvus 测试套件（55 个测试文件）衡量，LiteVecDB 覆盖约 80% 核心功能。剩余缺口集中在高级索引类型、扩展数据类型和企业级运维能力。
 
 ---
 
