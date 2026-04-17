@@ -375,10 +375,6 @@ load():
   4. 都不存在 → 返回全新 Manifest
 ```
 
-### 9.4 格式演进
-
-`MANIFEST_FORMAT_VERSION = 2`（Phase 9.3 新增 `index_spec` 字段）。v1 manifest 加载正常——`index_spec` 默认 None，下次 `save()` 透明升级到 v2。
-
 ---
 
 ## 10. Flush 管线
