@@ -18,7 +18,7 @@ Milvus Lite v2 is the next-generation lightweight version of [Milvus](https://gi
 
 The original milvus-lite wraps the full C++ Milvus core via CGo bindings, inheriting its heavy build chain, platform restrictions (no Windows, no Alpine), and opaque debugging experience. Milvus Lite v2 takes a different approach: a clean-room Python implementation with an LSM-tree storage engine, delivering the same pymilvus-compatible API in a package that is easy to install, inspect, and extend.
 
-This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 1800+ test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
+This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 2100+ test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
 
 ### Why replace milvus-lite?
 
@@ -29,7 +29,7 @@ This project is entirely **vibe coded** — designed, implemented, and tested th
 | Platform | Linux/macOS only, no Windows/Alpine | Windows, macOS, Linux — anywhere Python runs |
 | Debugging | Opaque C++ core, segfaults | Pure Python stack traces |
 | Extensibility | Requires rebuilding C++ | Standard Python, easy to fork and modify |
-| Index | FLAT, IVF_FLAT | HNSW, IVF_FLAT (FAISS), FLAT, BM25 sparse inverted |
+| Index | FLAT, IVF_FLAT | HNSW, HNSW_SQ, IVF_FLAT, IVF_SQ8 (FAISS), FLAT, BM25 sparse inverted |
 | Full text search | Tantivy (C++ binding) | Pure Python BM25 with pluggable analyzers |
 
 # Requirements
@@ -325,7 +325,7 @@ client.query("col", filter="scores[0] > 90", limit=10)
 | Feature | Details |
 |---|---|
 | Vector types | `FLOAT_VECTOR`, `SPARSE_FLOAT_VECTOR` |
-| Index types | `HNSW`, `IVF_FLAT` (FAISS), `FLAT` / `BRUTE_FORCE` / `AUTOINDEX`, `SPARSE_INVERTED_INDEX` |
+| Index types | `HNSW`, `HNSW_SQ`, `IVF_FLAT`, `IVF_SQ8` (FAISS), `FLAT` / `BRUTE_FORCE` / `AUTOINDEX`, `SPARSE_INVERTED_INDEX` |
 | Metrics | `COSINE`, `L2`, `IP`, `BM25` |
 | Scalar types | `INT8/16/32/64`, `FLOAT`, `DOUBLE`, `VARCHAR`, `BOOL`, `JSON`, `ARRAY` |
 | Search | Dense ANN, sparse BM25, hybrid (multi-vector + reranker), range search, group-by |
@@ -378,7 +378,7 @@ Benchmarked using the Cohere 100K dataset from [VectorDBBench](https://github.co
 - **Synchronous flush** — no background compaction or async writes
 - **No authentication / RBAC**
 - **No binary / float16 / bfloat16 vectors**
-- **No quantized indexes** — no PQ / SQ, only HNSW / IVF_FLAT / flat
+- **No PQ indexes** — no Product Quantization; SQ is supported via IVF_SQ8 and HNSW_SQ
 - **Per-segment BM25 IDF** — IDF statistics are segment-local, not global
 
 # Architecture
@@ -407,16 +407,17 @@ pymilvus client
       |                           |
 +------------------+    +---------------------+
 | index/           |    | analyzer/           |
-|   HNSW (FAISS),  |    |   Standard/Jieba,   |
+|   HNSW, HNSW_SQ, |    |   Standard/Jieba,   |
 |   IVF_FLAT,      |    |   BM25 sparse,      |
-|   BruteForce,    |    |   term hash         |
-|   SparseInverted |    +---------------------+
-+------------------+              |
-      |               +---------------------+
-+------------------+  | embedding/          |
-| rerank/          |  |   OpenAI provider,  |
-|   Cohere API,    |  |   auto text→vector  |
-|   Decay (local)  |  +---------------------+
+|   IVF_SQ8,       |    |   term hash         |
+|   BruteForce,    |    +---------------------+
+|   SparseInverted |              |
++------------------+    +---------------------+
+      |               | embedding/          |
++------------------+  |   OpenAI provider,  |
+| rerank/          |  |   auto text→vector  |
+|   Cohere API,    |  +---------------------+
+|   Decay (local)  |
 +------------------+
       |
 +---------------------------------------------------+
@@ -434,7 +435,7 @@ This entire project — architecture design, implementation, test suite, documen
 The development process:
 1. **Design** — discuss architecture in natural language, produce design docs
 2. **Implement** — describe what to build, review and iterate on generated code
-3. **Test** — 1800+ tests including recall validation and Milvus compatibility suites
+3. **Test** — 2100+ tests including recall validation and Milvus compatibility suites
 4. **Iterate** — fix bugs, optimize performance, add features — all through conversation
 
 No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human with a vision and an AI that codes.
@@ -442,7 +443,7 @@ No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human wit
 # Testing
 
 ```bash
-pytest                                  # 1800+ tests
+pytest                                  # 2100+ tests
 pytest tests/adapter/ -k "grpc"         # gRPC integration tests
 pytest tests/index/test_index_differential.py  # recall validation
 pytest --cov=litevecdb                  # with coverage
