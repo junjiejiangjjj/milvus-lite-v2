@@ -192,3 +192,85 @@ def test_gc_drops_everything_when_no_data_files(harness, schema):
     removed = harness["mgr"]._gc_tombstones(harness["manifest"], harness["delta_index"])
     assert removed == 3
     assert len(harness["delta_index"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Delta file GC — on-disk parquet removal
+# ---------------------------------------------------------------------------
+
+def _write_delta_file(harness, schema, seq_min, seq_max, pks):
+    """Write a delta Parquet file and register it in the manifest."""
+    table = pa.Table.from_pydict(
+        {"id": pks, "_seq": [seq_min + i for i in range(len(pks))]},
+        schema=build_delta_schema(schema),
+    )
+    partition_dir = os.path.join(harness["data_dir"], "partitions", DEFAULT_PARTITION)
+    from litevecdb.storage.delta_file import write_delta_file
+    rel = write_delta_file(table, partition_dir, seq_min, seq_max)
+    harness["manifest"].add_delta_file(DEFAULT_PARTITION, rel)
+    return rel
+
+
+def test_gc_removes_obsolete_delta_files(harness, schema):
+    """Delta parquet files whose seq_max < global_min_active_data_seq
+    should be deleted from disk and removed from the manifest."""
+    # Data files at seq 100..103 → global_min_active_data_seq = 100.
+    for i in range(4):
+        _write_file(harness, seq_min=100 + i, seq_max=100 + i,
+                    pks_with_seqs=[(f"doc_{i}", 100 + i)])
+
+    # Delta files:
+    #   delta_050_080 → seq_max=80 < 100 → should be GC'd
+    #   delta_090_200 → seq_max=200 ≥ 100 → should survive
+    rel_old = _write_delta_file(harness, schema, 50, 80, ["x", "y"])
+    rel_new = _write_delta_file(harness, schema, 90, 200, ["z"])
+
+    # Add tombstones to delta_index too.
+    harness["delta_index"].add_batch(pa.RecordBatch.from_pydict(
+        {"id": ["x", "y", "z"], "_seq": [50, 80, 200]},
+        schema=build_delta_schema(schema),
+    ))
+
+    partition_dir = os.path.join(harness["data_dir"], "partitions", DEFAULT_PARTITION)
+
+    # Verify files exist before GC.
+    old_path = os.path.join(partition_dir, rel_old)
+    new_path = os.path.join(partition_dir, rel_new)
+    assert os.path.exists(old_path)
+    assert os.path.exists(new_path)
+
+    # Trigger compaction → gc runs.
+    harness["mgr"].maybe_compact(
+        DEFAULT_PARTITION, harness["manifest"], harness["delta_index"]
+    )
+
+    # Old delta file gone from disk and manifest.
+    assert not os.path.exists(old_path)
+    delta_files = harness["manifest"].get_delta_files(DEFAULT_PARTITION)
+    assert rel_old not in delta_files
+
+    # New delta file survives.
+    assert os.path.exists(new_path)
+    assert rel_new in delta_files
+
+
+def test_gc_keeps_delta_files_when_data_seqs_are_low(harness, schema):
+    """If data file seqs are low, delta files should not be removed."""
+    # Data at seq 10..13 → global_min = 10.
+    for i in range(4):
+        _write_file(harness, seq_min=10 + i, seq_max=10 + i,
+                    pks_with_seqs=[(f"doc_{i}", 10 + i)])
+
+    # Delta at seq 50 → seq_max=50 ≥ 10 → should survive.
+    rel = _write_delta_file(harness, schema, 50, 50, ["x"])
+    harness["delta_index"].add_batch(pa.RecordBatch.from_pydict(
+        {"id": ["x"], "_seq": [50]},
+        schema=build_delta_schema(schema),
+    ))
+
+    harness["mgr"].maybe_compact(
+        DEFAULT_PARTITION, harness["manifest"], harness["delta_index"]
+    )
+
+    delta_files = harness["manifest"].get_delta_files(DEFAULT_PARTITION)
+    assert rel in delta_files

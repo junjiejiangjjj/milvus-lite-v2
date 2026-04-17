@@ -347,17 +347,54 @@ class CompactionManager:
         manifest: "Manifest",
         delta_index: "DeltaIndex",
     ) -> int:
-        """Drop delta_index entries below the global min_active_data_seq.
+        """Drop delta_index entries AND delta parquet files below the
+        global min_active_data_seq.
 
-        Returns number of entries removed.
+        In-memory GC: delta_index.gc_below removes tombstones from the
+        live dict (safe because readers hold frozen_copy snapshots).
 
-        Correctness (architectural invariant §3): a tombstone (pk,
-        delete_seq) is unreachable iff every remaining data file has
-        seq_min > delete_seq for every row. The conservative form below
-        uses the GLOBAL minimum across all partitions and all data files.
+        On-disk GC: delta parquet files whose seq_max < threshold are
+        fully obsolete — every tombstone in them has already been GC'd
+        from delta_index AND no live data row needs them. Safe to delete.
+
+        Returns number of in-memory tombstone entries removed.
         """
         global_min = self._global_min_active_data_seq(manifest)
-        return delta_index.gc_below(global_min)
+        removed = delta_index.gc_below(global_min)
+
+        # GC on-disk delta files whose tombstones are all obsolete.
+        any_delta_removed = False
+        for partition in manifest.list_partitions():
+            delta_files = manifest.get_delta_files(partition)
+            if not delta_files:
+                continue
+            gc_files: List[str] = []
+            for rel in delta_files:
+                try:
+                    _seq_min, seq_max = parse_seq_range(rel)
+                except ValueError:
+                    continue
+                if seq_max < global_min:
+                    gc_files.append(rel)
+            if not gc_files:
+                continue
+            any_delta_removed = True
+            partition_dir = os.path.join(
+                self._data_dir, "partitions", partition
+            )
+            manifest.remove_delta_files(partition, gc_files)
+            for fn in gc_files:
+                abs_path = os.path.join(partition_dir, fn)
+                if os.path.exists(abs_path):
+                    try:
+                        os.remove(abs_path)
+                    except OSError:
+                        pass
+
+        if any_delta_removed:
+            manifest.save()
+
+        return removed
 
     @staticmethod
     def _global_min_active_data_seq(manifest: "Manifest") -> int:
