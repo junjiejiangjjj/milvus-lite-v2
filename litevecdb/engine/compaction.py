@@ -285,7 +285,7 @@ class CompactionManager:
                     logger.warning("compaction: failed to remove %s: %s", abs_path, e)
 
         elapsed = _time.monotonic() - t0
-        output_rows = sum(c.num_rows for c in chunks) if filtered.num_rows > 0 else 0
+        output_rows = filtered.num_rows
         logger.info(
             "compaction: partition=%s done in %.2fs — "
             "%d input files (%d rows) → %d output files (%d rows, %d removed)",
@@ -293,6 +293,8 @@ class CompactionManager:
             len(files_to_compact), input_rows,
             len(new_rels), output_rows, input_rows - output_rows,
         )
+
+    _MAX_SEQ_BUMP_ATTEMPTS = 10_000
 
     @staticmethod
     def _pick_unique_seq_range(
@@ -309,10 +311,14 @@ class CompactionManager:
         until the filename is free. The seq_max stored in the filename is
         an UPPER BOUND on actual content seqs (the file may contain
         smaller seqs only), so this is always safe.
+
+        Raises RuntimeError if no free filename is found within
+        _MAX_SEQ_BUMP_ATTEMPTS (guards against infinite loop on
+        pathological directory state).
         """
         rel_dir = "data"
         candidate_max = seq_max
-        while True:
+        for _ in range(CompactionManager._MAX_SEQ_BUMP_ATTEMPTS):
             filename = DATA_FILE_TEMPLATE.format(
                 min=seq_min, max=candidate_max, w=SEQ_FORMAT_WIDTH
             )
@@ -320,22 +326,34 @@ class CompactionManager:
             if not os.path.exists(abs_path):
                 return seq_min, candidate_max
             candidate_max += 1
+        raise RuntimeError(
+            f"failed to find unique seq range after "
+            f"{CompactionManager._MAX_SEQ_BUMP_ATTEMPTS} attempts "
+            f"(partition_dir={partition_dir}, seq_min={seq_min})"
+        )
 
     def _dedup_max_seq(self, table: pa.Table) -> pa.Table:
-        """For each pk, keep only the row with the largest _seq."""
-        if table.num_rows == 0:
+        """For each pk, keep only the row with the largest _seq.
+
+        Uses Arrow sort + shift-compare to stay in the C++ layer:
+        sort by (pk ASC, _seq DESC), then keep only the first row
+        of each pk group (where pk differs from the previous row).
+        """
+        if table.num_rows <= 1:
             return table
-        pks = table.column(self._pk_name).to_pylist()
-        seqs = table.column("_seq").to_pylist()
-        # pk → (seq, row_idx)
-        pk_to_best: dict = {}
-        for i, pk in enumerate(pks):
-            seq = seqs[i]
-            existing = pk_to_best.get(pk)
-            if existing is None or seq > existing[0]:
-                pk_to_best[pk] = (seq, i)
-        keep_indices = sorted(b[1] for b in pk_to_best.values())
-        return table.take(pa.array(keep_indices, type=pa.int64()))
+        sort_idx = pc.sort_indices(table, sort_keys=[
+            (self._pk_name, "ascending"), ("_seq", "descending"),
+        ])
+        sorted_t = table.take(sort_idx)
+        pk_col = sorted_t.column(self._pk_name)
+        n = pk_col.length()
+        # mask[0] = True (always keep first row); mask[i] = pk[i] != pk[i-1]
+        changed = pc.not_equal(pk_col.slice(0, n - 1), pk_col.slice(1))
+        # pc.not_equal may return ChunkedArray; flatten for concat_arrays.
+        if isinstance(changed, pa.ChunkedArray):
+            changed = changed.combine_chunks()
+        mask = pa.concat_arrays([pa.array([True]), changed])
+        return sorted_t.filter(mask)
 
     def _filter_deleted(
         self,
@@ -371,55 +389,83 @@ class CompactionManager:
         In-memory GC: delta_index.gc_below removes tombstones from the
         live dict (safe because readers hold frozen_copy snapshots).
 
-        On-disk GC: delta parquet files whose seq_max < threshold are
-        fully obsolete — every tombstone in them has already been GC'd
-        from delta_index AND no live data row needs them. Safe to delete.
+        On-disk GC: delegated to ``_gc_delta_files`` — delta parquet
+        files whose seq_max < threshold are fully obsolete.
 
         Returns number of in-memory tombstone entries removed.
         """
         global_min = self._global_min_active_data_seq(manifest)
         removed = delta_index.gc_below(global_min)
+        delta_files_removed = self._gc_delta_files(manifest, global_min)
 
-        # GC on-disk delta files whose tombstones are all obsolete.
-        any_delta_removed = False
+        if removed > 0 or delta_files_removed:
+            logger.info(
+                "tombstone GC: threshold=%d, %d in-memory entries removed, "
+                "delta files purged=%s",
+                global_min, removed, delta_files_removed,
+            )
+
+        return removed
+
+    def _gc_delta_files(
+        self,
+        manifest: "Manifest",
+        global_min: int,
+    ) -> bool:
+        """Remove obsolete delta parquet files from manifest and disk.
+
+        A delta file is obsolete when its seq_max < global_min — every
+        tombstone in it has been superseded.
+
+        Crash safety: manifest.save() persists the removal *before*
+        physical file deletion. A crash after save but before delete
+        leaves orphan files on disk (harmless — recovery cleans them).
+        The previous ordering (delete first, save later) could leave
+        the manifest referencing deleted files, breaking recovery.
+
+        Returns True if any delta files were removed.
+        """
+        gc_plan: List[Tuple[str, List[str]]] = []
         for partition in manifest.list_partitions():
             delta_files = manifest.get_delta_files(partition)
             if not delta_files:
                 continue
-            gc_files: List[str] = []
+            obsolete: List[str] = []
             for rel in delta_files:
                 try:
                     _seq_min, seq_max = parse_seq_range(rel)
                 except ValueError:
                     continue
                 if seq_max < global_min:
-                    gc_files.append(rel)
-            if not gc_files:
-                continue
-            any_delta_removed = True
+                    obsolete.append(rel)
+            if obsolete:
+                gc_plan.append((partition, obsolete))
+
+        if not gc_plan:
+            return False
+
+        # Persist removal in manifest BEFORE deleting physical files.
+        for partition, files in gc_plan:
+            manifest.remove_delta_files(partition, files)
+        manifest.save()
+
+        # Now safe to delete files from disk. Failures are logged but
+        # non-fatal — orphan files are cleaned by recovery.
+        for partition, files in gc_plan:
             partition_dir = os.path.join(
                 self._data_dir, "partitions", partition
             )
-            manifest.remove_delta_files(partition, gc_files)
-            for fn in gc_files:
+            for fn in files:
                 abs_path = os.path.join(partition_dir, fn)
                 if os.path.exists(abs_path):
                     try:
                         os.remove(abs_path)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        logger.warning(
+                            "delta GC: failed to remove %s: %s", abs_path, e
+                        )
 
-        if any_delta_removed:
-            manifest.save()
-
-        if removed > 0 or any_delta_removed:
-            logger.info(
-                "tombstone GC: threshold=%d, %d in-memory entries removed, "
-                "delta files purged=%s",
-                global_min, removed, any_delta_removed,
-            )
-
-        return removed
+        return True
 
     @staticmethod
     def _global_min_active_data_seq(manifest: "Manifest") -> int:

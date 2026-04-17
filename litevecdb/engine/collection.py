@@ -1252,8 +1252,9 @@ class Collection:
                 "cannot create manual partitions when partition key is set "
                 f"(partition_key field: {self._partition_key_field!r})"
             )
-        self._manifest.add_partition(partition_name)
-        self._manifest.save()
+        with self._maintenance_lock:
+            self._manifest.add_partition(partition_name)
+            self._manifest.save()
         partition_dir = os.path.join(
             self._data_dir, "partitions", partition_name
         )
@@ -1289,21 +1290,27 @@ class Collection:
 
         # Flush any pending writes so we don't drop in-flight rows
         # silently (the user's "insert then drop" should not lose
-        # the inserts).
+        # the inserts).  Flush is outside the lock — _trigger_flush
+        # acquires _maintenance_lock internally (RLock, re-entrant).
         if self._memtable.size() > 0:
             self._trigger_flush()
 
-        # remove_partition raises DefaultPartitionError or
-        # PartitionNotFoundError as appropriate.
-        self._manifest.remove_partition(partition_name)
-        self._manifest.save()
+        with self._maintenance_lock:
+            # remove_partition raises DefaultPartitionError or
+            # PartitionNotFoundError as appropriate.  Re-validates
+            # existence under lock (guards against concurrent drop).
+            self._manifest.remove_partition(partition_name)
+            self._manifest.save()
 
-        # Drop in-memory segment cache entries for this partition.
-        for key in list(self._segment_cache.keys()):
-            if key[0] == partition_name:
-                del self._segment_cache[key]
+            # Drop in-memory segment cache entries for this partition.
+            for key in list(self._segment_cache.keys()):
+                if key[0] == partition_name:
+                    del self._segment_cache[key]
 
-        # Remove on-disk partition directory.
+        # Remove on-disk partition directory.  Safe outside the lock:
+        # the partition is already gone from the manifest, so bg
+        # compaction (which iterates manifest.list_partitions under
+        # the lock) will never touch this directory.
         partition_dir = os.path.join(
             self._data_dir, "partitions", partition_name
         )

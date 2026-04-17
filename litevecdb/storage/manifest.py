@@ -87,32 +87,57 @@ class Manifest:
         Steps:
             1. write manifest.json.tmp + fsync
             2. cp manifest.json → manifest.json.prev (if it exists)
-            3. rename manifest.json.tmp → manifest.json
-            4. fsync parent dir so the rename is durable
+            3. rename manifest.json.tmp → manifest.json  ← commit point
+            4. bump in-memory version (only after rename succeeds)
+            5. fsync parent dir so the rename is durable
+
+        Crash safety:
+            - If any step before rename fails, .tmp is cleaned up and
+              in-memory version is unchanged.
+            - The .prev copy failing is non-fatal: we still proceed with
+              the rename because the .tmp is already durable. Losing the
+              backup is better than failing the entire save.
         """
         os.makedirs(self._data_dir, exist_ok=True)
 
-        self._version += 1
+        new_version = self._version + 1
+        # Build payload with new_version without mutating self._version yet.
         payload = self._to_payload()
+        payload["version"] = new_version
 
         target_path = os.path.join(self._data_dir, MANIFEST_FILENAME)
         prev_path = os.path.join(self._data_dir, MANIFEST_PREV_FILENAME)
         tmp_path = os.path.join(self._data_dir, MANIFEST_TMP_FILENAME)
 
-        # 1. dump tmp + fsync
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
+        try:
+            # 1. dump tmp + fsync
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
 
-        # 2. copy current → prev (overwriting any old prev)
-        if os.path.exists(target_path):
-            shutil.copy2(target_path, prev_path)
+            # 2. copy current → prev (best-effort; failure here is non-fatal
+            #    because the .tmp is already durable and the rename can proceed)
+            if os.path.exists(target_path):
+                try:
+                    shutil.copy2(target_path, prev_path)
+                except OSError as e:
+                    logger.warning("manifest: failed to create .prev backup: %s", e)
 
-        # 3. atomic rename — this is the commit point
-        os.rename(tmp_path, target_path)
+            # 3. atomic rename — this is the commit point
+            os.rename(tmp_path, target_path)
+        except BaseException:
+            # Clean up orphaned .tmp on any failure before commit point.
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+            raise
 
-        # 4. fsync the directory so the rename survives a crash
+        # 4. Version bump only after the commit point succeeds.
+        self._version = new_version
+
+        # 5. fsync the directory so the rename survives a crash
         try:
             dir_fd = os.open(self._data_dir, os.O_RDONLY)
             try:

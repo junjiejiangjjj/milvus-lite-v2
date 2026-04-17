@@ -486,3 +486,155 @@ def test_manifest_saved_after_compaction(harness):
     reloaded = Manifest.load(harness["data_dir"])
     files = reloaded.get_data_files(DEFAULT_PARTITION)
     assert len(files) == 1
+
+
+# ---------------------------------------------------------------------------
+# Multi-partition compaction
+# ---------------------------------------------------------------------------
+
+def test_compaction_across_multiple_partitions(tmp_path, schema):
+    """Compaction runs independently per partition; one partition compacting
+    does not interfere with the other."""
+    data_dir = str(tmp_path / "data")
+    os.makedirs(data_dir, exist_ok=True)
+    manifest = Manifest(data_dir)
+    manifest.add_partition("p1")
+    manifest.add_partition("p2")
+    delta_index = DeltaIndex("id")
+    mgr = CompactionManager(data_dir, schema)
+
+    data_schema = build_data_schema(schema)
+
+    # Write 4 files to p1, 2 files to p2.
+    for i in range(COMPACTION_MIN_FILES_PER_BUCKET):
+        table = pa.Table.from_pydict(
+            {"_seq": [100 + i], "id": [f"p1_doc_{i}"],
+             "vec": [[0.1, 0.2]], "title": [None]},
+            schema=data_schema,
+        )
+        pdir = os.path.join(data_dir, "partitions", "p1")
+        os.makedirs(pdir, exist_ok=True)
+        rel = write_data_file(table, pdir, 100 + i, 100 + i)
+        manifest.add_data_file("p1", rel)
+
+    for i in range(2):
+        table = pa.Table.from_pydict(
+            {"_seq": [200 + i], "id": [f"p2_doc_{i}"],
+             "vec": [[0.3, 0.4]], "title": [None]},
+            schema=data_schema,
+        )
+        pdir = os.path.join(data_dir, "partitions", "p2")
+        os.makedirs(pdir, exist_ok=True)
+        rel = write_data_file(table, pdir, 200 + i, 200 + i)
+        manifest.add_data_file("p2", rel)
+
+    # p1 has enough files to compact; p2 does not.
+    assert mgr.maybe_compact("p1", manifest, delta_index) is True
+    assert mgr.maybe_compact("p2", manifest, delta_index) is False
+
+    # p1 merged into 1 file; p2 unchanged.
+    assert len(manifest.get_data_files("p1")) == 1
+    assert len(manifest.get_data_files("p2")) == 2
+
+    # Verify p1 merged data is correct.
+    [rel] = manifest.get_data_files("p1")
+    table = read_data_file(os.path.join(data_dir, "partitions", "p1", rel))
+    pks = sorted(table.column("id").to_pylist())
+    assert pks == [f"p1_doc_{i}" for i in range(COMPACTION_MIN_FILES_PER_BUCKET)]
+
+
+# ---------------------------------------------------------------------------
+# _pick_unique_seq_range collision resolution
+# ---------------------------------------------------------------------------
+
+def test_pick_unique_seq_range_collision(tmp_path, schema):
+    """When the natural seq range collides with an existing file,
+    _pick_unique_seq_range bumps seq_max until the filename is free."""
+    partition_dir = str(tmp_path / "partition")
+    data_dir = os.path.join(partition_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+
+    from litevecdb.constants import DATA_FILE_TEMPLATE, SEQ_FORMAT_WIDTH
+
+    # Create files that occupy the first 3 candidate filenames.
+    for bump in range(3):
+        fn = DATA_FILE_TEMPLATE.format(min=10, max=20 + bump, w=SEQ_FORMAT_WIDTH)
+        with open(os.path.join(data_dir, fn), "w") as f:
+            f.write("placeholder")
+
+    chosen_min, chosen_max = CompactionManager._pick_unique_seq_range(
+        partition_dir, seq_min=10, seq_max=20,
+    )
+    assert chosen_min == 10
+    # Should have bumped past 20, 21, 22 → landed on 23.
+    assert chosen_max == 23
+    # Verify the chosen filename doesn't exist.
+    fn = DATA_FILE_TEMPLATE.format(min=chosen_min, max=chosen_max, w=SEQ_FORMAT_WIDTH)
+    assert not os.path.exists(os.path.join(data_dir, fn))
+
+
+def test_pick_unique_seq_range_no_collision(tmp_path):
+    """No collision → returns the original seq range unchanged."""
+    partition_dir = str(tmp_path / "partition")
+    os.makedirs(os.path.join(partition_dir, "data"), exist_ok=True)
+
+    chosen_min, chosen_max = CompactionManager._pick_unique_seq_range(
+        partition_dir, seq_min=10, seq_max=20,
+    )
+    assert (chosen_min, chosen_max) == (10, 20)
+
+
+# ---------------------------------------------------------------------------
+# Concurrent flush + compaction
+# ---------------------------------------------------------------------------
+
+def test_concurrent_inserts_with_compaction(tmp_path):
+    """Multiple insert batches that trigger flush + background compaction
+    must not lose data or corrupt state."""
+    import threading
+    from litevecdb.db import LiteVecDB
+
+    db = LiteVecDB(str(tmp_path / "db"))
+    int_schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=2),
+    ])
+    col = db.create_collection("test", int_schema)
+    col.create_index("vec", {"metric_type": "COSINE", "index_type": "FLAT"})
+    col.load()
+
+    errors: list = []
+    n_batches = 6
+    batch_size = 50
+
+    def insert_batch(thread_id: int):
+        try:
+            for batch in range(n_batches):
+                base = thread_id * 10000 + batch * batch_size
+                records = [
+                    {"id": base + i, "vec": [0.1 * (i + 1), 0.2 * (i + 1)]}
+                    for i in range(batch_size)
+                ]
+                col.insert(records)
+        except Exception as e:
+            errors.append(e)
+
+    threads = [threading.Thread(target=insert_batch, args=(t,)) for t in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"insert threads raised: {errors}"
+
+    # Force flush + drain background tasks.
+    if col._memtable.size() > 0:
+        col._trigger_flush()
+    col._wait_for_bg(timeout=30)
+
+    # Verify all inserted data is present.
+    total_expected = 3 * n_batches * batch_size
+    results = col.query("id >= 0", limit=total_expected + 100)
+    assert len(results) == total_expected
+
+    db.close()
