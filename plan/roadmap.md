@@ -870,52 +870,76 @@ Search → top-N 候选 → 按 group_by_field 分组 → 每组 top group_size 
 
 #### 功能缺口
 
-| 功能 | 优先级 | 说明 |
-|------|--------|------|
-| **索引** | | |
-| DiskANN Index | 中 | 磁盘索引，大数据量场景 |
-| IVF_PQ / OPQ / SCANN | 中 | 量化索引，内存效率 |
-| SPARSE_WAND | 低 | 稀疏向量加速检索 |
-| Scalar Index (INVERTED/BITMAP/Trie) | 低 | 标量字段索引加速 |
-| JSON Path Index | 低 | JSON 字段索引加速 |
-| BIN_FLAT / BIN_IVF_FLAT | 低 | 二值向量索引 |
-| **数据类型** | | |
-| Binary / Float16 / BFloat16 向量 | 低 | 扩展向量类型 |
-| Geometry 类型 | 低 | WKT 格式 + 空间查询 |
-| Struct/Array 嵌套 | 低 | 结构化数组字段 |
-| MinHash 向量 | 低 | MinHash 向量类型 |
-| TimestampTZ | 低 | 时区感知时间戳 |
-| **搜索增强** | | |
-| query order_by | 低 | 结果排序（Milvus 2.5+） |
-| phrase_match | 低 | 有序短语匹配 + slop |
-| Boost Ranker | 低 | 加权搜索排名 |
-| Text Highlighter | 低 | 搜索结果高亮 |
-| Search Iterator (server-side v2) | 低 | 当前仅客户端游标 |
-| **集合管理** | | |
-| Alias（集合别名） | 低 | name → collection 映射 |
-| Collection TTL | 低 | 数据自动过期 |
-| Clustering Key | 低 | 聚簇压缩 |
-| LoadPartitions / ReleasePartitions | 低 | 分区级 load/release |
-| **运维能力** | | |
-| Snapshot（备份恢复） | 低 | 集合快照 |
-| Warmup | 低 | 集合预热 |
-| Compact API（显式调用） | 低 | 当前仅自动触发 |
-| Consistency Levels | 低 | Strong/Bounded/Session/Eventually |
-| MMap | 低 | 内存映射存储 |
-| RESTful API | 低 | HTTP 接口 |
-| **数据完整性** | | |
-| Nullable vector Parquet 持久化 | 低 | 当前 null 向量存为零向量，重启后 null 语义丢失 |
-| **明确不做** | | |
-| 用户/角色/权限 (RBAC) | 不做 | 嵌入式不需要 |
-| Database 多实例 | 不做 | 单命名空间足够 |
-| Schema 变更 (AlterCollection/AddField) | 不做 | 架构上不可变 |
-| GPU Index | 不做 | 嵌入式场景无需 |
-| TLS / mTLS | 不做 | 本地嵌入式 |
-| 多副本 / Resource Group | 不做 | 单进程架构 |
-| 流式 CDC | 不做 | 无分布式消费需求 |
-| Bulk Insert (file import) | 不做 | 嵌入式直接 insert |
+##### P0 — 基本增删改查直接相关，用户高频使用
 
-**覆盖率**：以 Milvus pymilvus 测试套件（55 个测试文件）衡量，LiteVecDB 覆盖约 80% 核心功能。剩余缺口集中在高级索引类型、扩展数据类型和企业级运维能力。
+| 功能 | 对应 Milvus API | 说明 | 工作量 |
+|------|-----------------|------|--------|
+| Alias 管理 | create/drop/alter/describe/list_aliases | 集合别名，版本切换常用 | 小 |
+| Truncate Collection | truncate_collection | 清空集合数据，保留 schema | 小 |
+| list_indexes | list_indexes | 列出集合所有索引 | 小 |
+| get_partition_stats | get_partition_stats | 分区级统计（num_entities） | 小 |
+| Search Iterator | search_iterator | 大结果集分页遍历（服务端游标） | 中 |
+| Query Iterator | query_iterator | 查询结果分页遍历（区别于 offset/limit） | 中 |
+
+##### P1 — 常用进阶功能，影响用户迁移体验
+
+| 功能 | 对应 Milvus API | 说明 | 工作量 |
+|------|-----------------|------|--------|
+| LoadPartitions / ReleasePartitions | load_partitions / release_partitions | 分区级加载释放 | 中 |
+| Schema 变更 | add_collection_field / alter_collection_field | 动态加字段、改字段属性 | 大 |
+| Collection 属性 | alter/drop_collection_properties | 集合级配置（TTL 等） | 中 |
+| Index 属性 | alter/drop_index_properties | 修改索引参数 | 小 |
+| Collection Functions | add/alter/drop_collection_function | 动态管理 BM25 等函数 | 中 |
+| query order_by | query(... order_by=...) | 标量排序（Milvus 2.5+） | 中 |
+| Scalar Index | INVERTED / BITMAP index on scalar fields | 大数据量下标量过滤性能 | 大 |
+| FLOAT16 / BFLOAT16 向量 | FLOAT16_VECTOR / BFLOAT16_VECTOR | 省内存的向量格式 | 中 |
+
+##### P2 — 进阶功能，特定场景需要
+
+| 功能 | 对应 Milvus API | 说明 | 工作量 |
+|------|-----------------|------|--------|
+| Database 管理 | create/drop/list/use_database | 多数据库隔离 | 中 |
+| DiskANN Index | DiskANN index type | 磁盘索引，大数据量场景 | 大 |
+| IVF_PQ / OPQ / SCANN | 量化索引系列 | 量化压缩，内存效率 | 大 |
+| Binary Vector | BIN_FLAT / BIN_IVF_FLAT | 二值向量索引 | 中 |
+| Consistency Levels | consistency_level 参数 | Strong/Bounded/Session/Eventually | 中 |
+| Bulk Insert | import / get_import_state | 批量文件导入 | 大 |
+| phrase_match | text_match 增强 | 有序短语匹配 + slop | 中 |
+| run_analyzer | run_analyzer | 分析器调试接口 | 小 |
+| SPARSE_WAND | 稀疏向量加速 | 稀疏向量加速检索 | 中 |
+| JSON Path Index | JSON 字段索引 | JSON 字段索引加速 | 中 |
+| Boost Ranker | 加权搜索排名 | 多字段权重搜索 | 中 |
+| Text Highlighter | 搜索结果高亮 | FTS 结果片段高亮 | 中 |
+| Snapshot | create/restore_snapshot | 集合快照备份恢复 | 大 |
+| RESTful API | HTTP 接口 | REST 替代 gRPC | 大 |
+
+##### P3 — 低优先级
+
+| 功能 | 说明 |
+|------|------|
+| Geometry 类型 | WKT 格式 + 空间查询 |
+| Struct/Array 嵌套 | 结构化数组字段 |
+| MinHash 向量 | MinHash 向量类型 |
+| TimestampTZ | 时区感知时间戳 |
+| Clustering Key | 聚簇压缩 |
+| Warmup | 集合预热 |
+| MMap | 内存映射存储 |
+| Nullable vector Parquet 持久化 | 当前 null 向量存为零向量，重启后 null 语义丢失 |
+
+##### 明确不做（嵌入式场景不需要）
+
+| 功能 | 理由 |
+|------|------|
+| 用户/角色/权限 (RBAC) | 嵌入式单用户 |
+| GPU Index | 嵌入式场景无需 |
+| TLS / mTLS | 本地嵌入式 |
+| 多副本 / Resource Group | 单进程架构 |
+| 流式 CDC | 无分布式消费需求 |
+| Row-Level Security | 企业安全功能 |
+| Privilege Groups | 嵌入式无需权限分组 |
+| Metrics / GetComponentStates | 分布式监控 |
+
+**覆盖率**：以 Milvus pymilvus 测试套件（55 个测试文件）衡量，LiteVecDB 覆盖约 80% 核心功能。P0 补齐后预计可达 ~85%，P0+P1 补齐后预计可达 ~90%。剩余缺口集中在高级索引类型、扩展数据类型和企业级运维能力。
 
 ---
 
