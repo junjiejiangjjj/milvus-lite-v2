@@ -534,7 +534,7 @@ milvus_lite/adapter/grpc/
 | 10.5.3 | pymilvus quickstart L3 冒烟 | `tests/adapter/test_grpc_quickstart.py` |
 | 10.6.1 | `errors.py`：MilvusLiteError → ErrorCode 映射 | + `tests/adapter/test_grpc_error_mapping.py` |
 | 10.6.2 | servicer 异常 wrapping 中间件 | `servicer.py` |
-| 10.6.3 | UNIMPLEMENTED stub 友好消息（rename / hybrid_search / aliases / RBAC stub …） | `servicer.py` |
+| 10.6.3 | UNIMPLEMENTED stub 友好消息（aliases / RBAC stub …） | `servicer.py` |
 
 ### 验证策略：pymilvus quickstart 冒烟
 
@@ -567,7 +567,6 @@ def test_pymilvus_quickstart(grpc_server):
 - Bulk insert / Import → Future
 - Replica / Resource Group → Future
 - Aliases → Future
-- Hybrid search（多向量） → Future
 - Search iterator / pagination → Future
 - Database 多实例 → Future（永远 default）
 - Binary vector 类型 → Future
@@ -939,7 +938,7 @@ Search → top-N 候选 → 按 group_by_field 分组 → 每组 top group_size 
 | Metrics / GetComponentStates | 分布式监控 |
 | Consistency Levels | 单进程同步架构天然 Strong Consistency，无需多级别 |
 
-**覆盖率**：以 Milvus pymilvus 测试套件（55 个测试文件）衡量，MilvusLite 覆盖约 80% 核心功能。P0 补齐后预计可达 ~85%，P0+P1 补齐后预计可达 ~90%。剩余缺口集中在高级索引类型、扩展数据类型和企业级运维能力。
+**覆盖率**：以 Milvus pymilvus 测试套件（55 个测试文件）衡量，MilvusLite P0 覆盖约 ~85% 核心功能，P0+P1 覆盖约 ~90%。剩余缺口集中在高级索引类型、扩展数据类型和企业级运维能力。
 
 ---
 

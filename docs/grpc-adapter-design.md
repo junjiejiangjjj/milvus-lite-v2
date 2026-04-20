@@ -99,7 +99,7 @@ grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 | `describe_collection(name)` | `DescribeCollection` | `db.get_collection(name).describe()` + schema 序列化 | translator 把 MilvusLite schema 转回 Milvus proto schema |
 | `list_collections()` | `ShowCollections` | `db.list_collections()` | 直接映射 |
 | `get_collection_stats(name)` | `GetCollectionStatistics` | `col.num_entities` | 包成 `KeyValuePair[("row_count", str(n))]` |
-| `rename_collection(old, new)` | `RenameCollection` | ❌ engine 暂不支持 | UNIMPLEMENTED |
+| `rename_collection(old, new)` | `RenameCollection` | `db.rename_collection(old, new)` | ✅ 直接映射 |
 | `alter_collection_properties` | `AlterCollection` | ❌ schema 不可变 | UNIMPLEMENTED |
 
 ### 4.2 Partition
@@ -129,7 +129,7 @@ grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 | pymilvus | Milvus RPC | engine API | 说明 |
 |---|---|---|---|
 | `search(collection, data, anns_field, limit, filter, output_fields, search_params, partition_names)` | `Search` | `col.search(query_vectors, top_k, metric_type, partition_names, expr, output_fields)` | translator 解析 SearchParams 提取 metric / topk / search_params；返回值结构转换最复杂 |
-| `hybrid_search(collection, reqs, ...)` | `HybridSearch` | ❌ engine 不支持多向量字段 | UNIMPLEMENTED |
+| `hybrid_search(collection, reqs, ...)` | `HybridSearch` | 多路 `col.search()` + `reranker.rerank()` | ✅ Phase 12：解析每个子 SearchRequest 独立搜索，通过 WeightedRanker / RRFRanker 融合结果 |
 | `search_iterator(...)` | (client-side wrapper) | engine 加 offset 支持 | 可选；MVP UNIMPLEMENTED |
 
 ### 4.5 索引
@@ -171,7 +171,7 @@ grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 **三档策略**：
 
 1. **明确 UNIMPLEMENTED**（推荐默认）：返回 `grpc.StatusCode.UNIMPLEMENTED` + 友好消息
-   - 应用于：rename_collection、hybrid_search、bulk_insert 等"功能缺失"的 RPC
+   - 应用于：bulk_insert 等"功能缺失"的 RPC
    - 错误消息格式：`"MilvusLite does not support X. Reason: <one-line reason>. See https://...”`
 
 2. **静默成功**（少数情况）：返回 `Success` + 空结果
@@ -385,41 +385,14 @@ MilvusLite Phase 8 的 filter grammar 就是抄的 Milvus，**绝大多数表达
 | `$meta["key"] == value` | ✅ (Phase F2b) | 透传 |
 | 算术 + - * / | ✅ (Phase F2a) | 透传 |
 | `is null` / `is not null` | ✅ (Phase F2a) | 透传 |
-| `json_contains(json_field, value)` | ❌ Phase F3 | UNIMPLEMENTED 错误（不让 search 静默丢结果） |
-| `array_contains(array_field, value)` | ❌ Phase F3 | UNIMPLEMENTED |
-| `text_match(text_field, query)` | ❌ engine 无全文索引 | UNIMPLEMENTED |
+| `json_contains(json_field, value)` | ✅ | 透传（parser 原生支持） |
+| `array_contains(array_field, value)` | ✅ | 透传（parser 原生支持 array_contains / array_contains_all / array_contains_any） |
+| `text_match(text_field, query)` | ✅ (Phase 11) | 透传（engine 内置 BM25 全文索引 + analyzer） |
 | `phrase_match` | ❌ | UNIMPLEMENTED |
 
 ### 6.3 实现方式
 
-```python
-# milvus_lite/adapter/grpc/translators/expr.py
-
-_UNSUPPORTED_FUNCS = {"json_contains", "json_contains_any", "array_contains",
-                      "array_contains_any", "array_contains_all", "text_match",
-                      "phrase_match"}
-
-def translate_filter_expr(milvus_expr: str) -> str:
-    """Translate (or pass through) a Milvus filter expression.
-
-    For MilvusLite Phase 9/10, the grammar is a near-superset alignment with
-    Milvus, so most expressions pass through unchanged. We only intercept
-    function calls that MilvusLite doesn't implement to give a clear error
-    instead of letting the parser raise a generic syntax error.
-    """
-    if not milvus_expr:
-        return milvus_expr
-    for func in _UNSUPPORTED_FUNCS:
-        # Crude prefix match — false positives accepted (rare in real exprs)
-        if f"{func}(" in milvus_expr:
-            raise FilterUnsupportedError(
-                f"Milvus function {func}() is not supported by MilvusLite. "
-                f"See plan/filter-design.md §11 for the supported subset."
-            )
-    return milvus_expr
-```
-
-**注意**：这个 prefix match 是粗糙的（如果用户的 field name 叫 `text_match_score` 会误报）。Phase 10.4 要把它改成基于 Phase 8 tokenizer 的精确扫描；但 MVP 用 prefix match 足够。
+**当前状态**：Phase 11 之后，MilvusLite parser 原生支持 `text_match`、`json_contains`、`array_contains` 等函数，表达式全部透传给 engine parser 处理，无需适配层做 rewrite 或拦截。仅 `phrase_match` 仍不支持（parser 遇到未知函数会抛 `FilterParseError`）。独立的 `translators/expr.py` 文件未创建 — 表达式直接透传。
 
 ---
 
@@ -549,7 +522,10 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         return self._unimplemented(context, "CreateAlias", "aliases are not in MVP scope")
 
     def HybridSearch(self, request, context):
-        return self._unimplemented(context, "HybridSearch", "single-vector only in MVP")
+        # ✅ Phase 12: 多路搜索 + WeightedRanker/RRFRanker 融合
+        # 解析每个 sub-SearchRequest → col.search() → reranker.rerank()
+        # 实现见 servicer.py + reranker.py
+        ...
 
     # ... (其他 UNIMPLEMENTED stub)
 ```

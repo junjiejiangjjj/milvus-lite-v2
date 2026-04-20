@@ -128,7 +128,9 @@ class DataType(Enum):
     DOUBLE = "double"
     VARCHAR = "varchar"
     JSON = "json"
+    ARRAY = "array"               # 需指定 element_type
     FLOAT_VECTOR = "float_vector"
+    SPARSE_FLOAT_VECTOR = "sparse_float_vector"
 
 class FieldSchema:
     name: str               # 字段名
@@ -138,17 +140,30 @@ class FieldSchema:
     max_length: Optional[int]  # VARCHAR 最大长度
     nullable: bool          # 是否允许 null
     default_value: Any      # 默认值
+    element_type: Optional[DataType]  # ARRAY 元素类型（仅 ARRAY 字段需要）
+    max_capacity: Optional[int]       # ARRAY 最大容量
 
 class CollectionSchema:
     fields: List[FieldSchema]
     version: int            # Schema 版本号（每次变更 +1）
     enable_dynamic_field: bool  # 是否启用动态字段（$meta JSON 列）
+    functions: List[Function]   # Schema 级函数（如 BM25）
+
+class FunctionType(IntEnum):
+    BM25 = 1               # 全文检索 BM25 函数
+
+class Function:
+    """Schema 级函数定义，用于自动派生字段（如 BM25 稀疏向量）。"""
+    name: str
+    function_type: FunctionType
+    input_field_names: List[str]    # 输入字段（如 VARCHAR 文本列）
+    output_field_names: List[str]   # 输出字段（如 SPARSE_FLOAT_VECTOR 列）
 ```
 
 #### Schema 约束
 
 - 必须有且仅有一个 `is_primary=True` 字段，类型为 `VARCHAR` 或 `INT64`
-- 必须有且仅有一个 `FLOAT_VECTOR` 字段（MVP 限制，将来可放开）
+- 必须有至少一个 `FLOAT_VECTOR` 字段；`SPARSE_FLOAT_VECTOR` 字段可由 `Function`（如 BM25）自动派生
 - 主键字段不可为 null
 - Schema 持久化为 `data_dir/schema.json`
 
@@ -165,7 +180,9 @@ TYPE_MAP = {
     DataType.DOUBLE:       pa.float64(),
     DataType.VARCHAR:      pa.string(),
     DataType.JSON:         pa.string(),       # JSON 序列化为字符串
+    DataType.ARRAY:        None,              # 运行时根据 element_type 解析
     DataType.FLOAT_VECTOR: lambda dim: pa.list_(pa.float32(), list_size=dim),
+    DataType.SPARSE_FLOAT_VECTOR: pa.binary(),  # packed uint32+float32 pairs
 }
 ```
 
@@ -971,6 +988,20 @@ class Collection:
         """向量检索。返回外层=每个查询向量，内层=top-K 结果。
         每条结果: {"id": pk, "distance": float, "entity": {field: value}}"""
 
+    # ─── 索引生命周期（Phase 9）───
+    def create_index(self, field_name: str, index_params: dict) -> None: ...
+    def drop_index(self, field_name: str) -> None: ...
+    def has_index(self) -> bool: ...
+    def get_index_info(self) -> Optional[dict]: ...
+
+    # ─── Load / Release 状态机（Phase 9）───
+    # released → loading → loaded；search/get/query 需要 loaded 状态
+    # 重启后默认 released，必须显式 load()
+    def load(self) -> None: ...
+    def release(self) -> None: ...
+    @property
+    def load_state(self) -> str: ...  # "released" | "loading" | "loaded"
+
     # ─── Partition 管理 ───
     def create_partition(self, partition_name: str): ...
     def drop_partition(self, partition_name: str): ...
@@ -1099,8 +1130,8 @@ $ python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530
 - Auto ID（自动生成主键）
 - 表达式过滤删除（pymilvus `delete(filter=)` MVP 走 query→delete 间接路径）
 - Partition Key（自动哈希分区，当前只支持手动指定 Partition）
-- IVF / IVF-PQ / OPQ 等量化向量索引（Phase 9 只做 HNSW）
-- Sparse / Binary / Float16 / BFloat16 向量类型
+- IVF-PQ / OPQ 等高级量化向量索引（HNSW / IVF_FLAT / IVF_SQ8 / HNSW_SQ 已支持）
+- Binary / Float16 / BFloat16 向量类型（SPARSE_FLOAT_VECTOR 已通过 BM25 Function 支持）
 - 多向量字段（一个 Collection 多个 vector 列）
 - Hybrid Search（多向量召回）
 - Snapshot 快照（见下方迭代规划）
@@ -1124,7 +1155,8 @@ $ python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530
 | Snapshot | `_seq` 提供时间锚点，Manifest 提供状态快照，文件不可变可被多快照共享 | TODO |
 | Schema 变更 | Parquet schema evolution，旧文件缺失列自动填 null | TODO |
 | Partition Key | Manifest 已按 Partition 组织文件，只需加哈希路由逻辑 | TODO |
-| IVF / IVF-PQ 量化索引 | Phase 9 的 VectorIndex protocol 已为多种 FAISS index_type 留好接口 | TODO |
+| IVF_FLAT / IVF_SQ8 / HNSW_SQ | VectorIndex protocol + factory 路由 | ✅ 已支持 |
+| IVF-PQ / OPQ 等高级量化索引 | VectorIndex protocol 已为多种 FAISS index_type 留好接口 | TODO |
 | 多向量字段 | Schema 改造 + 多 .idx 文件命名约定 | TODO |
 
 ### pymilvus 兼容性边界（Phase 10）
@@ -1139,7 +1171,7 @@ $ python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530
 | `delete(filter=...)` | ⚠️ | servicer 内部 query → delete 间接实现 |
 | `get / query` | ✅ | 直接映射 |
 | `search(filter, output_fields, top_k)` | ✅ | output_fields 完整支持；filter 透传到 Phase 8 |
-| `create_index / drop_index / describe_index` | ✅ | HNSW + BruteForce |
+| `create_index / drop_index / describe_index` | ✅ | HNSW / IVF_FLAT / IVF_SQ8 / HNSW_SQ / BruteForce / SPARSE_INVERTED_INDEX |
 | `load_collection / release_collection / get_load_state` | ✅ | 完整状态机 |
 | `flush / compact` | ✅ | 直接映射 |
 | `get_collection_stats` | ✅ | row_count |

@@ -118,7 +118,8 @@ class VectorIndex(ABC):
     """Abstract interface for any per-segment vector index implementation.
 
     Implementations: BruteForceIndex (NumPy), FaissHnswIndex (FAISS HNSW),
-    future: FaissIvfFlatIndex, FaissIvfPqIndex, ...
+    FaissIvfFlatIndex, FaissIvfSq8Index, FaissHnswSqIndex,
+    SparseInvertedIndex (BM25 full-text search)
 
     Lifetime: build → save → load → search → close. After close, all
     methods raise. Indexes are immutable — there is no add/remove after
@@ -569,7 +570,7 @@ index.train(vectors[:training_subset])
 index.add(vectors)
 ```
 
-Phase 9 MVP 只支持 HNSW，IVF 类索引留到 Phase 9.5+ 之后的扩展。
+Phase 9 MVP 以 HNSW 为主；IVF_FLAT、IVF_SQ8、HNSW_SQ 已在后续迭代中实现（见 §11 已支持索引列表）。
 
 ### 6.4 持久化
 
@@ -802,20 +803,30 @@ def test_collection_search_index_path_matches_brute_force(tmp_path):
 
 ---
 
-## 11. 不在 Phase 9 范围
+## 11. 已支持的索引类型与后续扩展
+
+### 已支持
+
+| 索引类型 | 实现文件 | 说明 |
+|---|---|---|
+| BRUTE_FORCE | `brute_force.py` | NumPy 暴力扫描，无依赖兜底 + 差分测试基准 + 小 segment 默认 |
+| HNSW | `faiss_hnsw.py` | FAISS HNSW + IDSelectorBitmap pre-filter |
+| IVF_FLAT | `faiss_ivf_flat.py` | FAISS IVF-Flat，需 train 步骤 |
+| IVF_SQ8 | `faiss_ivf_sq8.py` | FAISS IVF + 8-bit scalar quantization，内存更省 |
+| HNSW_SQ | `faiss_hnsw_sq.py` | FAISS HNSW + scalar quantization 变体 |
+| SPARSE_INVERTED_INDEX | `sparse_inverted.py` | per-segment BM25 倒排索引，用于全文检索（Phase 11） |
+
+### 不在当前范围
 
 | 功能 | 推迟到 |
 |---|---|
-| IVF / IVF-PQ / OPQ 等量化索引 | Phase 9.5+ 之后扩展 |
+| IVF-PQ / OPQ 等高级量化索引 | Future |
 | GPU 加速（faiss-gpu） | Future |
 | 向量 quantization（int8, fp16, bf16, binary） | Future |
 | 异步 index build（不阻塞 flush） | Future |
 | 索引 warmup / 预读 | Future |
 | 多向量字段（一个 Collection 多个 vector 列） | Future（Milvus 也是后期才加） |
 | Index 参数自动调优 | Future |
-| Sparse vector index | Future |
-
-Phase 9 MVP 的目标是"让 search 不再是 brute-force"，复杂索引家族留给后续。
 
 ---
 

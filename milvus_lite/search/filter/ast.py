@@ -1,6 +1,6 @@
 """Filter expression AST nodes.
 
-11 frozen dataclass nodes + Expr Union type. All nodes are pure data
+20 frozen dataclass nodes + Expr Union type. All nodes are pure data
 (no methods) — behavior lives in semantic.py and the eval/* backends.
 
 Each node carries a `pos` field (column in the source string) so error
@@ -171,9 +171,10 @@ class MetaAccess:
     The schema must have ``enable_dynamic_field=True`` for this node to
     be allowed. The result type is "dynamic" (not known until runtime),
     and any expression containing a MetaAccess forces backend selection
-    to "python" — pyarrow.compute has no built-in JSON path kernel, so
-    arrow_backend cannot evaluate this without per-batch JSON parsing.
-    Per-batch preprocessing is a Phase F3+ optimization.
+    to "hybrid" — pyarrow.compute has no built-in JSON path kernel, so
+    hybrid_backend does per-batch JSON preprocessing to materialize
+    dynamic keys as Arrow columns, then delegates to arrow_backend.
+    Falls back to python_backend on heterogeneous JSON types.
     """
     key: str
     pos: int

@@ -58,8 +58,16 @@ MilvusLite Phase 8 引入 Milvus-style 标量过滤表达式系统，让 `Collec
 | 3 | `not`, `NOT`, `!` | right (前缀) | |
 | 4 | `==`, `!=`, `<`, `<=`, `>`, `>=` | left | 链式比较 parse 接受、semantic 拒绝 |
 | 4 | `in [...]`, `not in [...]` | non-assoc | RHS 必须是字面量数组 |
+| 4 | `like` | non-assoc | SQL LIKE 通配符 `%` / `_`（F2a） |
+| 4 | `is null`, `is not null` | non-assoc | 空值检查（F2a） |
+| 5 | `+`, `-`, `*`, `/`, `%` | left | 算术运算（F2a） |
 | 5 | `-` (unary) | right | 仅 `Unary(SUB, expr)` |
-| 6 | literal / ident / `(...)` | — | |
+| 6 | `text_match(field, query)` | — | 全文搜索匹配（Phase 11） |
+| 6 | `array_contains(field, val)` | — | 数组包含单值（F3） |
+| 6 | `array_contains_all(field, [vals])` | — | 数组包含全部值（F3） |
+| 6 | `array_contains_any(field, [vals])` | — | 数组包含任一值（F3） |
+| 6 | `array_length(field)` | — | 数组长度（F3） |
+| 7 | literal / ident / `(...)` | — | |
 
 ### 3.2 字面量
 
@@ -141,13 +149,19 @@ Whitespace      : [ \t\r\n]+ -> skip ;
 
 ## 4. AST 节点
 
-11 个 frozen dataclass，全部值语义、可哈希、自动 `__eq__`。详见 `modules.md §9.21`。
+20 个 frozen dataclass，全部值语义、可哈希、自动 `__eq__`。详见 `modules.md §9.21`。
 
 ```
 Literal:    IntLit, FloatLit, StringLit, BoolLit
 List:       ListLit
 Reference:  FieldRef
 Operations: CmpOp, InOp, And, Or, Not
+Arithmetic: ArithOp
+Pattern:    LikeOp
+Null test:  IsNullOp
+Dynamic:    MetaAccess, JsonAccess
+FTS:        TextMatchOp
+Array:      ArrayContainsOp, ArrayLengthOp, ArrayAccessOp
 ```
 
 **关键设计**：
@@ -172,7 +186,7 @@ Operations: CmpOp, InOp, And, Or, Not
 3. Walk AST again → infer + check types
 4. Choose backend:
    - F1: 永远 "arrow"
-   - F2b: 含 $meta 引用 → "python"
+   - F2b/F3+: 含 $meta 引用 → "hybrid"（per-batch JSON 预处理后委托 arrow_backend）
    - F3: 含 UDF → "python"
 5. Wrap in CompiledExpr
 ```

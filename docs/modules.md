@@ -8,9 +8,13 @@ milvus_lite/
 ├── storage/         # 存储层：持久化 + 内存缓冲
 ├── engine/          # 引擎层：核心逻辑编排
 ├── search/          # 搜索层：向量检索
-├── index/           # 索引层 (Phase 9)：VectorIndex 抽象 + BruteForce / FAISS
+├── index/           # 索引层 (Phase 9)：VectorIndex 抽象 + BruteForce / FAISS / IVF / Sparse
+├── analyzer/        # 分析层 (Phase 11)：文本分析 (BM25 tokenizer)
+├── embedding/       # Embedding 层：向量化模型抽象 + OpenAI provider
+├── rerank/          # Rerank 层：重排序模型抽象 + Cohere provider
 ├── adapter/         # 适配层 (Phase 10)：gRPC → engine 协议翻译
-├── db.py            # DB 层：多 Collection 生命周期管理
+├── db.py            # DB 层：多 Collection 生命周期管理 (MilvusLite)
+├── server_manager.py # pymilvus 集成入口 (后台 gRPC server 生命周期)
 ├── constants.py     # 全局常量
 ├── exceptions.py    # 异常层级
 └── __init__.py      # 公共 API 导出
@@ -65,7 +69,7 @@ lite-v2/
 │   │       ├── __init__.py         #   导出: parse_expr, compile_expr, evaluate, FilterError
 │   │       ├── exceptions.py       #   FilterError / FilterParseError / FilterFieldError / FilterTypeError
 │   │       ├── tokens.py           #   TokenKind enum + Token + tokenize()
-│   │       ├── ast.py              #   14 个 frozen AST 节点 + Expr Union
+│   │       ├── ast.py              #   20 个 frozen AST 节点 + Expr Union
 │   │       ├── parser.py           #   Pratt parser (借鉴 Milvus Plan.g4)
 │   │       ├── semantic.py         #   compile_expr + 类型推断 + 字段绑定 + backend 选择
 │   │       ├── cache.py            #   LRUCache (Phase F2c)
@@ -81,7 +85,33 @@ lite-v2/
 │   │   ├── spec.py                 #   IndexSpec frozen dataclass
 │   │   ├── brute_force.py          #   BruteForceIndex (NumPy, 差分基准 + fallback)
 │   │   ├── faiss_hnsw.py           #   FaissHnswIndex (FAISS HNSW + IDSelectorBitmap)
+│   │   ├── faiss_ivf_flat.py       #   FaissIvfFlatIndex (FAISS IVF_FLAT)
+│   │   ├── faiss_ivf_sq8.py        #   FaissIvfSq8Index (FAISS IVF_SQ8)
+│   │   ├── faiss_hnsw_sq.py        #   FaissHnswSqIndex (FAISS HNSW_SQ — HNSW + scalar quantization)
+│   │   ├── sparse_inverted.py      #   SparseInvertedIndex (稀疏向量倒排索引)
 │   │   └── factory.py              #   build_index_from_spec / load_index + try-import faiss 降级
+│   │
+│   ├── analyzer/                   # ══ 分析层 (Phase 11) ══
+│   │   ├── __init__.py             #   导出: Analyzer, StandardAnalyzer, create_analyzer
+│   │   ├── protocol.py             #   Analyzer ABC: tokenize
+│   │   ├── standard.py             #   StandardAnalyzer (regex tokenizer)
+│   │   ├── jieba_analyzer.py       #   JiebaAnalyzer (可选中文分词)
+│   │   ├── hash.py                 #   term_to_id hash 函数
+│   │   ├── sparse.py               #   sparse vector 工具
+│   │   └── factory.py              #   create_analyzer 工厂
+│   │
+│   ├── embedding/                  # ══ Embedding 层 ══
+│   │   ├── __init__.py
+│   │   ├── protocol.py             #   EmbeddingProvider ABC
+│   │   ├── openai_provider.py      #   OpenAI embedding provider
+│   │   └── factory.py              #   create_embedding_provider 工厂
+│   │
+│   ├── rerank/                     # ══ Rerank 层 ══
+│   │   ├── __init__.py
+│   │   ├── protocol.py             #   RerankProvider ABC
+│   │   ├── cohere_provider.py      #   Cohere rerank provider
+│   │   ├── decay.py                #   decay 衰减函数
+│   │   └── factory.py              #   create_rerank_provider 工厂
 │   │
 │   ├── adapter/                    # ══ 适配层 (Phase 10) ══
 │   │   └── grpc/                   # ── gRPC → engine 协议翻译 ──
@@ -104,8 +134,9 @@ lite-v2/
 │   │           ├── common_pb2.py
 │   │           └── README.md       #   source commit reference
 │   │
-│   └── db.py                       # ══ DB 层 ══
-│                                    #   MilvusLite 类 (create/get/drop/list_collection, get_collection_stats, close)
+│   ├── db.py                       # ══ DB 层 ══
+│   │                                #   MilvusLite 类 (create/get/drop/list_collection, get_collection_stats, close)
+│   └── server_manager.py           #   pymilvus 集成入口 (ServerManager, server_manager_instance)
 │
 ├── tests/
 │   ├── conftest.py                 # 共享 fixtures: 临时目录, 示例 Schema, 随机向量生成器
