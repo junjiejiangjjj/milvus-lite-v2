@@ -1,22 +1,22 @@
 """
-Milvus 兼容性最终补充测试 — 覆盖之前遗漏的场景。
+Milvus compatibility final supplementary tests -- covering previously missed scenarios.
 
-覆盖范围:
-  1. BM25 + Dense 混合检索 (RAG 核心场景)
-  2. Query Iterator 分页遍历
-  3. Search Iterator 分页遍历
+Coverage:
+  1. BM25 + Dense hybrid search (core RAG scenario)
+  2. Query Iterator pagination traversal
+  3. Search Iterator pagination traversal
   4. array_contains_all / array_contains_any
-  5. Read-your-writes 一致性 (insert 后立即 search，不 flush)
-  6. Delete by 复杂 filter
-  7. DOUBLE 精度字段
-  8. 大批量 insert (5000 条)
-  9. Search 带 PK 范围 filter
- 10. 重复 delete 同一 PK (幂等性)
- 11. Upsert + auto_id 交互
- 12. 多条件 NOT 组合 filter
- 13. JSON 数组访问 filter
+  5. Read-your-writes consistency (search immediately after insert, no flush)
+  6. Delete by complex filter
+  7. DOUBLE precision field
+  8. Large batch insert (5000 records)
+  9. Search with PK range filter
+ 10. Repeated delete of same PK (idempotency)
+ 11. Upsert + auto_id interaction
+ 12. Multi-condition NOT combination filter
+ 13. JSON array access filter
  14. Hybrid Search + filter
- 15. insert 后 delete 后 upsert 完整生命周期
+ 15. Full lifecycle: insert, delete, upsert
 """
 
 from __future__ import annotations
@@ -58,13 +58,13 @@ def rvecs(n, dim=DIM, seed=SEED):
 
 
 # ====================================================================
-# 1. BM25 + Dense 混合检索 (RAG 核心场景)
+# 1. BM25 + Dense hybrid search (core RAG scenario)
 # ====================================================================
 
 class TestBM25DenseHybrid:
 
     def test_sparse_dense_hybrid_search(self, client: MilvusClient):
-        """BM25 稀疏 + Dense 向量混合检索 — RAG 最典型用法"""
+        """BM25 sparse + Dense vector hybrid search -- most typical RAG usage"""
         from pymilvus import Function, FunctionType, AnnSearchRequest, RRFRanker
 
         schema = client.create_schema()
@@ -109,7 +109,7 @@ class TestBM25DenseHybrid:
         client.insert("rag_hybrid", data)
         client.load_collection("rag_hybrid")
 
-        # Sparse (BM25) 搜索
+        # Sparse (BM25) search
         sparse_req = AnnSearchRequest(
             data=["machine learning"],
             anns_field="sparse",
@@ -117,7 +117,7 @@ class TestBM25DenseHybrid:
             limit=5,
         )
 
-        # Dense 搜索
+        # Dense search
         dense_req = AnnSearchRequest(
             data=dense_vecs[0:1].tolist(),
             anns_field="dense",
@@ -133,7 +133,7 @@ class TestBM25DenseHybrid:
             output_fields=["text"],
         )
         assert len(results[0]) == 5
-        # 结果中应有文本内容
+        # Results should contain text content
         texts = [h["entity"]["text"] for h in results[0]]
         assert all(isinstance(t, str) and len(t) > 0 for t in texts)
 
@@ -145,7 +145,7 @@ class TestBM25DenseHybrid:
 class TestQueryIterator:
 
     def test_query_iterator_pagination(self, client: MilvusClient):
-        """query_iterator 遍历全部数据"""
+        """query_iterator traverses all data"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -162,7 +162,7 @@ class TestQueryIterator:
         ])
         client.load_collection("iter_test")
 
-        # 用 iterator 遍历
+        # Traverse using iterator
         it = client.query_iterator(
             "iter_test",
             filter="pk >= 0",
@@ -222,7 +222,7 @@ class TestQueryIterator:
 class TestSearchIterator:
 
     def test_search_iterator(self, client: MilvusClient):
-        """search_iterator 逐批获取搜索结果"""
+        """search_iterator fetches search results in batches"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -255,8 +255,8 @@ class TestSearchIterator:
         it.close()
 
         assert len(all_pks) == 30
-        assert all_pks[0] == 0  # 最近邻是自己
-        # 不应有重复
+        assert all_pks[0] == 0  # nearest neighbor is itself
+        # Should have no duplicates
         assert len(set(all_pks)) == 30
 
 
@@ -287,23 +287,23 @@ class TestArrayContainsAdvanced:
         ])
 
     def test_array_contains_all(self, client: MilvusClient):
-        """array_contains_all: 数组包含所有指定元素"""
+        """array_contains_all: array contains all specified elements"""
         r = client.query("arr_adv",
                          filter='array_contains_all(tags, ["python", "ml"])',
                          output_fields=["pk", "tags"])
         pks = sorted([x["pk"] for x in r])
-        assert pks == [0, 2, 5]  # 都同时包含 python 和 ml
+        assert pks == [0, 2, 5]  # all contain both python and ml
 
     def test_array_contains_any(self, client: MilvusClient):
-        """array_contains_any: 数组包含任一指定元素"""
+        """array_contains_any: array contains any of the specified elements"""
         r = client.query("arr_adv",
                          filter='array_contains_any(tags, ["rust", "go"])',
                          output_fields=["pk", "tags"])
         pks = sorted([x["pk"] for x in r])
-        assert pks == [3, 4]  # rust 或 go
+        assert pks == [3, 4]  # rust or go
 
     def test_array_contains_all_single(self, client: MilvusClient):
-        """array_contains_all 只传一个元素"""
+        """array_contains_all with only one element"""
         r = client.query("arr_adv",
                          filter='array_contains_all(tags, ["web"])',
                          output_fields=["pk"])
@@ -312,13 +312,13 @@ class TestArrayContainsAdvanced:
 
 
 # ====================================================================
-# 5. Read-your-writes 一致性
+# 5. Read-your-writes consistency
 # ====================================================================
 
 class TestReadYourWrites:
 
     def test_search_immediately_after_insert(self, client: MilvusClient):
-        """insert 后立即 search (不 flush)，应能找到新数据"""
+        """Search immediately after insert (no flush) should find new data"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -330,7 +330,7 @@ class TestReadYourWrites:
         client.load_collection("ryw")
 
         rng = np.random.default_rng(SEED)
-        # 逐条 insert 后立即 search
+        # Insert one by one and search immediately after each
         for i in range(5):
             v = rng.standard_normal((1, DIM)).astype(np.float32)
             client.insert("ryw", [{"pk": i, "vec": v[0].tolist()}])
@@ -340,7 +340,7 @@ class TestReadYourWrites:
             assert results[0][0]["entity"]["pk"] == i
 
     def test_query_immediately_after_delete(self, client: MilvusClient):
-        """delete 后立即 query，被删数据不可见"""
+        """Query immediately after delete, deleted data should not be visible"""
         client.create_collection("ryw_del", dimension=DIM)
         vecs = rvecs(5)
         client.insert("ryw_del", [{"id": i, "vector": vecs[i]} for i in range(5)])
@@ -355,13 +355,13 @@ class TestReadYourWrites:
 
 
 # ====================================================================
-# 6. Delete by 复杂 filter
+# 6. Delete by complex filter
 # ====================================================================
 
 class TestDeleteByComplexFilter:
 
     def test_delete_by_multi_condition(self, client: MilvusClient):
-        """多条件 filter 删除"""
+        """Delete with multi-condition filter"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -376,25 +376,25 @@ class TestDeleteByComplexFilter:
             for i in range(10)
         ])
 
-        # 删除 age >= 25 且 inactive 的记录
+        # Delete records with age >= 25 and inactive status
         client.delete("del_complex", filter='age >= 25 and status == "inactive"')
 
         remaining = client.query("del_complex", filter="pk >= 0",
                                  output_fields=["pk", "age", "status"])
         for r in remaining:
-            # 不应该有 age>=25 且 inactive 的记录
+            # There should be no records with age>=25 and inactive status
             if r["age"] >= 25:
                 assert r["status"] != "inactive"
 
 
 # ====================================================================
-# 7. DOUBLE 精度字段
+# 7. DOUBLE precision field
 # ====================================================================
 
 class TestDoublePrecision:
 
     def test_double_precision_preserved(self, client: MilvusClient):
-        """DOUBLE 字段精度保持"""
+        """DOUBLE field precision is preserved"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -414,13 +414,13 @@ class TestDoublePrecision:
 
 
 # ====================================================================
-# 8. 大批量 insert (5000 条)
+# 8. Large batch insert (5000 records)
 # ====================================================================
 
 class TestLargeBatchInsert:
 
     def test_insert_5000_records(self, client: MilvusClient):
-        """单次插入 5000 条记录"""
+        """Single insert of 5000 records"""
         client.create_collection("big_batch", dimension=DIM)
         rng = np.random.default_rng(SEED)
         n = 5000
@@ -433,20 +433,20 @@ class TestLargeBatchInsert:
         stats = client.get_collection_stats("big_batch")
         assert int(stats["row_count"]) == n
 
-        # 随机抽样验证
+        # Random sampling verification
         for pk in [0, 1000, 2500, 4999]:
             got = client.get("big_batch", ids=[pk])
             assert len(got) == 1
 
 
 # ====================================================================
-# 9. Search 带 PK 范围 filter
+# 9. Search with PK range filter
 # ====================================================================
 
 class TestSearchWithPKFilter:
 
     def test_search_with_pk_range(self, client: MilvusClient):
-        """search 时用 PK 范围做 filter"""
+        """search with PK range as filter"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -469,23 +469,23 @@ class TestSearchWithPKFilter:
 
 
 # ====================================================================
-# 10. 重复 delete 同一 PK (幂等性)
+# 10. Repeated delete of same PK (idempotency)
 # ====================================================================
 
 class TestIdempotentDelete:
 
     def test_delete_same_pk_twice(self, client: MilvusClient):
-        """重复删除同一 PK 不报错"""
+        """Deleting the same PK twice should not raise error"""
         client.create_collection("idem_del", dimension=DIM)
         vecs = rvecs(3)
         client.insert("idem_del", [{"id": i, "vector": vecs[i]} for i in range(3)])
 
         client.delete("idem_del", ids=[1])
-        client.delete("idem_del", ids=[1])  # 再次删除不应报错
+        client.delete("idem_del", ids=[1])  # Second delete should not raise error
 
         got = client.get("idem_del", ids=[1])
         assert len(got) == 0
-        # 其他记录不受影响
+        # Other records should not be affected
         assert len(client.get("idem_del", ids=[0, 2])) == 2
 
 
@@ -496,7 +496,7 @@ class TestIdempotentDelete:
 class TestUpsertWithAutoId:
 
     def test_upsert_auto_id_collection(self, client: MilvusClient):
-        """auto_id 集合的 upsert"""
+        """Upsert on auto_id collection"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True, auto_id=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -505,19 +505,19 @@ class TestUpsertWithAutoId:
         client.create_collection("ups_autoid", schema=schema)
         vecs = rvecs(3)
 
-        # insert 获取自动分配的 pk
+        # Insert to get auto-assigned pks
         res = client.insert("ups_autoid", [
             {"vec": vecs[0], "label": "first"},
             {"vec": vecs[1], "label": "second"},
         ])
         assert res["insert_count"] == 2
 
-        # 查出分配的 pk
+        # Query to get the assigned pks
         rows = client.query("ups_autoid", filter="pk >= 0",
                             output_fields=["pk", "label"])
         assert len(rows) == 2
 
-        # 用已知 pk 做 upsert
+        # Upsert with known pk
         pk = rows[0]["pk"]
         new_vec = rvecs(1, seed=99)[0]
         client.upsert("ups_autoid", [
@@ -529,13 +529,13 @@ class TestUpsertWithAutoId:
 
 
 # ====================================================================
-# 12. 多条件 NOT 组合
+# 12. Multi-condition NOT combinations
 # ====================================================================
 
 class TestNotCombinations:
 
     def test_not_and_not(self, client: MilvusClient):
-        """NOT + AND + NOT 组合"""
+        """NOT + AND + NOT combination"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -548,7 +548,7 @@ class TestNotCombinations:
             {"pk": i, "vec": vecs[i], "x": i % 3, "y": i % 2} for i in range(10)
         ])
 
-        # not(x==0) and not(y==0) → x!=0 且 y!=0
+        # not(x==0) and not(y==0) -> x!=0 and y!=0
         r = client.query("not_combo",
                          filter="not (x == 0) and not (y == 0)",
                          output_fields=["pk", "x", "y"])
@@ -557,13 +557,13 @@ class TestNotCombinations:
 
 
 # ====================================================================
-# 13. JSON 数组访问 filter
+# 13. JSON array access filter
 # ====================================================================
 
 class TestJsonArrayAccess:
 
     def test_json_array_element_filter(self, client: MilvusClient):
-        """JSON 字段中数组的过滤"""
+        """Filtering on arrays within JSON fields"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -578,7 +578,7 @@ class TestJsonArrayAccess:
             {"pk": 3, "vec": vecs[3], "meta": {"scores": [50, 45, 55], "level": "C"}},
         ])
 
-        # 用 JSON 路径过滤
+        # Filter using JSON path
         r = client.query("json_arr", filter='meta["level"] == "A"',
                          output_fields=["pk", "meta"])
         pks = sorted([x["pk"] for x in r])
@@ -592,7 +592,7 @@ class TestJsonArrayAccess:
 class TestHybridSearchWithFilter:
 
     def test_hybrid_search_with_scalar_filter(self, client: MilvusClient):
-        """Hybrid Search 同时带 filter"""
+        """Hybrid Search with scalar filter"""
         from pymilvus import AnnSearchRequest, RRFRanker
 
         schema = client.create_schema()
@@ -633,13 +633,13 @@ class TestHybridSearchWithFilter:
 
 
 # ====================================================================
-# 15. 完整生命周期: insert → search → update → delete → re-insert
+# 15. Full lifecycle: insert -> search -> update -> delete -> re-insert
 # ====================================================================
 
 class TestFullLifecycle:
 
     def test_record_lifecycle(self, client: MilvusClient):
-        """一条记录的完整生命周期"""
+        """Full lifecycle of a single record"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -661,11 +661,11 @@ class TestFullLifecycle:
         got = client.get("lifecycle", ids=[42])
         assert got[0]["status"] == "created"
 
-        # 2. Search 能找到
+        # 2. Search can find it
         r = client.search("lifecycle", data=[vec], limit=1, output_fields=["pk"])
         assert r[0][0]["entity"]["pk"] == 42
 
-        # 3. Upsert 更新
+        # 3. Upsert update
         client.upsert("lifecycle", [
             {"pk": 42, "vec": vec, "status": "updated", "version": 2},
         ])
@@ -676,7 +676,7 @@ class TestFullLifecycle:
         # 4. Flush
         client.flush("lifecycle")
 
-        # 5. 再次 upsert
+        # 5. Upsert again
         client.upsert("lifecycle", [
             {"pk": 42, "vec": vec, "status": "finalized", "version": 3},
         ])
@@ -687,7 +687,7 @@ class TestFullLifecycle:
         client.delete("lifecycle", ids=[42])
         assert len(client.get("lifecycle", ids=[42])) == 0
 
-        # 7. Re-insert 同一 PK
+        # 7. Re-insert same PK
         new_vec = rvecs(1, seed=99)[0]
         client.insert("lifecycle", [
             {"pk": 42, "vec": new_vec, "status": "reborn", "version": 1},
@@ -696,7 +696,7 @@ class TestFullLifecycle:
         assert got[0]["status"] == "reborn"
         assert got[0]["version"] == 1
 
-        # 8. Search 仍正常
+        # 8. Search still works
         r = client.search("lifecycle", data=[new_vec], limit=1,
                           output_fields=["pk", "status"])
         assert r[0][0]["entity"]["pk"] == 42

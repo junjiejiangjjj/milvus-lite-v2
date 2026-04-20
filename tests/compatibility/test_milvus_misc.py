@@ -1,27 +1,27 @@
 """
-Milvus 杂项兼容性测试 — 覆盖剩余未测场景。
+Milvus miscellaneous compatibility tests -- covering remaining untested scenarios.
 
-覆盖范围:
+Coverage:
   1.  pymilvus ORM API (connections.connect + Collection)
-  2.  错误 filter 语法 → 应返回清晰报错
-  3.  插入不存在的字段名
-  4.  类型不匹配 (字符串插入整数字段)
-  5.  搜索返回零结果 (极端限制性 filter)
-  6.  空字符串 filter 与 None filter
-  7.  insert 大量重复 PK (1000 次覆盖同一 PK)
-  8.  query limit=1 只取一条
-  9.  get 单个 id (非列表)
- 10.  search limit=1 只取最近邻
- 11.  delete 大量 id (500 条)
- 12.  集合名特殊字符/长名
- 13.  FLOAT 和 INT 混插 (自动类型转换)
- 14.  多个 filter 条件中使用同一字段
- 15.  并发创建/删除集合
- 16.  search + filter 命中 0 条
- 17.  query offset > limit 组合
- 18.  BOOL filter 各种写法
- 19.  VARCHAR LIKE 各种模式
- 20.  JSON 多层嵌套路径
+  2.  Invalid filter syntax -> should return clear error
+  3.  Insert with nonexistent field name
+  4.  Type mismatch (string inserted into integer field)
+  5.  Search returning zero results (extremely restrictive filter)
+  6.  Empty string filter and None filter
+  7.  Insert with many duplicate PKs (1000 overwrites of same PK)
+  8.  query limit=1 returns only one record
+  9.  get single id (not a list)
+ 10.  search limit=1 returns only nearest neighbor
+ 11.  delete many ids (500 records)
+ 12.  Collection name special characters / long names
+ 13.  FLOAT and INT mixed insert (automatic type conversion)
+ 14.  Multiple filter conditions using the same field
+ 15.  Concurrent create/drop collections
+ 16.  search + filter hits 0 records
+ 17.  query offset > limit combination
+ 18.  BOOL filter various syntax
+ 19.  VARCHAR LIKE various patterns
+ 20.  JSON deep nesting paths
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def rvecs(n, dim=DIM, seed=SEED):
 class TestORMAPI:
 
     def test_orm_connect_and_crud(self, server):
-        """用 pymilvus ORM API (connections + Collection) 做完整 CRUD"""
+        """Full CRUD using pymilvus ORM API (connections + Collection)"""
         from pymilvus import (
             connections, Collection, CollectionSchema,
             FieldSchema, DataType, utility,
@@ -80,7 +80,7 @@ class TestORMAPI:
 
         connections.connect(alias=alias, host="127.0.0.1", port=port)
         try:
-            # 创建 schema
+            # Create schema
             fields = [
                 FieldSchema("pk", DataType.INT64, is_primary=True),
                 FieldSchema("vec", DataType.FLOAT_VECTOR, dim=DIM),
@@ -137,13 +137,13 @@ class TestORMAPI:
 
 
 # ====================================================================
-# 2. 错误 filter 语法
+# 2. Invalid filter syntax
 # ====================================================================
 
 class TestInvalidFilter:
 
     def test_bad_filter_syntax(self, client: MilvusClient):
-        """无效 filter 语法应报错"""
+        """Invalid filter syntax should raise error"""
         client.create_collection("bad_filter", dimension=DIM)
         vecs = rvecs(3)
         client.insert("bad_filter", [{"id": i, "vector": vecs[i]} for i in range(3)])
@@ -153,11 +153,11 @@ class TestInvalidFilter:
                          output_fields=["id"])
 
     def test_unknown_field_in_filter(self, client: MilvusClient):
-        """filter 中引用不存在的字段 (非 dynamic field 集合)"""
+        """Filter references nonexistent field (non-dynamic field collection)"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
-        # enable_dynamic_field 默认 False → 未知字段应报错
+        # enable_dynamic_field defaults to False -> unknown field should raise error
 
         client.create_collection("unknown_field", schema=schema)
         vecs = rvecs(1)
@@ -169,13 +169,13 @@ class TestInvalidFilter:
 
 
 # ====================================================================
-# 3. 类型不匹配
+# 3. Type mismatch
 # ====================================================================
 
 class TestTypeMismatch:
 
     def test_string_into_int_field(self, client: MilvusClient):
-        """字符串插入 INT64 字段应报错"""
+        """String inserted into INT64 field should raise error"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -188,7 +188,7 @@ class TestTypeMismatch:
             ])
 
     def test_int_into_float_field_ok(self, client: MilvusClient):
-        """int 插入 FLOAT 字段应自动转换 (Milvus 行为)"""
+        """int inserted into FLOAT field should auto-convert (Milvus behavior)"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -204,13 +204,13 @@ class TestTypeMismatch:
 
 
 # ====================================================================
-# 4. 搜索返回零结果
+# 4. Search returning zero results
 # ====================================================================
 
 class TestSearchZeroResults:
 
     def test_search_with_impossible_filter(self, client: MilvusClient):
-        """filter 排除全部数据 → 返回空"""
+        """Filter excludes all data -> returns empty"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -227,13 +227,13 @@ class TestSearchZeroResults:
         ])
         client.load_collection("zero_res")
 
-        # val 最大是 9，搜 > 100 不可能命中
+        # val max is 9, searching > 100 cannot match anything
         results = client.search("zero_res", data=[vecs[0]], limit=5,
                                 filter="val > 100", output_fields=["pk"])
         assert len(results[0]) == 0
 
     def test_query_no_match(self, client: MilvusClient):
-        """query filter 无命中"""
+        """query filter with no matches"""
         client.create_collection("q_no_match", dimension=DIM)
         vecs = rvecs(5)
         client.insert("q_no_match", [{"id": i, "vector": vecs[i]} for i in range(5)])
@@ -243,13 +243,13 @@ class TestSearchZeroResults:
 
 
 # ====================================================================
-# 5. insert 大量重复 PK
+# 5. Insert with many duplicate PKs
 # ====================================================================
 
 class TestMassivePKOverwrite:
 
     def test_1000_overwrites_same_pk(self, client: MilvusClient):
-        """对同一 PK 连续 insert 1000 次，只保留最后一条"""
+        """Insert same PK 1000 times consecutively, only the last one is kept"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -257,14 +257,14 @@ class TestMassivePKOverwrite:
 
         client.create_collection("mass_overwrite", schema=schema)
 
-        # 批量插入同一 PK
+        # Batch insert with same PK
         base_vec = rvecs(1)[0]
         data = [{"pk": 1, "vec": base_vec, "ver": i} for i in range(1000)]
         client.insert("mass_overwrite", data)
 
         got = client.get("mass_overwrite", ids=[1])
         assert len(got) == 1
-        assert got[0]["ver"] == 999  # 最后一条
+        assert got[0]["ver"] == 999  # last one
 
         stats = client.get_collection_stats("mass_overwrite")
         assert int(stats["row_count"]) == 1
@@ -303,7 +303,7 @@ class TestLimitOne:
 
 
 # ====================================================================
-# 7. delete 大量 id (500 条)
+# 7. delete many ids (500 records)
 # ====================================================================
 
 class TestBulkDelete:
@@ -320,33 +320,33 @@ class TestBulkDelete:
 
 
 # ====================================================================
-# 8. 集合名边界
+# 8. Collection name edge cases
 # ====================================================================
 
 class TestCollectionNameEdge:
 
     def test_long_collection_name(self, client: MilvusClient):
-        """较长的集合名"""
+        """Long collection name"""
         name = "a" * 200
         client.create_collection(name, dimension=DIM)
         assert client.has_collection(name) is True
         client.drop_collection(name)
 
     def test_collection_name_with_underscore_and_digits(self, client: MilvusClient):
-        """下划线和数字的集合名"""
+        """Collection name with underscores and digits"""
         name = "test_collection_123_v2"
         client.create_collection(name, dimension=DIM)
         assert client.has_collection(name) is True
 
 
 # ====================================================================
-# 9. FLOAT 和 INT 混用
+# 9. FLOAT and INT mixed usage
 # ====================================================================
 
 class TestTypeCoercion:
 
     def test_float_into_double_field(self, client: MilvusClient):
-        """float 插入 DOUBLE 字段"""
+        """float inserted into DOUBLE field"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -359,7 +359,7 @@ class TestTypeCoercion:
         assert got[0]["val"] == pytest.approx(3.14, rel=1e-5)
 
     def test_bool_filter_variations(self, client: MilvusClient):
-        """BOOL 字段的各种 filter 写法"""
+        """Various filter syntax for BOOL field"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -374,11 +374,11 @@ class TestTypeCoercion:
             {"pk": 3, "vec": vecs[3], "flag": False},
         ])
 
-        # true 小写
+        # true lowercase
         r1 = client.query("bool_var", filter="flag == true", output_fields=["pk"])
         assert len(r1) == 2
 
-        # false 小写
+        # false lowercase
         r2 = client.query("bool_var", filter="flag == false", output_fields=["pk"])
         assert len(r2) == 2
 
@@ -389,13 +389,13 @@ class TestTypeCoercion:
 
 
 # ====================================================================
-# 10. 同一字段多条件
+# 10. Same field with multiple conditions
 # ====================================================================
 
 class TestSameFieldMultiCondition:
 
     def test_range_on_same_field(self, client: MilvusClient):
-        """同一字段的范围查询: a > X and a < Y"""
+        """Range query on the same field: a > X and a < Y"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -416,7 +416,7 @@ class TestSameFieldMultiCondition:
 
 
 # ====================================================================
-# 11. VARCHAR LIKE 各种模式
+# 11. VARCHAR LIKE various patterns
 # ====================================================================
 
 class TestLikePatterns:
@@ -442,7 +442,7 @@ class TestLikePatterns:
         ])
 
     def test_like_prefix(self, client: MilvusClient):
-        """前缀匹配: app%"""
+        """Prefix match: app%"""
         r = client.query("like_test", filter='name like "app%"',
                          output_fields=["pk", "name"])
         names = [x["name"] for x in r]
@@ -451,7 +451,7 @@ class TestLikePatterns:
         assert "banana" not in names
 
     def test_like_suffix(self, client: MilvusClient):
-        """后缀匹配: %ple"""
+        """Suffix match: %ple"""
         r = client.query("like_test", filter='name like "%ple"',
                          output_fields=["pk", "name"])
         names = sorted([x["name"] for x in r])
@@ -459,27 +459,27 @@ class TestLikePatterns:
         assert "pineapple" in names
 
     def test_like_contains(self, client: MilvusClient):
-        """包含匹配: %an%"""
+        """Contains match: %an%"""
         r = client.query("like_test", filter='name like "%an%"',
                          output_fields=["pk", "name"])
         names = [x["name"] for x in r]
         assert "banana" in names
 
     def test_like_no_match(self, client: MilvusClient):
-        """无匹配"""
+        """No match"""
         r = client.query("like_test", filter='name like "zzz%"',
                          output_fields=["pk"])
         assert r == []
 
 
 # ====================================================================
-# 12. JSON 多层嵌套
+# 12. JSON deep nesting
 # ====================================================================
 
 class TestDeepJsonNesting:
 
     def test_deep_nested_json_read(self, client: MilvusClient):
-        """深层嵌套 JSON 读取"""
+        """Deep nested JSON read"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -502,7 +502,7 @@ class TestDeepJsonNesting:
         assert got[0]["data"]["flat"] == "hello"
 
     def test_json_nested_filter(self, client: MilvusClient):
-        """JSON 嵌套字段 filter"""
+        """JSON nested field filter"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -523,13 +523,13 @@ class TestDeepJsonNesting:
 
 
 # ====================================================================
-# 13. 并发创建/删除集合
+# 13. Concurrent create/drop collections
 # ====================================================================
 
 class TestConcurrentCollectionOps:
 
     def test_concurrent_create_drop(self, client: MilvusClient):
-        """多线程并发创建不同集合"""
+        """Multi-threaded concurrent creation of different collections"""
         errors = []
 
         def create_col(name):
@@ -555,13 +555,13 @@ class TestConcurrentCollectionOps:
 
 
 # ====================================================================
-# 14. query offset + limit 边界
+# 14. query offset + limit edge cases
 # ====================================================================
 
 class TestPaginationEdge:
 
     def test_offset_equals_total(self, client: MilvusClient):
-        """offset == 总数据量 → 空"""
+        """offset == total data count -> empty"""
         client.create_collection("pag_eq", dimension=DIM)
         vecs = rvecs(5)
         client.insert("pag_eq", [{"id": i, "vector": vecs[i]} for i in range(5)])
@@ -571,23 +571,23 @@ class TestPaginationEdge:
         assert len(r) == 0
 
     def test_offset_0_limit_0(self, client: MilvusClient):
-        """limit=0 → 空 (或报错，取决于实现)"""
+        """limit=0 -> empty (or error, depends on implementation)"""
         client.create_collection("pag_zero", dimension=DIM)
         vecs = rvecs(3)
         client.insert("pag_zero", [{"id": i, "vector": vecs[i]} for i in range(3)])
 
-        # Milvus: limit=0 通常被视为 "不限制" 或报错
-        # 先试看是否能成功
+        # Milvus: limit=0 is usually treated as "no limit" or raises error
+        # Try to see if it succeeds
         try:
             r = client.query("pag_zero", filter="id >= 0", limit=0,
                              output_fields=["id"])
-            # 如果成功，结果应为空或全部
+            # If successful, result should be empty or all
             assert isinstance(r, list)
         except Exception:
-            pass  # 报错也可接受
+            pass  # Error is also acceptable
 
     def test_full_pagination(self, client: MilvusClient):
-        """完整分页遍历"""
+        """Full pagination traversal"""
         client.create_collection("pag_full", dimension=DIM)
         vecs = rvecs(17)
         client.insert("pag_full", [{"id": i, "vector": vecs[i]} for i in range(17)])
@@ -608,13 +608,13 @@ class TestPaginationEdge:
 
 
 # ====================================================================
-# 15. search + filter 命中 0 条 (不同于空集合)
+# 15. search + filter hits 0 records (different from empty collection)
 # ====================================================================
 
 class TestFilterNoHit:
 
     def test_search_filter_excludes_all_nearest(self, client: MilvusClient):
-        """最近邻全被 filter 排除"""
+        """All nearest neighbors excluded by filter"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -631,20 +631,20 @@ class TestFilterNoHit:
         ])
         client.load_collection("filter_excl")
 
-        # 搜索时 filter 要求 group="nonexistent" → 0 条
+        # Search filter requires group="nonexistent" -> 0 results
         r = client.search("filter_excl", data=[vecs[0]], limit=5,
                           filter='group == "nonexistent"', output_fields=["pk"])
         assert len(r[0]) == 0
 
 
 # ====================================================================
-# 16. 负数 PK
+# 16. Negative PK
 # ====================================================================
 
 class TestNegativePK:
 
     def test_negative_int64_pk(self, client: MilvusClient):
-        """负数作为 INT64 主键"""
+        """Negative number as INT64 primary key"""
         client.create_collection("neg_pk", dimension=DIM)
         vecs = rvecs(3)
         client.insert("neg_pk", [
@@ -656,7 +656,7 @@ class TestNegativePK:
         got = client.get("neg_pk", ids=[-100, 0, 100])
         assert len(got) == 3
 
-        # 按负数 id 删除
+        # Delete by negative id
         client.delete("neg_pk", ids=[-100])
         got = client.get("neg_pk", ids=[-100])
         assert len(got) == 0

@@ -1,25 +1,25 @@
 """
-Milvus 高级场景兼容性测试 — 覆盖之前未测试的维度。
+Milvus advanced scenario compatibility tests -- covering previously untested dimensions.
 
-覆盖范围:
-  1. MilvusClient("./local.db") drop-in 模式
+Coverage:
+  1. MilvusClient("./local.db") drop-in mode
   2. HNSW search_params (ef)
   3. IVF_FLAT search_params (nprobe)
-  4. 高维向量 (768d, 模拟真实 embedding)
-  5. 多集合并行操作
-  6. 超多字段 schema (20+ 字段)
-  7. get 指定 output_fields 选择性返回
-  8. search 指定 output_fields 不包含某些字段
-  9. 多线程并发 insert + search
- 10. insert 空列表
- 11. 大 JSON / 大 VARCHAR 值
- 12. query 用 OR 连接多个 IN 表达式
- 13. 同一集合 drop + recreate 不同 schema
- 14. search 返回向量字段
+  4. High-dimensional vectors (768d, simulating real embeddings)
+  5. Multi-collection parallel operations
+  6. Schema with many fields (20+ fields)
+  7. get with output_fields for selective field return
+  8. search with output_fields excluding certain fields
+  9. Multi-threaded concurrent insert + search
+ 10. insert empty list
+ 11. Large JSON / large VARCHAR values
+ 12. query with OR joining multiple IN expressions
+ 13. Same collection drop + recreate with different schema
+ 14. search returning vector fields
  15. Hybrid Search + WeightedRanker
- 16. search 后 flush 再 search 结果一致
- 17. 多分区交叉搜索
- 18. query 不带 filter (全量返回)
+ 16. search consistency before and after flush
+ 17. Cross-partition search
+ 18. query without filter (return all)
 """
 
 from __future__ import annotations
@@ -63,13 +63,13 @@ def rvecs(n, dim=DIM, seed=SEED):
 
 
 # ====================================================================
-# 1. MilvusClient("./local.db") drop-in 模式
+# 1. MilvusClient("./local.db") drop-in mode
 # ====================================================================
 
 class TestLocalDBMode:
 
     def test_local_db_uri(self):
-        """MilvusClient('./xxx.db') 自动启动本地 server"""
+        """MilvusClient('./xxx.db') automatically starts a local server"""
         db_path = tempfile.mktemp(suffix=".db", prefix="lite_dropin_")
         try:
             c = MilvusClient(db_path)
@@ -81,7 +81,7 @@ class TestLocalDBMode:
             got = c.get("dropin_test", ids=[0, 1, 2])
             assert len(got) == 3
 
-            # 搜索也正常
+            # Search also works
             results = c.search("dropin_test", data=[vecs[0]], limit=3,
                                output_fields=["id"])
             assert results[0][0]["entity"]["id"] == 0
@@ -90,7 +90,7 @@ class TestLocalDBMode:
             shutil.rmtree(db_path, ignore_errors=True)
 
     def test_local_db_persistence(self):
-        """local.db 模式数据持久化"""
+        """local.db mode data persistence"""
         db_path = tempfile.mktemp(suffix=".db", prefix="lite_persist_")
         try:
             # Write phase
@@ -118,7 +118,7 @@ class TestLocalDBMode:
 class TestHNSWSearchParams:
 
     def test_search_with_ef_param(self, client: MilvusClient):
-        """HNSW 搜索时指定 ef 参数"""
+        """HNSW search with specified ef parameter"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -133,7 +133,7 @@ class TestHNSWSearchParams:
         client.insert("hnsw_ef", [{"pk": i, "vec": vecs[i].tolist()} for i in range(100)])
         client.load_collection("hnsw_ef")
 
-        # ef=10 (小) vs ef=200 (大) — 都应该成功
+        # ef=10 (small) vs ef=200 (large) -- both should succeed
         r_small = client.search("hnsw_ef", data=vecs[0:1].tolist(), limit=5,
                                 search_params={"ef": 10}, output_fields=["pk"])
         assert len(r_small[0]) == 5
@@ -152,7 +152,7 @@ class TestHNSWSearchParams:
 class TestIVFSearchParams:
 
     def test_search_with_nprobe(self, client: MilvusClient):
-        """IVF_FLAT 搜索时指定 nprobe"""
+        """IVF_FLAT search with specified nprobe"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -176,13 +176,13 @@ class TestIVFSearchParams:
 
 
 # ====================================================================
-# 4. 高维向量
+# 4. High-dimensional vectors
 # ====================================================================
 
 class TestHighDimension:
 
     def test_768d_vectors(self, client: MilvusClient):
-        """768 维向量 (常见 sentence-transformer 维度)"""
+        """768-dimensional vectors (common sentence-transformer dimension)"""
         dim = 768
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
@@ -205,13 +205,13 @@ class TestHighDimension:
 
 
 # ====================================================================
-# 5. 多集合并行操作
+# 5. Multi-collection parallel operations
 # ====================================================================
 
 class TestMultiCollection:
 
     def test_operations_across_collections(self, client: MilvusClient):
-        """同时操作多个集合互不干扰"""
+        """Operations across multiple collections do not interfere with each other"""
         for name in ["mc_a", "mc_b", "mc_c"]:
             client.create_collection(name, dimension=DIM)
 
@@ -223,7 +223,7 @@ class TestMultiCollection:
         client.insert("mc_b", [{"id": i + 100, "vector": vecs_b[i]} for i in range(5)])
         client.insert("mc_c", [{"id": i + 200, "vector": vecs_c[i]} for i in range(5)])
 
-        # 各集合数据隔离
+        # Data isolation across collections
         got_a = client.get("mc_a", ids=[0, 1])
         got_b = client.get("mc_b", ids=[100, 101])
         got_c = client.get("mc_c", ids=[200, 201])
@@ -231,7 +231,7 @@ class TestMultiCollection:
         assert len(got_b) == 2
         assert len(got_c) == 2
 
-        # 删除 mc_b 不影响其他
+        # Dropping mc_b does not affect others
         client.drop_collection("mc_b")
         assert client.has_collection("mc_a") is True
         assert client.has_collection("mc_b") is False
@@ -240,13 +240,13 @@ class TestMultiCollection:
 
 
 # ====================================================================
-# 6. 超多字段 schema
+# 6. Schema with many fields
 # ====================================================================
 
 class TestManyFields:
 
     def test_20_field_schema(self, client: MilvusClient):
-        """20 个标量字段的集合"""
+        """Collection with 20 scalar fields"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -269,13 +269,13 @@ class TestManyFields:
 
 
 # ====================================================================
-# 7. get/query 指定 output_fields 选择性返回
+# 7. get/query with selective output_fields return
 # ====================================================================
 
 class TestSelectiveOutputFields:
 
     def test_get_with_output_fields(self, client: MilvusClient):
-        """get 只返回指定字段"""
+        """get returns only the specified fields"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -287,7 +287,7 @@ class TestSelectiveOutputFields:
         vecs = rvecs(1)
         client.insert("sel_out", [{"pk": 1, "vec": vecs[0], "a": "hello", "b": 42, "c": 3.14}])
 
-        # 只取 a 和 c
+        # Only retrieve a and c
         got = client.get("sel_out", ids=[1], output_fields=["a", "c"])
         assert "a" in got[0]
         assert "c" in got[0]
@@ -295,7 +295,7 @@ class TestSelectiveOutputFields:
         assert "vec" not in got[0]
 
     def test_search_without_vector_in_output(self, client: MilvusClient):
-        """search 的 output_fields 不包含向量"""
+        """search output_fields does not include vector"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -316,17 +316,17 @@ class TestSelectiveOutputFields:
                                 output_fields=["label"])
         hit = results[0][0]["entity"]
         assert "label" in hit
-        assert "vec" not in hit  # 未请求向量
+        assert "vec" not in hit  # vector not requested
 
 
 # ====================================================================
-# 8. 多线程并发 insert + search
+# 8. Multi-threaded concurrent insert + search
 # ====================================================================
 
 class TestConcurrency:
 
     def test_concurrent_insert_and_search(self, client: MilvusClient):
-        """多线程同时 insert 和 search"""
+        """Multi-threaded concurrent insert and search"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -336,7 +336,7 @@ class TestConcurrency:
                       params={"M": 16, "efConstruction": 64})
         client.create_collection("concurrent", schema=schema, index_params=idx)
 
-        # 先插入一批初始数据
+        # Insert initial batch of data first
         rng = np.random.default_rng(SEED)
         init_vecs = rng.standard_normal((50, DIM)).astype(np.float32)
         client.insert("concurrent", [
@@ -381,26 +381,26 @@ class TestConcurrency:
 
 
 # ====================================================================
-# 9. insert 空列表
+# 9. insert empty list
 # ====================================================================
 
 class TestEmptyInsert:
 
     def test_insert_empty_list(self, client: MilvusClient):
-        """insert 空列表应不报错，insert_count=0"""
+        """insert empty list should not raise error, insert_count=0"""
         client.create_collection("empty_ins", dimension=DIM)
         res = client.insert("empty_ins", [])
         assert res["insert_count"] == 0
 
 
 # ====================================================================
-# 10. 大 JSON / 大 VARCHAR 值
+# 10. Large JSON / large VARCHAR values
 # ====================================================================
 
 class TestLargeValues:
 
     def test_large_varchar(self, client: MilvusClient):
-        """较长的 VARCHAR 值"""
+        """Long VARCHAR value"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -415,7 +415,7 @@ class TestLargeValues:
         assert len(got[0]["text"]) == 10000
 
     def test_large_json(self, client: MilvusClient):
-        """较大的 JSON 对象"""
+        """Large JSON object"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -432,13 +432,13 @@ class TestLargeValues:
 
 
 # ====================================================================
-# 11. 复杂 OR + IN 组合
+# 11. Complex OR + IN combinations
 # ====================================================================
 
 class TestComplexOrIn:
 
     def test_or_with_multiple_in(self, client: MilvusClient):
-        """OR 连接多个 IN 表达式"""
+        """OR joining multiple IN expressions"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -460,13 +460,13 @@ class TestComplexOrIn:
 
 
 # ====================================================================
-# 12. drop + recreate 不同 schema
+# 12. drop + recreate with different schema
 # ====================================================================
 
 class TestSchemaRecreate:
 
     def test_drop_and_recreate_different_schema(self, client: MilvusClient):
-        """同名集合 drop 后用不同 schema 重建"""
+        """Drop same-named collection then recreate with different schema"""
         # v1: INT64 pk
         client.create_collection("evolve", dimension=DIM)
         vecs = rvecs(3)
@@ -489,7 +489,7 @@ class TestSchemaRecreate:
         got = client.get("evolve", ids=["doc_1"])
         assert got[0]["label"] == "hello"
 
-        # 旧数据不存在
+        # Old data should not exist
         got_old = client.get("evolve", ids=["0"])
         assert len(got_old) == 0
 
@@ -501,7 +501,7 @@ class TestSchemaRecreate:
 class TestHybridSearchWeighted:
 
     def test_weighted_ranker(self, client: MilvusClient):
-        """Hybrid Search 使用 WeightedRanker"""
+        """Hybrid Search using WeightedRanker"""
         from pymilvus import AnnSearchRequest, WeightedRanker
 
         schema = client.create_schema()
@@ -532,13 +532,13 @@ class TestHybridSearchWeighted:
 
 
 # ====================================================================
-# 14. flush 前后 search 一致
+# 14. search consistency before and after flush
 # ====================================================================
 
 class TestFlushSearchConsistency:
 
     def test_search_before_and_after_flush(self, client: MilvusClient):
-        """flush 前后 search 结果一致"""
+        """search results are consistent before and after flush"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -572,13 +572,13 @@ class TestFlushSearchConsistency:
 
 
 # ====================================================================
-# 15. 多分区交叉搜索
+# 15. Cross-partition search
 # ====================================================================
 
 class TestCrossPartitionSearch:
 
     def test_search_across_partitions(self, client: MilvusClient):
-        """跨分区搜索"""
+        """Search across partitions"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -603,17 +603,17 @@ class TestCrossPartitionSearch:
                       partition_name="p2")
         client.load_collection("cross_part")
 
-        # 搜索两个分区
+        # Search across both partitions
         q = v1[0:1].tolist()
         r_both = client.search("cross_part", data=q, limit=5,
                                partition_names=["p1", "p2"],
                                output_fields=["pk"])
         all_pks = [h["entity"]["pk"] for h in r_both[0]]
         assert len(all_pks) == 5
-        # 最近邻应该是 p1 中的 pk=0
+        # Nearest neighbor should be pk=0 in p1
         assert r_both[0][0]["entity"]["pk"] == 0
 
-        # 只搜 p2
+        # Search only p2
         r_p2 = client.search("cross_part", data=q, limit=5,
                              partition_names=["p2"],
                              output_fields=["pk"])
@@ -622,13 +622,13 @@ class TestCrossPartitionSearch:
 
 
 # ====================================================================
-# 16. query 不带 filter (全量)
+# 16. query without filter (return all)
 # ====================================================================
 
 class TestQueryAll:
 
     def test_query_no_filter(self, client: MilvusClient):
-        """query filter="" 返回全部 (需 limit)"""
+        """query filter="" returns all (requires limit)"""
         client.create_collection("q_all", dimension=DIM)
         vecs = rvecs(8)
         client.insert("q_all", [{"id": i, "vector": vecs[i]} for i in range(8)])
@@ -638,13 +638,13 @@ class TestQueryAll:
 
 
 # ====================================================================
-# 17. 搜索返回向量字段
+# 17. Search returning vector fields
 # ====================================================================
 
 class TestSearchReturnVector:
 
     def test_search_with_vector_output(self, client: MilvusClient):
-        """search output_fields 包含向量字段"""
+        """search output_fields includes vector field"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -667,13 +667,13 @@ class TestSearchReturnVector:
 
 
 # ====================================================================
-# 18. 批量 delete + query 一致性
+# 18. Bulk delete + query consistency
 # ====================================================================
 
 class TestBulkDeleteConsistency:
 
     def test_delete_half_then_verify(self, client: MilvusClient):
-        """删除一半数据后验证剩余数据完整性"""
+        """Verify remaining data integrity after deleting half the data"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -685,16 +685,16 @@ class TestBulkDeleteConsistency:
             {"pk": i, "vec": vecs[i], "val": i * 10} for i in range(100)
         ])
 
-        # 删除偶数 pk
+        # Delete even pks
         client.delete("bulk_del", ids=list(range(0, 100, 2)))
 
-        # 验证奇数 pk 仍在且数据正确
+        # Verify odd pks still exist with correct data
         for pk in [1, 11, 51, 99]:
             got = client.get("bulk_del", ids=[pk])
             assert len(got) == 1
             assert got[0]["val"] == pk * 10
 
-        # 验证偶数 pk 已删除
+        # Verify even pks have been deleted
         for pk in [0, 10, 50, 98]:
             got = client.get("bulk_del", ids=[pk])
             assert len(got) == 0

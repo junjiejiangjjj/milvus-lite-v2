@@ -1,33 +1,33 @@
 """
-Partition Key 功能兼容性测试 — 通过 pymilvus MilvusClient 验证。
+Partition Key compatibility tests — verified via pymilvus MilvusClient.
 
-Partition Key 语义 (与 Milvus 一致):
-  - schema 中某个标量字段标记 is_partition_key=True
-  - insert 时自动按该字段值 hash 路由到内部 bucket 分区
-  - 用户无需手动管理分区，查询/搜索时自动扫描所有 bucket
-  - 用户不可手动创建/删除分区 (partition_key 集合禁止手动分区操作)
+Partition Key semantics (consistent with Milvus):
+  - A scalar field in the schema is marked with is_partition_key=True
+  - On insert, data is automatically hash-routed to internal bucket partitions based on field value
+  - Users do not need to manage partitions manually; queries/searches automatically scan all buckets
+  - Users cannot manually create/drop partitions (manual partition ops are forbidden on partition_key collections)
 
-测试覆盖:
-  1.  基本创建 + 插入 + 查询
-  2.  DescribeCollection 返回 partition_key 信息
-  3.  搜索正确 (跨 bucket 搜索)
-  4.  按 partition_key 字段 filter 查询
-  5.  不同 partition_key 值的数据隔离性
-  6.  相同 partition_key 值的数据聚合
-  7.  delete 操作 (跨 bucket 删除)
-  8.  upsert 操作
-  9.  count(*) 统计
- 10.  partition_key + 其他标量 filter 组合
- 11.  partition_key + 向量搜索 + filter
- 12.  大量不同 partition_key 值
- 13.  partition_key 为 INT64 类型
+Test coverage:
+  1.  Basic create + insert + query
+  2.  DescribeCollection returns partition_key info
+  3.  Search correctness (cross-bucket search)
+  4.  Filter query by partition_key field
+  5.  Data isolation across different partition_key values
+  6.  Data aggregation for same partition_key value
+  7.  Delete operation (cross-bucket delete)
+  8.  Upsert operation
+  9.  count(*) aggregation
+ 10.  partition_key + other scalar filter combination
+ 11.  partition_key + vector search + filter
+ 12.  Many different partition_key values
+ 13.  partition_key with INT64 type
  14.  partition_key + auto_id
  15.  partition_key + dynamic field
- 16.  partition_key + nullable 字段
- 17.  partition_key + BM25 全文检索
- 18.  flush 后 partition_key 数据仍正确
- 19.  partition_key 集合禁止手动分区操作
- 20.  partition_key 值为空字符串 / 极端值
+ 16.  partition_key + nullable field
+ 17.  partition_key + BM25 full-text search
+ 18.  Data correctness after flush with partition_key
+ 19.  Manual partition operations forbidden on partition_key collections
+ 20.  partition_key value as empty string / extreme values
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ def rvecs(n, dim=DIM, seed=SEED):
 
 
 def make_pkey_collection(client, name, pkey_type=MilvusDataType.VARCHAR):
-    """创建带 partition_key 的集合"""
+    """Create a collection with partition_key"""
     schema = client.create_schema()
     schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
     schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -87,13 +87,13 @@ def make_pkey_collection(client, name, pkey_type=MilvusDataType.VARCHAR):
 
 
 # ====================================================================
-# 1. 基本创建 + 插入 + 查询
+# 1. Basic create + insert + query
 # ====================================================================
 
 class TestBasicPartitionKey:
 
     def test_insert_and_get(self, client: MilvusClient):
-        """partition_key 集合的基本 insert + get"""
+        """Basic insert + get on a partition_key collection"""
         make_pkey_collection(client, "pkey_basic")
         vecs = rvecs(5)
         client.insert("pkey_basic", [
@@ -109,7 +109,7 @@ class TestBasicPartitionKey:
         assert cats[4] == "cat_1"
 
     def test_query_all(self, client: MilvusClient):
-        """partition_key 集合 query 返回全部数据"""
+        """Query on a partition_key collection returns all data"""
         make_pkey_collection(client, "pkey_query")
         vecs = rvecs(10)
         client.insert("pkey_query", [
@@ -123,29 +123,29 @@ class TestBasicPartitionKey:
 
 
 # ====================================================================
-# 2. DescribeCollection 返回 partition_key 信息
+# 2. DescribeCollection returns partition_key info
 # ====================================================================
 
 class TestDescribePartitionKey:
 
     def test_describe_shows_partition_key(self, client: MilvusClient):
-        """describe 应显示 partition_key 字段"""
+        """describe should show the partition_key field"""
         make_pkey_collection(client, "pkey_desc")
         info = client.describe_collection("pkey_desc")
 
-        # 找到 category 字段
+        # Find the category field
         cat_field = next(f for f in info["fields"] if f["name"] == "category")
         assert cat_field.get("is_partition_key") is True
 
 
 # ====================================================================
-# 3. 搜索正确 (跨 bucket 搜索)
+# 3. Search correctness (cross-bucket search)
 # ====================================================================
 
 class TestPartitionKeySearch:
 
     def test_search_across_buckets(self, client: MilvusClient):
-        """搜索自动跨所有 bucket 分区"""
+        """Search automatically spans all bucket partitions"""
         make_pkey_collection(client, "pkey_search")
         rng = np.random.default_rng(SEED)
         n = 50
@@ -157,14 +157,14 @@ class TestPartitionKeySearch:
         ])
         client.load_collection("pkey_search")
 
-        # 搜索应该能找到任何 bucket 中的数据
+        # Search should find data from any bucket
         results = client.search("pkey_search", data=vecs[0:1].tolist(), limit=5,
                                 output_fields=["pk", "category"])
         assert len(results[0]) == 5
         assert results[0][0]["entity"]["pk"] == 0
 
     def test_search_with_different_categories(self, client: MilvusClient):
-        """不同 category 的向量都能被搜索到"""
+        """Vectors from different categories can all be found by search"""
         make_pkey_collection(client, "pkey_search_cat")
         rng = np.random.default_rng(SEED)
         vecs = rng.standard_normal((6, DIM)).astype(np.float32)
@@ -178,7 +178,7 @@ class TestPartitionKeySearch:
         ])
         client.load_collection("pkey_search_cat")
 
-        # 搜索每个 category 的向量都能作为最近邻返回
+        # Search for each category's vector should return it as nearest neighbor
         for i in range(6):
             r = client.search("pkey_search_cat", data=vecs[i:i+1].tolist(),
                               limit=1, output_fields=["pk"])
@@ -186,13 +186,13 @@ class TestPartitionKeySearch:
 
 
 # ====================================================================
-# 4. 按 partition_key 字段 filter 查询
+# 4. Filter query by partition_key field
 # ====================================================================
 
 class TestPartitionKeyFilter:
 
     def test_filter_by_partition_key(self, client: MilvusClient):
-        """按 partition_key 字段值过滤"""
+        """Filter by partition_key field value"""
         make_pkey_collection(client, "pkey_filter")
         vecs = rvecs(12)
         client.insert("pkey_filter", [
@@ -207,7 +207,7 @@ class TestPartitionKeyFilter:
         assert all(x["category"] == "red" for x in r)
 
     def test_search_with_partition_key_filter(self, client: MilvusClient):
-        """search + partition_key 字段 filter"""
+        """search + partition_key field filter"""
         make_pkey_collection(client, "pkey_sf")
         rng = np.random.default_rng(SEED)
         n = 30
@@ -228,13 +228,13 @@ class TestPartitionKeyFilter:
 
 
 # ====================================================================
-# 5. 不同 partition_key 值的数据隔离性
+# 5. Data isolation across different partition_key values
 # ====================================================================
 
 class TestPartitionKeyIsolation:
 
     def test_data_isolation_via_filter(self, client: MilvusClient):
-        """不同 partition_key 值的数据通过 filter 完全隔离"""
+        """Data with different partition_key values is fully isolated via filter"""
         make_pkey_collection(client, "pkey_iso")
         vecs = rvecs(20)
         client.insert("pkey_iso", [
@@ -251,16 +251,16 @@ class TestPartitionKeyIsolation:
 
 
 # ====================================================================
-# 6. 相同 partition_key 值的数据聚合
+# 6. Data aggregation for same partition_key value
 # ====================================================================
 
 class TestPartitionKeyAggregation:
 
     def test_same_key_data_queryable(self, client: MilvusClient):
-        """相同 partition_key 的数据可以一起查询"""
+        """Data with the same partition_key can be queried together"""
         make_pkey_collection(client, "pkey_agg")
         vecs = rvecs(10)
-        # 所有数据都用同一个 partition_key
+        # All data uses the same partition_key
         client.insert("pkey_agg", [
             {"pk": i, "vec": vecs[i], "category": "single_tenant", "score": float(i)}
             for i in range(10)
@@ -272,13 +272,13 @@ class TestPartitionKeyAggregation:
 
 
 # ====================================================================
-# 7. delete 操作
+# 7. Delete operation
 # ====================================================================
 
 class TestPartitionKeyDelete:
 
     def test_delete_by_pk(self, client: MilvusClient):
-        """partition_key 集合按 PK 删除"""
+        """Delete by PK in a partition_key collection"""
         make_pkey_collection(client, "pkey_del")
         vecs = rvecs(6)
         client.insert("pkey_del", [
@@ -293,7 +293,7 @@ class TestPartitionKeyDelete:
         assert pks == [0, 2, 4]
 
     def test_delete_by_filter(self, client: MilvusClient):
-        """partition_key 集合按 filter 删除"""
+        """Delete by filter in a partition_key collection"""
         make_pkey_collection(client, "pkey_del_f")
         vecs = rvecs(9)
         client.insert("pkey_del_f", [
@@ -310,13 +310,13 @@ class TestPartitionKeyDelete:
 
 
 # ====================================================================
-# 8. upsert 操作
+# 8. Upsert operation
 # ====================================================================
 
 class TestPartitionKeyUpsert:
 
     def test_upsert_existing(self, client: MilvusClient):
-        """partition_key 集合 upsert 已存在的记录"""
+        """Upsert existing record in a partition_key collection"""
         make_pkey_collection(client, "pkey_ups")
         vecs = rvecs(3)
         client.insert("pkey_ups", [
@@ -333,7 +333,7 @@ class TestPartitionKeyUpsert:
         assert got[0]["score"] == pytest.approx(99.0)
 
     def test_upsert_new(self, client: MilvusClient):
-        """partition_key 集合 upsert 新记录"""
+        """Upsert new record in a partition_key collection"""
         make_pkey_collection(client, "pkey_ups_new")
         vecs = rvecs(2)
         client.insert("pkey_ups_new", [
@@ -380,13 +380,13 @@ class TestPartitionKeyCount:
 
 
 # ====================================================================
-# 10. partition_key + 其他标量 filter 组合
+# 10. partition_key + other scalar filter combination
 # ====================================================================
 
 class TestPartitionKeyComboFilter:
 
     def test_partition_key_and_scalar_filter(self, client: MilvusClient):
-        """partition_key filter + 其他标量条件"""
+        """partition_key filter + other scalar conditions"""
         make_pkey_collection(client, "pkey_combo")
         vecs = rvecs(20)
         client.insert("pkey_combo", [
@@ -407,13 +407,13 @@ class TestPartitionKeyComboFilter:
 
 
 # ====================================================================
-# 11. 大量不同 partition_key 值
+# 11. Many different partition_key values
 # ====================================================================
 
 class TestManyPartitionKeys:
 
     def test_100_different_keys(self, client: MilvusClient):
-        """100 个不同的 partition_key 值"""
+        """100 different partition_key values"""
         make_pkey_collection(client, "pkey_many")
         rng = np.random.default_rng(SEED)
         n = 100
@@ -426,7 +426,7 @@ class TestManyPartitionKeys:
         stats = client.get_collection_stats("pkey_many")
         assert int(stats["row_count"]) == n
 
-        # 随机抽查
+        # Random spot check
         got = client.get("pkey_many", ids=[0, 50, 99])
         assert len(got) == 3
         cats = {r["pk"]: r["category"] for r in got}
@@ -442,7 +442,7 @@ class TestManyPartitionKeys:
 class TestIntPartitionKey:
 
     def test_int64_partition_key(self, client: MilvusClient):
-        """INT64 类型的 partition_key"""
+        """INT64 type partition_key"""
         make_pkey_collection(client, "pkey_int", pkey_type=MilvusDataType.INT64)
         vecs = rvecs(10)
         client.insert("pkey_int", [
@@ -492,7 +492,7 @@ class TestPartitionKeyAutoId:
 class TestPartitionKeyDynamic:
 
     def test_partition_key_with_dynamic_fields(self, client: MilvusClient):
-        """partition_key + 动态字段"""
+        """partition_key + dynamic fields"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -524,13 +524,13 @@ class TestPartitionKeyDynamic:
 
 
 # ====================================================================
-# 15. flush 后数据仍正确
+# 15. Data correctness after flush
 # ====================================================================
 
 class TestPartitionKeyFlush:
 
     def test_data_survives_flush(self, client: MilvusClient):
-        """flush 后 partition_key 数据完整"""
+        """partition_key data is intact after flush"""
         make_pkey_collection(client, "pkey_flush")
         vecs = rvecs(10)
         client.insert("pkey_flush", [
@@ -549,32 +549,32 @@ class TestPartitionKeyFlush:
 
 
 # ====================================================================
-# 16. partition_key 集合禁止手动分区操作
+# 16. Manual partition operations forbidden on partition_key collections
 # ====================================================================
 
 class TestPartitionKeyNoManualPartition:
 
     def test_create_partition_forbidden(self, client: MilvusClient):
-        """partition_key 集合不允许手动创建分区"""
+        """Manual partition creation is not allowed on partition_key collections"""
         make_pkey_collection(client, "pkey_no_part")
         with pytest.raises(Exception):
             client.create_partition("pkey_no_part", "manual_partition")
 
     def test_drop_partition_forbidden(self, client: MilvusClient):
-        """partition_key 集合不允许手动删除分区"""
+        """Manual partition deletion is not allowed on partition_key collections"""
         make_pkey_collection(client, "pkey_no_drop")
         with pytest.raises(Exception):
             client.drop_partition("pkey_no_drop", "_pk_0")
 
 
 # ====================================================================
-# 17. partition_key 值为空字符串
+# 17. partition_key value as empty string
 # ====================================================================
 
 class TestPartitionKeyEdgeValues:
 
     def test_empty_string_partition_key(self, client: MilvusClient):
-        """空字符串作为 partition_key 值"""
+        """Empty string as partition_key value"""
         make_pkey_collection(client, "pkey_empty")
         vecs = rvecs(3)
         client.insert("pkey_empty", [
@@ -589,12 +589,12 @@ class TestPartitionKeyEdgeValues:
         assert pks == [0, 2]
 
     def test_special_chars_partition_key(self, client: MilvusClient):
-        """特殊字符作为 partition_key 值"""
+        """Special characters as partition_key value"""
         make_pkey_collection(client, "pkey_special")
         vecs = rvecs(3)
         client.insert("pkey_special", [
             {"pk": 0, "vec": vecs[0], "category": "hello world", "score": 1.0},
-            {"pk": 1, "vec": vecs[1], "category": "中文分区", "score": 2.0},
+            {"pk": 1, "vec": vecs[1], "category": "chinese_partition", "score": 2.0},
             {"pk": 2, "vec": vecs[2], "category": "a/b/c", "score": 3.0},
         ])
 
@@ -603,17 +603,17 @@ class TestPartitionKeyEdgeValues:
 
 
 # ====================================================================
-# 18. 端到端完整流程
+# 18. End-to-end full workflow
 # ====================================================================
 
 class TestPartitionKeyE2E:
 
     def test_full_workflow(self, client: MilvusClient):
-        """partition_key 完整工作流"""
+        """partition_key full workflow"""
         make_pkey_collection(client, "pkey_e2e")
         rng = np.random.default_rng(SEED)
 
-        # 1. 插入
+        # 1. Insert
         n = 30
         vecs = rng.standard_normal((n, DIM)).astype(np.float32)
         tenants = ["acme", "globex", "initech"]
@@ -623,20 +623,20 @@ class TestPartitionKeyE2E:
             for i in range(n)
         ])
 
-        # 2. 各 tenant 数据量正确
+        # 2. Each tenant has the correct data count
         for t in tenants:
             r = client.query("pkey_e2e", filter=f'category == "{t}"',
                              output_fields=["count(*)"])
             assert r[0]["count(*)"] == 10
 
-        # 3. 搜索
+        # 3. Search
         client.load_collection("pkey_e2e")
         results = client.search("pkey_e2e", data=vecs[0:1].tolist(), limit=3,
                                 filter='category == "acme"',
                                 output_fields=["pk", "category"])
         assert all(h["entity"]["category"] == "acme" for h in results[0])
 
-        # 4. 删除一个 tenant 的数据
+        # 4. Delete data of one tenant
         client.delete("pkey_e2e", filter='category == "globex"')
 
         r = client.query("pkey_e2e", filter="", output_fields=["count(*)"])
@@ -649,7 +649,7 @@ class TestPartitionKeyE2E:
         got = client.get("pkey_e2e", ids=[0])
         assert got[0]["score"] == pytest.approx(999.0)
 
-        # 6. flush + 再查
+        # 6. Flush + re-query
         client.flush("pkey_e2e")
         got = client.get("pkey_e2e", ids=[0])
         assert got[0]["score"] == pytest.approx(999.0)

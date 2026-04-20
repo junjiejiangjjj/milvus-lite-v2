@@ -1,31 +1,33 @@
 """
-Partial Update (Upsert) 兼容性测试 — 通过 pymilvus MilvusClient 验证
-MilvusLite 的 partial upsert 功能。
+Partial Update (Upsert) compatibility tests — verify MilvusLite's partial
+upsert functionality through the pymilvus MilvusClient.
 
-Partial Update 语义:
-  - upsert 时只提供部分字段 + 主键
-  - 若 pk 已存在: 合并旧记录，新字段覆盖旧字段，未提供的字段保持不变
-  - 若 pk 不存在: 当作新记录插入 (必须提供全部必填字段)
+Partial Update semantics:
+  - Only provide a subset of fields + the primary key during upsert
+  - If pk already exists: merge with old record, new fields overwrite old ones,
+    unprovided fields remain unchanged
+  - If pk does not exist: treat as a new record insert (all required fields must
+    be provided)
 
-测试覆盖:
-  1. 基本 partial update — 只更新部分标量字段
-  2. partial update 保持向量不变
-  3. partial update 更新向量但保持标量不变
-  4. 混合批次 — 部分已存在 + 部分新记录
-  5. 多次连续 partial update
-  6. flush 后的 partial update (读旧记录需走 segment)
-  7. 动态字段的 partial update
-  8. JSON 字段的 partial update
-  9. ARRAY 字段的 partial update
- 10. nullable 字段的 partial update (置为 None)
- 11. partial update 后搜索结果正确
- 12. partial update 后 filter 查询正确
- 13. partial update + delete 交互
- 14. VARCHAR 主键的 partial update
- 15. partial update 不影响其他记录
- 16. 全字段 upsert 退化为完整覆盖
- 17. partial update 后 count 不变
- 18. 分区内的 partial update
+Test coverage:
+  1. Basic partial update — update only some scalar fields
+  2. Partial update preserves vectors unchanged
+  3. Partial update updates vector while preserving scalar fields
+  4. Mixed batch — some existing + some new records
+  5. Multiple consecutive partial updates
+  6. Partial update after flush (reading old records goes through segments)
+  7. Dynamic field partial update
+  8. JSON field partial update
+  9. ARRAY field partial update
+ 10. Nullable field partial update (set to None)
+ 11. Search results correct after partial update
+ 12. Filter query correct after partial update
+ 13. Partial update + delete interaction
+ 14. VARCHAR primary key partial update
+ 15. Partial update does not affect other records
+ 16. Full-field upsert degrades to complete overwrite
+ 17. Row count unchanged after partial update
+ 18. Partial update within a partition
 """
 
 from __future__ import annotations
@@ -67,7 +69,7 @@ def rvecs(n: int, dim: int = DIM, seed: int = SEED) -> list[list[float]]:
 
 
 def make_standard_collection(client, name):
-    """创建标准测试集合: pk(INT64) + vec + title(nullable) + score(nullable)"""
+    """Create a standard test collection: pk(INT64) + vec + title(nullable) + score(nullable)"""
     schema = client.create_schema()
     schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
     schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -77,13 +79,13 @@ def make_standard_collection(client, name):
 
 
 # ====================================================================
-# 1. 基本 partial update — 只更新部分标量字段
+# 1. Basic partial update — update only some scalar fields
 # ====================================================================
 
 class TestBasicPartialUpdate:
 
     def test_update_single_scalar_field(self, client: MilvusClient):
-        """只更新 title，保持 vec 和 score 不变"""
+        """Update only title, keeping vec and score unchanged"""
         make_standard_collection(client, "partial_basic")
         vecs = rvecs(1)
         client.insert("partial_basic", [
@@ -98,11 +100,11 @@ class TestBasicPartialUpdate:
         assert len(got) == 1
         assert got[0]["title"] == "updated"
         assert got[0]["score"] == pytest.approx(88.5)
-        # 向量也应该保持不变
+        # Vector should also remain unchanged
         assert got[0]["vec"] == pytest.approx(vecs[0], rel=1e-5)
 
     def test_update_multiple_scalar_fields(self, client: MilvusClient):
-        """同时更新 title 和 score"""
+        """Update both title and score simultaneously"""
         make_standard_collection(client, "partial_multi")
         vecs = rvecs(1)
         client.insert("partial_multi", [
@@ -120,13 +122,13 @@ class TestBasicPartialUpdate:
 
 
 # ====================================================================
-# 2. partial update 保持向量不变
+# 2. Partial update preserves vectors unchanged
 # ====================================================================
 
 class TestVectorPreservation:
 
     def test_vector_unchanged_after_partial_update(self, client: MilvusClient):
-        """partial update 标量字段后，向量搜索仍能正确找到记录"""
+        """After partial update of scalar fields, vector search still correctly finds the record"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -142,28 +144,28 @@ class TestVectorPreservation:
             {"pk": i, "vec": vecs[i], "label": f"orig_{i}"} for i in range(5)
         ])
 
-        # partial update pk=2 的 label
+        # Partial update label of pk=2
         client.upsert("partial_vec_keep", [{"pk": 2, "label": "changed"}],
                       partial_update=True)
 
         client.load_collection("partial_vec_keep")
 
-        # 用 pk=2 的原始向量搜索，应该还是最近邻
+        # Search using pk=2's original vector, it should still be the nearest neighbor
         results = client.search("partial_vec_keep", data=[vecs[2]], limit=1,
                                 output_fields=["pk", "label"])
         assert results[0][0]["entity"]["pk"] == 2
         assert results[0][0]["entity"]["label"] == "changed"
-        assert results[0][0]["distance"] < 1e-4  # 距离应接近 0
+        assert results[0][0]["distance"] < 1e-4  # Distance should be close to 0
 
 
 # ====================================================================
-# 3. partial update 更新向量但保持标量不变
+# 3. Partial update updates vector while preserving scalar fields
 # ====================================================================
 
 class TestVectorUpdate:
 
     def test_update_vector_only(self, client: MilvusClient):
-        """只更新向量，标量字段保持不变"""
+        """Update only the vector, keeping scalar fields unchanged"""
         make_standard_collection(client, "partial_vec_update")
         old_vec = rvecs(1, seed=1)[0]
         client.insert("partial_vec_update", [
@@ -182,13 +184,13 @@ class TestVectorUpdate:
 
 
 # ====================================================================
-# 4. 混合批次 — 部分已存在 + 部分新记录
+# 4. Mixed batch — some existing + some new records
 # ====================================================================
 
 class TestMixedBatch:
 
     def test_mixed_existing_and_new(self, client: MilvusClient):
-        """partial update 已有记录 + 全量 upsert 新记录 (需分两批)"""
+        """Partial update existing records + full upsert new records (requires two batches)"""
         make_standard_collection(client, "partial_mixed")
         vecs = rvecs(3)
         client.insert("partial_mixed", [
@@ -196,13 +198,13 @@ class TestMixedBatch:
             {"pk": 2, "vec": vecs[1], "title": "two", "score": 2.0},
         ])
 
-        # pymilvus partial_update 要求同批次字段数一致，需拆两批
-        # Batch 1: partial update 已有记录
+        # pymilvus partial_update requires consistent field count within a batch, need two batches
+        # Batch 1: partial update existing records
         client.upsert("partial_mixed", [
             {"pk": 1, "title": "one_updated"},
         ], partial_update=True)
 
-        # Batch 2: 全量 upsert 新记录
+        # Batch 2: full upsert new records
         new_vecs = rvecs(2, seed=88)
         client.upsert("partial_mixed", [
             {"pk": 3, "vec": new_vecs[0], "title": "three", "score": 3.0},
@@ -210,61 +212,61 @@ class TestMixedBatch:
 
         r1 = client.get("partial_mixed", ids=[1])[0]
         assert r1["title"] == "one_updated"
-        assert r1["score"] == pytest.approx(1.0)  # 保持不变
-        assert r1["vec"] == pytest.approx(vecs[0], rel=1e-5)  # 保持不变
+        assert r1["score"] == pytest.approx(1.0)  # Unchanged
+        assert r1["vec"] == pytest.approx(vecs[0], rel=1e-5)  # Unchanged
 
         r2 = client.get("partial_mixed", ids=[2])[0]
-        assert r2["title"] == "two"  # 未被触及
+        assert r2["title"] == "two"  # Not touched
 
         r3 = client.get("partial_mixed", ids=[3])[0]
         assert r3["title"] == "three"
 
 
 # ====================================================================
-# 5. 多次连续 partial update
+# 5. Multiple consecutive partial updates
 # ====================================================================
 
 class TestConsecutiveUpdates:
 
     def test_multiple_partial_updates(self, client: MilvusClient):
-        """对同一条记录做多次 partial update"""
+        """Perform multiple partial updates on the same record"""
         make_standard_collection(client, "partial_multi_round")
         vecs = rvecs(1)
         client.insert("partial_multi_round", [
             {"pk": 1, "vec": vecs[0], "title": "v1", "score": 10.0},
         ])
 
-        # Round 1: 只更新 title
+        # Round 1: update only title
         client.upsert("partial_multi_round", [{"pk": 1, "title": "v2"}],
                       partial_update=True)
         got = client.get("partial_multi_round", ids=[1])[0]
         assert got["title"] == "v2"
         assert got["score"] == pytest.approx(10.0)
 
-        # Round 2: 只更新 score
+        # Round 2: update only score
         client.upsert("partial_multi_round", [{"pk": 1, "score": 20.0}],
                       partial_update=True)
         got = client.get("partial_multi_round", ids=[1])[0]
-        assert got["title"] == "v2"  # 上一轮的 title 仍在
+        assert got["title"] == "v2"  # Title from previous round still present
         assert got["score"] == pytest.approx(20.0)
 
-        # Round 3: 更新 title + score
+        # Round 3: update title + score
         client.upsert("partial_multi_round", [{"pk": 1, "title": "v3", "score": 30.0}],
                       partial_update=True)
         got = client.get("partial_multi_round", ids=[1])[0]
         assert got["title"] == "v3"
         assert got["score"] == pytest.approx(30.0)
-        assert got["vec"] == pytest.approx(vecs[0], rel=1e-5)  # 向量始终不变
+        assert got["vec"] == pytest.approx(vecs[0], rel=1e-5)  # Vector always unchanged
 
 
 # ====================================================================
-# 6. flush 后的 partial update
+# 6. Partial update after flush
 # ====================================================================
 
 class TestPartialUpdateAfterFlush:
 
     def test_partial_update_reads_from_segments(self, client: MilvusClient):
-        """flush 后旧记录落到 segment，partial update 仍能正确合并"""
+        """After flush, old records reside in segments; partial update still merges correctly"""
         make_standard_collection(client, "partial_flush")
         vecs = rvecs(1)
         client.insert("partial_flush", [
@@ -277,18 +279,18 @@ class TestPartialUpdateAfterFlush:
                       partial_update=True)
 
         got = client.get("partial_flush", ids=[1])[0]
-        assert got["title"] == "persisted"  # 从 segment 读取
+        assert got["title"] == "persisted"  # Read from segment
         assert got["score"] == pytest.approx(88.0)
 
 
 # ====================================================================
-# 7. 动态字段的 partial update
+# 7. Dynamic field partial update
 # ====================================================================
 
 class TestDynamicFieldPartialUpdate:
 
     def test_partial_update_preserves_dynamic_fields(self, client: MilvusClient):
-        """partial update 保持旧的动态字段，更新指定字段"""
+        """Partial update preserves old dynamic fields and updates the specified ones"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -300,19 +302,19 @@ class TestDynamicFieldPartialUpdate:
             {"pk": 1, "vec": vecs[0], "color": "red", "size": 42, "tag": "important"},
         ])
 
-        # partial update: 只更新 color
+        # Partial update: only update color
         client.upsert("partial_dyn", [{"pk": 1, "color": "blue"}],
                       partial_update=True)
 
-        # 动态字段需要显式指定 output_fields
+        # Dynamic fields require explicit output_fields specification
         got = client.get("partial_dyn", ids=[1],
                          output_fields=["pk", "vec", "color", "size", "tag"])[0]
         assert got["color"] == "blue"
-        assert int(got["size"]) == 42   # 动态字段数字可能被 JSON 序列化为字符串
-        assert got["tag"] == "important"  # 保持不变
+        assert int(got["size"]) == 42   # Dynamic field numbers may be serialized as strings by JSON
+        assert got["tag"] == "important"  # Unchanged
 
     def test_partial_update_adds_new_dynamic_field(self, client: MilvusClient):
-        """partial update 可以添加新的动态字段"""
+        """Partial update can add new dynamic fields"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -324,24 +326,24 @@ class TestDynamicFieldPartialUpdate:
             {"pk": 1, "vec": vecs[0], "color": "red"},
         ])
 
-        # partial update: 添加新字段 priority
+        # Partial update: add new field priority
         client.upsert("partial_dyn_new", [{"pk": 1, "priority": "high"}],
                       partial_update=True)
 
         got = client.get("partial_dyn_new", ids=[1],
                          output_fields=["pk", "vec", "color", "priority"])[0]
-        assert got["color"] == "red"       # 保持
-        assert got["priority"] == "high"   # 新增
+        assert got["color"] == "red"       # Preserved
+        assert got["priority"] == "high"   # Newly added
 
 
 # ====================================================================
-# 8. JSON 字段的 partial update
+# 8. JSON field partial update
 # ====================================================================
 
 class TestJsonPartialUpdate:
 
     def test_json_field_replacement(self, client: MilvusClient):
-        """partial update 替换整个 JSON 字段"""
+        """Partial update replaces the entire JSON field"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -354,7 +356,7 @@ class TestJsonPartialUpdate:
             {"pk": 1, "vec": vecs[0], "meta": {"env": "dev", "v": 1}, "name": "test"},
         ])
 
-        # 只更新 meta
+        # Only update meta
         client.upsert("partial_json", [
             {"pk": 1, "meta": {"env": "prod", "v": 2, "region": "us"}},
         ], partial_update=True)
@@ -363,17 +365,17 @@ class TestJsonPartialUpdate:
         assert got["meta"]["env"] == "prod"
         assert got["meta"]["v"] == 2
         assert got["meta"]["region"] == "us"
-        assert got["name"] == "test"  # 保持不变
+        assert got["name"] == "test"  # Unchanged
 
 
 # ====================================================================
-# 9. ARRAY 字段的 partial update
+# 9. ARRAY field partial update
 # ====================================================================
 
 class TestArrayPartialUpdate:
 
     def test_array_field_replacement(self, client: MilvusClient):
-        """partial update 替换整个 ARRAY 字段"""
+        """Partial update replaces the entire ARRAY field"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -395,34 +397,34 @@ class TestArrayPartialUpdate:
 
         got = client.get("partial_arr", ids=[1])[0]
         assert got["tags"] == ["x", "y", "z"]
-        assert got["score"] == pytest.approx(1.0)  # 保持不变
+        assert got["score"] == pytest.approx(1.0)  # Unchanged
 
 
 # ====================================================================
-# 10. nullable 字段置为 None
+# 10. Nullable field set to None
 # ====================================================================
 
 class TestNullablePartialUpdate:
 
     def test_set_field_to_none(self, client: MilvusClient):
-        """partial update 将 nullable 字段显式设为 None"""
+        """Partial update explicitly sets a nullable field to None"""
         make_standard_collection(client, "partial_null")
         vecs = rvecs(1)
         client.insert("partial_null", [
             {"pk": 1, "vec": vecs[0], "title": "has_value", "score": 50.0},
         ])
 
-        # 将 title 设为 None
+        # Set title to None
         client.upsert("partial_null", [
             {"pk": 1, "title": None},
         ], partial_update=True)
 
         got = client.get("partial_null", ids=[1])[0]
         assert got["title"] is None
-        assert got["score"] == pytest.approx(50.0)  # 保持不变
+        assert got["score"] == pytest.approx(50.0)  # Unchanged
 
     def test_set_none_to_value(self, client: MilvusClient):
-        """将原来为 None 的字段更新为有值"""
+        """Update a field that was previously None to a real value"""
         make_standard_collection(client, "partial_fill")
         vecs = rvecs(1)
         client.insert("partial_fill", [
@@ -435,17 +437,17 @@ class TestNullablePartialUpdate:
 
         got = client.get("partial_fill", ids=[1])[0]
         assert got["title"] == "now_has_value"
-        assert got["score"] is None  # 保持不变
+        assert got["score"] is None  # Unchanged
 
 
 # ====================================================================
-# 11. partial update 后搜索结果正确
+# 11. Search results correct after partial update
 # ====================================================================
 
 class TestSearchAfterPartialUpdate:
 
     def test_search_returns_updated_fields(self, client: MilvusClient):
-        """partial update 后搜索返回更新后的字段值"""
+        """Search returns updated field values after partial update"""
         schema = client.create_schema()
         schema.add_field("pk", MilvusDataType.INT64, is_primary=True)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -461,7 +463,7 @@ class TestSearchAfterPartialUpdate:
             {"pk": i, "vec": vecs[i], "category": "old"} for i in range(5)
         ])
 
-        # partial update pk=0 的 category
+        # Partial update category of pk=0
         client.upsert("partial_search", [{"pk": 0, "category": "new"}],
                       partial_update=True)
 
@@ -474,13 +476,13 @@ class TestSearchAfterPartialUpdate:
 
 
 # ====================================================================
-# 12. partial update 后 filter 查询正确
+# 12. Filter query correct after partial update
 # ====================================================================
 
 class TestFilterAfterPartialUpdate:
 
     def test_filter_sees_updated_values(self, client: MilvusClient):
-        """partial update 后 filter 能查到更新后的值"""
+        """Filter can find updated values after partial update"""
         make_standard_collection(client, "partial_filter")
         vecs = rvecs(3)
         client.insert("partial_filter", [
@@ -489,24 +491,24 @@ class TestFilterAfterPartialUpdate:
             {"pk": 3, "vec": vecs[2], "title": "c", "score": 30.0},
         ])
 
-        # 将 pk=2 的 score 从 20 改为 99
+        # Change pk=2's score from 20 to 99
         client.upsert("partial_filter", [{"pk": 2, "score": 99.0}],
                       partial_update=True)
 
         r = client.query("partial_filter", filter="score > 50",
                          output_fields=["pk", "score"])
         pks = sorted([x["pk"] for x in r])
-        assert pks == [2]  # 只有 pk=2 的 score=99 > 50
+        assert pks == [2]  # Only pk=2 has score=99 > 50
 
 
 # ====================================================================
-# 13. partial update + delete 交互
+# 13. Partial update + delete interaction
 # ====================================================================
 
 class TestPartialUpdateAndDelete:
 
     def test_partial_update_deleted_record(self, client: MilvusClient):
-        """删除后 upsert 同一 pk: 应当作全新插入"""
+        """Upsert the same pk after delete: should be treated as a fresh insert"""
         make_standard_collection(client, "partial_del")
         vecs = rvecs(2)
         client.insert("partial_del", [
@@ -515,7 +517,7 @@ class TestPartialUpdateAndDelete:
 
         client.delete("partial_del", ids=[1])
 
-        # upsert 已删除的 pk — 由于找不到旧记录，当作新记录
+        # Upsert a deleted pk -- since no old record is found, treat as a new record
         new_vec = rvecs(1, seed=99)[0]
         client.upsert("partial_del", [
             {"pk": 1, "vec": new_vec, "title": "resurrected", "score": 2.0},
@@ -526,7 +528,7 @@ class TestPartialUpdateAndDelete:
         assert got[0]["title"] == "resurrected"
 
     def test_delete_after_partial_update(self, client: MilvusClient):
-        """partial update 后再 delete，记录应消失"""
+        """Delete after partial update, record should disappear"""
         make_standard_collection(client, "partial_then_del")
         vecs = rvecs(1)
         client.insert("partial_then_del", [
@@ -542,13 +544,13 @@ class TestPartialUpdateAndDelete:
 
 
 # ====================================================================
-# 14. VARCHAR 主键的 partial update
+# 14. VARCHAR primary key partial update
 # ====================================================================
 
 class TestVarcharPKPartialUpdate:
 
     def test_varchar_pk_partial_update(self, client: MilvusClient):
-        """VARCHAR 主键的 partial update"""
+        """Partial update with VARCHAR primary key"""
         schema = client.create_schema()
         schema.add_field("id", MilvusDataType.VARCHAR, is_primary=True, max_length=64)
         schema.add_field("vec", MilvusDataType.FLOAT_VECTOR, dim=DIM)
@@ -568,23 +570,23 @@ class TestVarcharPKPartialUpdate:
 
         got = client.get("partial_vpk", ids=["doc_a"])[0]
         assert got["status"] == "published"
-        assert got["count"] == 0  # 保持不变
+        assert got["count"] == 0  # Unchanged
         assert got["vec"] == pytest.approx(vecs[0], rel=1e-5)
 
-        # doc_b 不受影响
+        # doc_b is not affected
         got_b = client.get("partial_vpk", ids=["doc_b"])[0]
         assert got_b["status"] == "published"
         assert got_b["count"] == 100
 
 
 # ====================================================================
-# 15. partial update 不影响其他记录
+# 15. Partial update does not affect other records
 # ====================================================================
 
 class TestNoSideEffects:
 
     def test_other_records_unchanged(self, client: MilvusClient):
-        """partial update 一条记录不影响其他记录"""
+        """Partial update of one record does not affect other records"""
         make_standard_collection(client, "partial_no_side")
         vecs = rvecs(5)
         original = [
@@ -593,11 +595,11 @@ class TestNoSideEffects:
         ]
         client.insert("partial_no_side", original)
 
-        # 只更新 pk=2
+        # Only update pk=2
         client.upsert("partial_no_side", [{"pk": 2, "title": "changed"}],
                       partial_update=True)
 
-        # 检查其他记录没变
+        # Verify other records are unchanged
         for i in [0, 1, 3, 4]:
             got = client.get("partial_no_side", ids=[i])[0]
             assert got["title"] == f"t{i}"
@@ -605,13 +607,13 @@ class TestNoSideEffects:
 
 
 # ====================================================================
-# 16. 全字段 upsert 退化为完整覆盖
+# 16. Full-field upsert degrades to complete overwrite
 # ====================================================================
 
 class TestFullUpsertFallback:
 
     def test_full_upsert_replaces_all(self, client: MilvusClient):
-        """提供所有字段的 upsert 等价于完整覆盖"""
+        """Upsert with all fields provided is equivalent to a complete overwrite"""
         make_standard_collection(client, "partial_full")
         vecs = rvecs(2)
         client.insert("partial_full", [
@@ -630,13 +632,13 @@ class TestFullUpsertFallback:
 
 
 # ====================================================================
-# 17. partial update 后 count 不变
+# 17. Row count unchanged after partial update
 # ====================================================================
 
 class TestCountAfterPartialUpdate:
 
     def test_row_count_stable(self, client: MilvusClient):
-        """partial update 已有记录不增加 row_count"""
+        """Partial update of existing records does not increase row_count"""
         make_standard_collection(client, "partial_count")
         vecs = rvecs(5)
         client.insert("partial_count", [
@@ -647,7 +649,7 @@ class TestCountAfterPartialUpdate:
         stats_before = client.get_collection_stats("partial_count")
         assert int(stats_before["row_count"]) == 5
 
-        # partial update 3 条
+        # Partial update 3 records
         client.upsert("partial_count", [
             {"pk": 0, "title": "u0"},
             {"pk": 2, "title": "u2"},
@@ -655,17 +657,17 @@ class TestCountAfterPartialUpdate:
         ], partial_update=True)
 
         stats_after = client.get_collection_stats("partial_count")
-        assert int(stats_after["row_count"]) == 5  # 仍然是 5
+        assert int(stats_after["row_count"]) == 5  # Still 5
 
 
 # ====================================================================
-# 18. 分区内的 partial update
+# 18. Partial update within a partition
 # ====================================================================
 
 class TestPartitionPartialUpdate:
 
     def test_partial_update_in_partition(self, client: MilvusClient):
-        """在指定分区中进行 partial update"""
+        """Perform partial update within a specified partition"""
         make_standard_collection(client, "partial_part")
         client.create_partition("partial_part", "region_a")
 
@@ -684,13 +686,13 @@ class TestPartitionPartialUpdate:
 
 
 # ====================================================================
-# 19. 大批量 partial update
+# 19. Bulk partial update
 # ====================================================================
 
 class TestBulkPartialUpdate:
 
     def test_bulk_partial_update(self, client: MilvusClient):
-        """批量 partial update 100 条记录"""
+        """Bulk partial update of 100 records"""
         make_standard_collection(client, "partial_bulk")
         vecs = rvecs(100, seed=1)
         client.insert("partial_bulk", [
@@ -698,11 +700,11 @@ class TestBulkPartialUpdate:
             for i in range(100)
         ])
 
-        # partial update 所有偶数 pk 的 title
+        # Partial update title of all even-numbered pks
         updates = [{"pk": i, "title": f"updated_{i}"} for i in range(0, 100, 2)]
         client.upsert("partial_bulk", updates, partial_update=True)
 
-        # 验证偶数 pk 更新了，奇数没变
+        # Verify even pks are updated, odd ones unchanged
         for i in [0, 10, 50, 98]:
             got = client.get("partial_bulk", ids=[i])[0]
             assert got["title"] == f"updated_{i}"

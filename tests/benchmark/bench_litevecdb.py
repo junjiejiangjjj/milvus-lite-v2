@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-MilvusLite 性能基准测试 — 使用 VectorDBBench 的 Cohere 100K 数据集。
+MilvusLite performance benchmark — using the VectorDBBench Cohere 100K dataset.
 
-数据集: Cohere 100K (768 维, COSINE, 带 ground truth)
+Dataset: Cohere 100K (768 dimensions, COSINE, with ground truth)
 
-测试项目:
-  1. Insert 吞吐 (100K 条, 分批插入)
-  2. Index 构建时间 (HNSW)
-  3. Search QPS (单线程, nq=1)
-  4. Search 批量 QPS (nq=10)
-  5. Search Recall@10 (与 ground truth 对比)
-  6. Search 延迟分布 (P50/P95/P99)
-  7. 带 filter 的 search 性能
+Test items:
+  1. Insert throughput (100K records, batch insert)
+  2. Index build time (HNSW)
+  3. Search QPS (single thread, nq=1)
+  4. Search batch QPS (nq=10)
+  5. Search Recall@10 (compared with ground truth)
+  6. Search latency distribution (P50/P95/P99)
+  7. Search performance with filter
 """
 
 from __future__ import annotations
@@ -27,10 +27,10 @@ from pymilvus import MilvusClient, DataType
 from milvus_lite.adapter.grpc.server import start_server_in_thread
 
 
-# ── 数据加载 ──────────────────────────────────────────────────────────
+# ── Data Loading ──────────────────────────────────────────────────────
 
 def load_cohere_100k():
-    """从 VectorDBBench 缓存加载 Cohere 100K 数据集"""
+    """Load the Cohere 100K dataset from VectorDBBench cache"""
     from vectordb_bench.backend.dataset import Dataset
     from vectordb_bench.backend.data_source import DatasetSource
 
@@ -41,13 +41,13 @@ def load_cohere_100k():
 
     import pyarrow.parquet as pq
 
-    # 训练数据 (100K vectors)
+    # Training data (100K vectors)
     train_path = dm.data_dir / dm.data.train_files[0]
     train_table = pq.read_table(train_path)
     train_ids = train_table.column("id").to_pylist()
     train_vecs = np.array(train_table.column("emb").to_pylist(), dtype=np.float32)
 
-    # 测试数据 (query vectors)
+    # Test data (query vectors)
     test_path = dm.data_dir / dm.data.test_file
     test_table = pq.read_table(test_path)
     test_vecs = np.array(test_table.column("emb").to_pylist(), dtype=np.float32)
@@ -62,44 +62,44 @@ def load_cohere_100k():
     return train_ids, train_vecs, test_vecs, gt_neighbors
 
 
-# ── 工具函数 ──────────────────────────────────────────────────────────
+# ── Utility Functions ─────────────────────────────────────────────────
 
 def percentile(data, p):
-    """计算百分位数"""
+    """Compute percentile"""
     sorted_data = sorted(data)
     idx = int(len(sorted_data) * p / 100)
     return sorted_data[min(idx, len(sorted_data) - 1)]
 
 
 def compute_recall(predicted: list[int], ground_truth: list[int], k: int) -> float:
-    """计算 Recall@K"""
+    """Compute Recall@K"""
     gt_set = set(ground_truth[:k])
     pred_set = set(predicted[:k])
     return len(gt_set & pred_set) / k
 
 
-# ── 主测试 ────────────────────────────────────────────────────────────
+# ── Main Benchmark ────────────────────────────────────────────────────
 
 def main():
     print("=" * 70)
     print("MilvusLite Performance Benchmark — Cohere 100K (768d, COSINE)")
     print("=" * 70)
 
-    # 1. 加载数据
+    # 1. Load data
     print("\n[1/7] Loading dataset...")
     train_ids, train_vecs, test_vecs, gt_neighbors = load_cohere_100k()
     n_train = len(train_ids)
     dim = train_vecs.shape[1]
     n_test = len(test_vecs)
 
-    # 2. 启动 server
+    # 2. Start server
     print("\n[2/7] Starting MilvusLite server...")
     data_dir = tempfile.mkdtemp(prefix="bench_milvus_lite_")
     server, db, port = start_server_in_thread(data_dir)
     client = MilvusClient(uri=f"http://127.0.0.1:{port}")
 
     try:
-        # 3. 创建集合 (不带索引，先插入)
+        # 3. Create collection (without index, insert first)
         print("\n[3/7] Creating collection...")
         schema = client.create_schema()
         schema.add_field("pk", DataType.INT64, is_primary=True)
@@ -107,7 +107,7 @@ def main():
 
         client.create_collection("bench", schema=schema)
 
-        # 4. 插入数据
+        # 4. Insert data
         print(f"\n[4/7] Inserting {n_train} records (batch_size=1000)...")
         batch_size = 1000
         t_insert_start = time.perf_counter()
@@ -129,7 +129,7 @@ def main():
         insert_qps = n_train / insert_time
         print(f"  Insert done: {insert_time:.2f}s, {insert_qps:.0f} records/s")
 
-        # 5. 创建索引
+        # 5. Create index
         print("\n[5/7] Creating HNSW index...")
         t_index_start = time.perf_counter()
 
@@ -143,7 +143,7 @@ def main():
         index_time = t_index_end - t_index_start
         print(f"  Index + Load done: {index_time:.2f}s")
 
-        # 6. Search 性能 (单条查询)
+        # 6. Search performance (single query)
         print(f"\n[6/7] Search benchmark (nq=1, top_k=10, {n_test} queries)...")
         top_k = 10
         latencies = []
@@ -188,10 +188,10 @@ def main():
         avg_recall = statistics.mean(recalls) if recalls else 0
         print(f"  Recall@{top_k}: {avg_recall:.4f} ({avg_recall*100:.2f}%)")
 
-        # ── 额外: 批量查询 ──
-        # 说明:
-        #   batch_rps = 每秒 RPC 调用数 (严格 QPS 定义, nq=10 时通常低于 nq=1 QPS)
-        #   batch_vector_throughput = 每秒处理的向量查询总数 (throughput 视角)
+        # ── Bonus: batch query ──
+        # Note:
+        #   batch_rps = RPC calls per second (strict QPS definition, typically lower than nq=1 QPS when nq=10)
+        #   batch_vector_throughput = total vector queries processed per second (throughput perspective)
         print(f"\n[Bonus] Batch search (nq=10)...")
         batch_latencies = []
         n_batches = n_test // 10
