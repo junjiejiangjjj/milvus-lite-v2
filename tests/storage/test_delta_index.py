@@ -6,10 +6,10 @@ import sys
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.arrow_builder import build_delta_schema, build_wal_delta_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.delta_file import write_delta_file
-from litevecdb.storage.delta_index import DeltaIndex
+from milvus_lite.schema.arrow_builder import build_delta_schema, build_wal_delta_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.delta_file import write_delta_file
+from milvus_lite.storage.delta_index import DeltaIndex
 
 
 # ---------------------------------------------------------------------------

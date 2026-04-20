@@ -12,9 +12,9 @@ import tempfile
 
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import (
+from milvus_lite.engine.collection import Collection
+from milvus_lite.exceptions import SchemaValidationError
+from milvus_lite.schema.types import (
     CollectionSchema,
     DataType,
     FieldSchema,

@@ -23,9 +23,9 @@ import shutil
 import pyarrow as pa
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.engine.flush import execute_flush
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.engine.flush import execute_flush
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ def test_crash_during_step3_parquet_write(tmp_path, schema, monkeypatch):
 
     Recovery: WAL replay restores the records; orphan Parquet is cleaned.
     """
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
 
     data_dir = str(tmp_path / "d")
     col = Collection("c", data_dir, schema)
@@ -112,7 +112,7 @@ def test_crash_during_step3_parquet_write(tmp_path, schema, monkeypatch):
     col.insert([_record(1)])
 
     # Patch write_data_file to raise after the first call inside flush
-    from litevecdb.engine import flush as flush_mod
+    from milvus_lite.engine import flush as flush_mod
     real_write = flush_mod.write_data_file
 
     def crash_after_write(*args, **kwargs):
@@ -156,7 +156,7 @@ def test_crash_during_step3_parquet_write(tmp_path, schema, monkeypatch):
 def test_crash_during_step5_manifest_save(tmp_path, schema, monkeypatch):
     """Crash inside Manifest.save(). Either the rename completed (new
     manifest) or it didn't (old manifest); both cases must recover."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
 
     data_dir = str(tmp_path / "d")
     col = Collection("c", data_dir, schema)
@@ -165,7 +165,7 @@ def test_crash_during_step5_manifest_save(tmp_path, schema, monkeypatch):
 
     # Make Manifest.save raise after the new files are written but
     # before the rename — equivalent to crashing in the middle.
-    from litevecdb.storage import manifest as manifest_mod
+    from milvus_lite.storage import manifest as manifest_mod
     real_save = manifest_mod.Manifest.save
 
     saves_called = [0]
@@ -206,7 +206,7 @@ def test_crash_after_manifest_before_wal_delete(tmp_path, schema, monkeypatch):
     rows that overlap with what's already in the Parquet. _seq dedup
     handles this — the rows simply re-enter MemTable with the same _seq.
     """
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
 
     data_dir = str(tmp_path / "d")
     col = Collection("c", data_dir, schema)
@@ -214,7 +214,7 @@ def test_crash_after_manifest_before_wal_delete(tmp_path, schema, monkeypatch):
     col.insert([_record(1)])
 
     # Crash inside frozen_wal.close_and_delete (Step 6)
-    from litevecdb.storage import wal as wal_mod
+    from milvus_lite.storage import wal as wal_mod
     real_close = wal_mod.WAL.close_and_delete
 
     def crashing_close(self):
@@ -250,7 +250,7 @@ def test_repeated_crash_recovery_cycles(tmp_path, schema, monkeypatch):
     rather than close (which would flush to Parquet, where get() can't
     see them yet).
     """
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 100)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 100)
 
     data_dir = str(tmp_path / "d")
 
@@ -290,7 +290,7 @@ def test_random_insert_crash_recover(tmp_path, schema, monkeypatch, seed):
     import random
     rng = random.Random(seed)
     # Small limit so flushes happen mid-test.
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 7)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 7)
 
     data_dir = str(tmp_path / f"d{seed}")
     committed_pks: set = set()
@@ -369,7 +369,7 @@ def test_crash_during_delete_flush(tmp_path, schema, monkeypatch):
     col.delete(["doc_0000"])  # tombstone for the segment row
     col.insert([_record(2)])  # plain insert
 
-    from litevecdb.storage import manifest as manifest_mod
+    from milvus_lite.storage import manifest as manifest_mod
     real_save = manifest_mod.Manifest.save
 
     def crashing_save(self):
@@ -399,7 +399,7 @@ def test_random_insert_delete_crash_recover(tmp_path, schema, monkeypatch):
     compared against the final Collection state."""
     import random
     rng = random.Random(13)
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 7)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 7)
 
     data_dir = str(tmp_path / "d")
     expected: dict = {}  # pk → label or None for deleted

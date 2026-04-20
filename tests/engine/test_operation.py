@@ -3,7 +3,7 @@
 import pytest
 import pyarrow as pa
 
-from litevecdb.engine.operation import DeleteOp, InsertOp, Operation
+from milvus_lite.engine.operation import DeleteOp, InsertOp, Operation
 
 
 def _insert_batch(seqs):

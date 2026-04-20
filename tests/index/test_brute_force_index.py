@@ -13,9 +13,9 @@ import os
 import numpy as np
 import pytest
 
-from litevecdb.index.brute_force import BruteForceIndex
-from litevecdb.index.protocol import VectorIndex
-from litevecdb.search.distance import compute_distances
+from milvus_lite.index.brute_force import BruteForceIndex
+from milvus_lite.index.protocol import VectorIndex
+from milvus_lite.search.distance import compute_distances
 
 
 # ---------------------------------------------------------------------------

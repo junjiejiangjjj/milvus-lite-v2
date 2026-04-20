@@ -15,14 +15,14 @@ import tempfile
 
 import numpy as np
 
-from litevecdb import (
+from milvus_lite import (
     CollectionSchema,
     DataType,
     FieldSchema,
     FilterFieldError,
     FilterParseError,
     FilterTypeError,
-    LiteVecDB,
+    MilvusLite,
 )
 
 
@@ -52,11 +52,11 @@ def main() -> None:
             "category": categories[i % 4],
         })
 
-    data_dir = tempfile.mkdtemp(prefix="litevecdb_m8_")
+    data_dir = tempfile.mkdtemp(prefix="milvus_lite_m8_")
     print(f"data_dir = {data_dir}")
 
     try:
-        with LiteVecDB(data_dir) as db:
+        with MilvusLite(data_dir) as db:
             col = db.create_collection("docs", schema)
             col.insert(rows)
             print(f"\ninserted {n} records")

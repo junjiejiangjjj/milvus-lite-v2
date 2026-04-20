@@ -2,10 +2,10 @@
 
 import pytest
 
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.search.filter.exceptions import FilterFieldError, FilterTypeError
-from litevecdb.search.filter.parser import parse_expr
-from litevecdb.search.filter.semantic import compile_expr
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.search.filter.exceptions import FilterFieldError, FilterTypeError
+from milvus_lite.search.filter.parser import parse_expr
+from milvus_lite.search.filter.semantic import compile_expr
 
 
 @pytest.fixture

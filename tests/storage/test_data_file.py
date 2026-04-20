@@ -5,15 +5,15 @@ import os
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.arrow_builder import build_data_schema, build_delta_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.data_file import (
+from milvus_lite.schema.arrow_builder import build_data_schema, build_delta_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.data_file import (
     get_file_size,
     parse_seq_range,
     read_data_file,
     write_data_file,
 )
-from litevecdb.storage.delta_file import read_delta_file, write_delta_file
+from milvus_lite.storage.delta_file import read_delta_file, write_delta_file
 
 
 # ---------------------------------------------------------------------------

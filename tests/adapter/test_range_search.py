@@ -22,10 +22,10 @@ from pymilvus import DataType, MilvusClient
 
 class TestRangeSearchEngine:
     def _make_collection(self, tmpdir):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType as LDT, FieldSchema,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=LDT.INT64, is_primary=True),

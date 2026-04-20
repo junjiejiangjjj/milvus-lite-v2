@@ -10,15 +10,15 @@ Skipped automatically when faiss-cpu is not installed.
 import numpy as np
 import pytest
 
-from litevecdb.index.brute_force import BruteForceIndex
-from litevecdb.index.factory import is_faiss_available
+from milvus_lite.index.brute_force import BruteForceIndex
+from milvus_lite.index.factory import is_faiss_available
 
 pytestmark = pytest.mark.skipif(
     not is_faiss_available(), reason="faiss-cpu is not installed"
 )
 
 if is_faiss_available():
-    from litevecdb.index.faiss_ivf_flat import FaissIvfFlatIndex
+    from milvus_lite.index.faiss_ivf_flat import FaissIvfFlatIndex
 
 
 # Use high nprobe for recall tests to get near-exact results.

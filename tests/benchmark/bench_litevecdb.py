@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LiteVecDB 性能基准测试 — 使用 VectorDBBench 的 Cohere 100K 数据集。
+MilvusLite 性能基准测试 — 使用 VectorDBBench 的 Cohere 100K 数据集。
 
 数据集: Cohere 100K (768 维, COSINE, 带 ground truth)
 
@@ -24,7 +24,7 @@ import time
 import numpy as np
 from pymilvus import MilvusClient, DataType
 
-from litevecdb.adapter.grpc.server import start_server_in_thread
+from milvus_lite.adapter.grpc.server import start_server_in_thread
 
 
 # ── 数据加载 ──────────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ def compute_recall(predicted: list[int], ground_truth: list[int], k: int) -> flo
 
 def main():
     print("=" * 70)
-    print("LiteVecDB Performance Benchmark — Cohere 100K (768d, COSINE)")
+    print("MilvusLite Performance Benchmark — Cohere 100K (768d, COSINE)")
     print("=" * 70)
 
     # 1. 加载数据
@@ -93,8 +93,8 @@ def main():
     n_test = len(test_vecs)
 
     # 2. 启动 server
-    print("\n[2/7] Starting LiteVecDB server...")
-    data_dir = tempfile.mkdtemp(prefix="bench_litevecdb_")
+    print("\n[2/7] Starting MilvusLite server...")
+    data_dir = tempfile.mkdtemp(prefix="bench_milvus_lite_")
     server, db, port = start_server_in_thread(data_dir)
     client = MilvusClient(uri=f"http://127.0.0.1:{port}")
 

@@ -9,8 +9,8 @@ Three semantics to validate:
 
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture

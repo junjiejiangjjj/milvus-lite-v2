@@ -72,7 +72,7 @@ def _create_hybrid_collection(client, name):
 
 class TestRerankerUnit:
     def test_weighted_basic(self):
-        from litevecdb.adapter.grpc.reranker import rerank
+        from milvus_lite.adapter.grpc.reranker import rerank
         # Route 1: doc A best, Route 2: doc B best
         route1 = [[
             {"id": "A", "distance": -1.0, "entity": {}},
@@ -90,7 +90,7 @@ class TestRerankerUnit:
         assert "B" in ids
 
     def test_rrf_basic(self):
-        from litevecdb.adapter.grpc.reranker import rerank
+        from milvus_lite.adapter.grpc.reranker import rerank
         route1 = [[
             {"id": "A", "distance": -1.0, "entity": {}},
             {"id": "B", "distance": -0.5, "entity": {}},
@@ -105,12 +105,12 @@ class TestRerankerUnit:
         assert ids[0] == "B"
 
     def test_weighted_empty(self):
-        from litevecdb.adapter.grpc.reranker import rerank
+        from milvus_lite.adapter.grpc.reranker import rerank
         result = rerank("weighted", {"weights": [1.0]}, [[[]]],  limit=5)
         assert result == [[]]
 
     def test_rrf_single_route(self):
-        from litevecdb.adapter.grpc.reranker import rerank
+        from milvus_lite.adapter.grpc.reranker import rerank
         route = [[
             {"id": 1, "distance": -1.0, "entity": {}},
             {"id": 2, "distance": -0.5, "entity": {}},
@@ -120,7 +120,7 @@ class TestRerankerUnit:
         assert result[0][1]["id"] == 2
 
     def test_offset(self):
-        from litevecdb.adapter.grpc.reranker import rerank
+        from milvus_lite.adapter.grpc.reranker import rerank
         route = [[
             {"id": 1, "distance": -3.0, "entity": {}},
             {"id": 2, "distance": -2.0, "entity": {}},
@@ -138,8 +138,8 @@ def test_hybrid_weighted_dense_bm25(milvus_client):
     """Hybrid search: dense + BM25 with WeightedRanker."""
     name = _create_hybrid_collection(milvus_client, "hybrid_w1")
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
 
     # Dense query: closest to doc 1 [1,0,0,0]
     dense_req = AnnSearchRequest(
@@ -178,8 +178,8 @@ def test_hybrid_rrf_dense_bm25(milvus_client):
     """Hybrid search: dense + BM25 with RRFRanker."""
     name = _create_hybrid_collection(milvus_client, "hybrid_rrf1")
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
 
     dense_req = AnnSearchRequest(
         data=[[1.0, 0.0, 0.0, 0.0]],

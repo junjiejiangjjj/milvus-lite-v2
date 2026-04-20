@@ -3,7 +3,7 @@
 These tests are skipped automatically when faiss-cpu is not installed,
 so they don't break CI on bare environments. The differential test in
 test_index_differential.py is the architectural safety net — if FAISS
-breaks any of the LiteVecDB invariants (metric symbol, padding,
+breaks any of the MilvusLite invariants (metric symbol, padding,
 local_id space) the differential test catches it.
 """
 
@@ -12,7 +12,7 @@ import os
 import numpy as np
 import pytest
 
-from litevecdb.index.factory import is_faiss_available
+from milvus_lite.index.factory import is_faiss_available
 
 pytestmark = pytest.mark.skipif(
     not is_faiss_available(), reason="faiss-cpu is not installed"
@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 # at top level — we don't want to error at collection time when faiss
 # is missing.
 if is_faiss_available():
-    from litevecdb.index.faiss_hnsw import FaissHnswIndex
+    from milvus_lite.index.faiss_hnsw import FaissHnswIndex
 
 
 # ---------------------------------------------------------------------------

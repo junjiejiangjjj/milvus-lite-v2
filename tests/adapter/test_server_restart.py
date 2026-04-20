@@ -21,7 +21,7 @@ pymilvus = pytest.importorskip("pymilvus")
 pytest.importorskip("grpc")
 
 from pymilvus import MilvusClient, DataType
-from litevecdb.adapter.grpc.server import start_server_in_thread
+from milvus_lite.adapter.grpc.server import start_server_in_thread
 
 
 def _start(data_dir, **kwargs):

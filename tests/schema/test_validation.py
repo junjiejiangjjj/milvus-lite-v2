@@ -4,9 +4,9 @@ import json
 
 import pytest
 
-from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.schema.validation import (
+from milvus_lite.exceptions import SchemaValidationError
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.validation import (
     RESERVED_FIELD_NAMES,
     separate_dynamic_fields,
     validate_record,

@@ -1,7 +1,7 @@
 """Phase 10.6 — error code mapping + UNIMPLEMENTED stub tests.
 
 Validates that:
-1. LiteVecDBError subclasses produce the right grpc Status codes
+1. MilvusLiteError subclasses produce the right grpc Status codes
    (both legacy error_code and new code fields) so pymilvus clients
    see the expected exception types.
 2. Explicitly-stubbed UNIMPLEMENTED RPCs return a friendly reason
@@ -11,14 +11,14 @@ Validates that:
 import pytest
 from pymilvus import DataType, MilvusClient
 
-from litevecdb.adapter.grpc.errors import (
+from milvus_lite.adapter.grpc.errors import (
     LEGACY_COLLECTION_NOT_EXISTS,
     LEGACY_COLLECTION_NOT_LOADED,
     LEGACY_ILLEGAL_ARGUMENT,
     CODE_COLLECTION_NOT_FOUND,
     to_status_kwargs,
 )
-from litevecdb.exceptions import (
+from milvus_lite.exceptions import (
     CollectionNotFoundError,
     CollectionNotLoadedError,
     SchemaValidationError,
@@ -101,7 +101,7 @@ def test_hybrid_search_unimplemented(milvus_client):
     sends the HybridSearch RPC. We can't easily trigger it from
     MilvusClient, but we can verify our stub exists by looking at the
     servicer method directly."""
-    from litevecdb.adapter.grpc.servicer import MilvusServicer
+    from milvus_lite.adapter.grpc.servicer import MilvusServicer
     assert hasattr(MilvusServicer, "HybridSearch")
 
 

@@ -9,9 +9,9 @@ downstream code handles that gracefully.
 
 import pytest
 
-from litevecdb.db import LiteVecDB
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import (
+from milvus_lite.db import MilvusLite
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import (
     CollectionSchema,
     DataType,
     FieldSchema,
@@ -73,7 +73,7 @@ def test_sparse_only_flush(tmp_path, sparse_only_schema):
 
 def test_sparse_only_drop_collection(tmp_path, sparse_only_schema):
     """DropCollection on a sparse-only collection must succeed (issue #12)."""
-    db = LiteVecDB(str(tmp_path / "db"))
+    db = MilvusLite(str(tmp_path / "db"))
     db.create_collection("fts_test", sparse_only_schema)
     col = db.get_collection("fts_test")
     col.insert([{"text": "hello world"}])

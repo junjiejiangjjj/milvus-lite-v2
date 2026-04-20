@@ -16,9 +16,9 @@ import os
 import numpy as np
 import pytest
 
-from litevecdb.constants import MEMTABLE_SIZE_LIMIT
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.constants import MEMTABLE_SIZE_LIMIT
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture
@@ -218,9 +218,9 @@ def test_compaction_replaces_idx_files(tmp_path, schema, monkeypatch):
     """Force enough flushes to trigger compaction; verify old .idx files
     are gone and a new one matches the merged segment."""
     # Make compaction trigger more aggressively for testing.
-    from litevecdb import constants
+    from milvus_lite import constants
     monkeypatch.setattr(constants, "COMPACTION_MIN_FILES_PER_BUCKET", 2)
-    monkeypatch.setattr("litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2)
+    monkeypatch.setattr("milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2)
 
     c = Collection("t", str(tmp_path / "data"), schema)
     try:

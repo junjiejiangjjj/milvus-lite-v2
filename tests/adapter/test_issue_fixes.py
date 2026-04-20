@@ -90,9 +90,9 @@ def test_multi_vector_fields(milvus_client):
 
 def test_ip_distance_sign():
     """Issue #3: IP self-search of unit vector should return positive distance."""
-    from litevecdb.schema.types import CollectionSchema, FieldSchema
-    from litevecdb.schema.types import DataType as LDT
-    from litevecdb.engine.collection import Collection
+    from milvus_lite.schema.types import CollectionSchema, FieldSchema
+    from milvus_lite.schema.types import DataType as LDT
+    from milvus_lite.engine.collection import Collection
 
     schema = CollectionSchema(fields=[
         FieldSchema(name="id", dtype=LDT.INT64, is_primary=True),
@@ -166,8 +166,8 @@ def test_describe_index_by_field_name(milvus_client):
 
 def test_autoindex_uses_hnsw():
     """Issue #7: AUTOINDEX should build HNSW when faiss-cpu is available."""
-    from litevecdb.index.factory import is_faiss_available, build_index_from_spec
-    from litevecdb.index.spec import IndexSpec
+    from milvus_lite.index.factory import is_faiss_available, build_index_from_spec
+    from milvus_lite.index.spec import IndexSpec
 
     if not is_faiss_available():
         pytest.skip("faiss-cpu not installed")

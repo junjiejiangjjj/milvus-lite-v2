@@ -14,14 +14,14 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from litevecdb.rerank.protocol import RerankProvider, RerankResult
-from litevecdb.rerank.decay import DecayReranker
-from litevecdb.rerank.factory import create_rerank_provider
-from litevecdb.embedding.protocol import EmbeddingProvider
-from litevecdb.schema.types import (
+from milvus_lite.rerank.protocol import RerankProvider, RerankResult
+from milvus_lite.rerank.decay import DecayReranker
+from milvus_lite.rerank.factory import create_rerank_provider
+from milvus_lite.embedding.protocol import EmbeddingProvider
+from milvus_lite.schema.types import (
     CollectionSchema, DataType, FieldSchema, Function, FunctionType,
 )
-from litevecdb.engine.collection import Collection
+from milvus_lite.engine.collection import Collection
 
 
 # ---------------------------------------------------------------------------
@@ -162,12 +162,12 @@ class TestFactory:
 class TestSchemaValidation:
     def test_rerank_valid(self):
         """A valid RERANK function should pass validation."""
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = _make_schema_with_rerank()
         validate_schema(schema)  # should not raise
 
     def test_rerank_wrong_input_type(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="num", dtype=DataType.INT64),
@@ -185,7 +185,7 @@ class TestSchemaValidation:
             validate_schema(schema)
 
     def test_rerank_non_empty_output(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1024),
@@ -203,7 +203,7 @@ class TestSchemaValidation:
             validate_schema(schema)
 
     def test_rerank_missing_provider_param(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1024),
@@ -261,8 +261,8 @@ class TestMockRerankProvider:
 class TestRerankSearch:
     """Test reranking during search."""
 
-    @patch("litevecdb.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
+    @patch("milvus_lite.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
     def test_text_query_triggers_rerank(self, mock_emb, mock_rerank):
         """Text query with RERANK function should reorder results."""
         with tempfile.TemporaryDirectory() as d:
@@ -293,8 +293,8 @@ class TestRerankSearch:
             # distance should be the reranker relevance_score
             assert results[0][0]["distance"] > 0
 
-    @patch("litevecdb.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
+    @patch("milvus_lite.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
     def test_vector_query_skips_rerank(self, mock_emb, mock_rerank):
         """Float vector query should skip reranking (no text available)."""
         with tempfile.TemporaryDirectory() as d:
@@ -321,7 +321,7 @@ class TestRerankSearch:
             )
             assert len(results[0]) == 2
 
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
     def test_no_rerank_function_normal_search(self, mock_emb):
         """Schema without RERANK function should search normally."""
         with tempfile.TemporaryDirectory() as d:
@@ -349,8 +349,8 @@ class TestRerankSearch:
             # Without reranking, result 1 should match itself at rank 1
             assert results[0][0]["id"] == 1
 
-    @patch("litevecdb.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
+    @patch("milvus_lite.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
     def test_rerank_strips_injected_field(self, mock_emb, mock_rerank):
         """If user doesn't request the rerank input field, it should be stripped."""
         with tempfile.TemporaryDirectory() as d:
@@ -379,8 +379,8 @@ class TestRerankSearch:
             for hit in results[0]:
                 assert "text" not in hit.get("entity", {})
 
-    @patch("litevecdb.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
+    @patch("milvus_lite.rerank.factory.create_rerank_provider", side_effect=_mock_rerank_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_embedding_factory)
     def test_rerank_keeps_requested_field(self, mock_emb, mock_rerank):
         """If user explicitly requests the rerank input field, it should remain."""
         with tempfile.TemporaryDirectory() as d:
@@ -493,7 +493,7 @@ class TestDecayReranker:
 
 class TestDecaySchemaValidation:
     def test_decay_valid(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="score", dtype=DataType.FLOAT),
@@ -511,7 +511,7 @@ class TestDecaySchemaValidation:
         validate_schema(schema)  # should not raise
 
     def test_decay_varchar_input_rejected(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=100),
@@ -530,7 +530,7 @@ class TestDecaySchemaValidation:
             validate_schema(schema)
 
     def test_decay_missing_function(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="score", dtype=DataType.FLOAT),
@@ -548,7 +548,7 @@ class TestDecaySchemaValidation:
             validate_schema(schema)
 
     def test_decay_missing_origin(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="score", dtype=DataType.FLOAT),
@@ -566,7 +566,7 @@ class TestDecaySchemaValidation:
             validate_schema(schema)
 
     def test_decay_missing_scale(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="score", dtype=DataType.FLOAT),
@@ -584,7 +584,7 @@ class TestDecaySchemaValidation:
             validate_schema(schema)
 
     def test_decay_invalid_scale(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="score", dtype=DataType.FLOAT),
@@ -603,7 +603,7 @@ class TestDecaySchemaValidation:
             validate_schema(schema)
 
     def test_no_provider_no_reranker(self):
-        from litevecdb.schema.validation import validate_schema
+        from milvus_lite.schema.validation import validate_schema
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
             FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=100),

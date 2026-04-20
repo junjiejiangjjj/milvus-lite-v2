@@ -26,18 +26,18 @@ import time
 
 import numpy as np
 
-from litevecdb import (
+from milvus_lite import (
     CollectionSchema,
     DataType,
     FieldSchema,
-    LiteVecDB,
+    MilvusLite,
 )
-from litevecdb.exceptions import (
+from milvus_lite.exceptions import (
     CollectionNotLoadedError,
     IndexAlreadyExistsError,
     IndexNotFoundError,
 )
-from litevecdb.index import is_faiss_available
+from milvus_lite.index import is_faiss_available
 
 
 def main() -> None:
@@ -76,7 +76,7 @@ def main() -> None:
         }
     else:
         print("(notice) faiss-cpu is not installed; falling back to BRUTE_FORCE.")
-        print("(notice) install with: pip install litevecdb[faiss]")
+        print("(notice) install with: pip install milvus_lite[faiss]")
         index_type = "BRUTE_FORCE"
         index_params = {
             "index_type": "BRUTE_FORCE",
@@ -84,11 +84,11 @@ def main() -> None:
             "params": {},
         }
 
-    data_dir = tempfile.mkdtemp(prefix="litevecdb_m9_")
+    data_dir = tempfile.mkdtemp(prefix="milvus_lite_m9_")
     print(f"data_dir = {data_dir}")
 
     try:
-        with LiteVecDB(data_dir) as db:
+        with MilvusLite(data_dir) as db:
             col = db.create_collection("docs", schema)
 
             # ── 1. partitions ──────────────────────────────────────

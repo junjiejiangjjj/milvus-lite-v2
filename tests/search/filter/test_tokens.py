@@ -2,8 +2,8 @@
 
 import pytest
 
-from litevecdb.search.filter.exceptions import FilterParseError
-from litevecdb.search.filter.tokens import Token, TokenKind, tokenize
+from milvus_lite.search.filter.exceptions import FilterParseError
+from milvus_lite.search.filter.tokens import Token, TokenKind, tokenize
 
 
 def kinds(source: str) -> list[TokenKind]:

@@ -9,8 +9,8 @@ import time
 import numpy as np
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def test_insert_returns_before_bg_index_build(tmp_path, schema, monkeypatch):
     large segments takes many seconds. That work must run off the
     user thread.
     """
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     # Attach an index spec so the bg worker has index work to do.
@@ -43,7 +43,7 @@ def test_insert_returns_before_bg_index_build(tmp_path, schema, monkeypatch):
     })
 
     # Make the per-segment index build artificially slow.
-    from litevecdb.storage.segment import Segment
+    from milvus_lite.storage.segment import Segment
     real_build = Segment.build_or_load_index
 
     def slow_build(self, spec, index_dir):
@@ -72,7 +72,7 @@ def test_insert_returns_before_bg_index_build(tmp_path, schema, monkeypatch):
 
 def test_search_concurrent_with_bg_compaction(tmp_path, schema, monkeypatch):
     """Searches from a different thread work while bg compaction runs."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     col = Collection("c", str(tmp_path / "d"), schema)
 
@@ -112,7 +112,7 @@ def test_search_concurrent_with_bg_compaction(tmp_path, schema, monkeypatch):
 
 def test_close_drains_bg_tasks(tmp_path, schema, monkeypatch):
     """close() waits for pending bg tasks before returning."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     col = Collection("c", str(tmp_path / "d"), schema)
 
@@ -133,7 +133,7 @@ def test_bg_index_build_survives_concurrent_flush(tmp_path, schema, monkeypatch)
     """Regression: `_ensure_loaded_segments_indexed` used to iterate
     `_segment_cache.values()` directly, which raises RuntimeError if
     the main thread adds a new segment mid-iteration. Must snapshot."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     col.create_index("vec", {
@@ -144,7 +144,7 @@ def test_bg_index_build_survives_concurrent_flush(tmp_path, schema, monkeypatch)
     # in the iteration, during which the main thread flushes more
     # segments. Without a snapshot, `dict changed size during iteration`
     # raises and the bg task aborts, leaving segments unindexed.
-    from litevecdb.storage.segment import Segment
+    from milvus_lite.storage.segment import Segment
     real_build = Segment.build_or_load_index
 
     def slow_build(self, spec, index_dir):
@@ -164,7 +164,7 @@ def test_bg_index_build_survives_concurrent_flush(tmp_path, schema, monkeypatch)
                 bg_errors.append(record.getMessage())
 
     handler = BgErrorHandler()
-    logging.getLogger("litevecdb.engine.collection").addHandler(handler)
+    logging.getLogger("milvus_lite.engine.collection").addHandler(handler)
     try:
         # Fire many flushes in a tight loop — each enqueues a bg task,
         # and the bg task iterates the cache which is being mutated.
@@ -172,7 +172,7 @@ def test_bg_index_build_survives_concurrent_flush(tmp_path, schema, monkeypatch)
             col.insert(_records(i * 3, 3))
         col._wait_for_bg()
     finally:
-        logging.getLogger("litevecdb.engine.collection").removeHandler(handler)
+        logging.getLogger("milvus_lite.engine.collection").removeHandler(handler)
 
     assert not bg_errors, f"bg worker raised errors: {bg_errors}"
 
@@ -188,7 +188,7 @@ def test_bg_index_build_survives_concurrent_flush(tmp_path, schema, monkeypatch)
 
 def test_wait_for_bg_drains_pending(tmp_path, schema, monkeypatch):
     """_wait_for_bg blocks until all queued tasks finish."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     col = Collection("c", str(tmp_path / "d"), schema)
 

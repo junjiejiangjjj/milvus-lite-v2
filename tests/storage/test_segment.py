@@ -6,10 +6,10 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.arrow_builder import build_data_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.data_file import write_data_file
-from litevecdb.storage.segment import Segment
+from milvus_lite.schema.arrow_builder import build_data_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.data_file import write_data_file
+from milvus_lite.storage.segment import Segment
 
 
 @pytest.fixture

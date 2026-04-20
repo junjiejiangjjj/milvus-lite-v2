@@ -213,7 +213,7 @@ def test_delete_by_ids(populated_client):
 
 def test_delete_idempotent(populated_client):
     """Deleting a non-existent pk is not an error in Milvus or
-    LiteVecDB — it just produces a no-op tombstone."""
+    MilvusLite — it just produces a no-op tombstone."""
     populated_client.delete("demo", ids=[999])
     rows = populated_client.query("demo", filter="id >= 0", output_fields=["id"])
     assert len(rows) == 5  # nothing was actually removed

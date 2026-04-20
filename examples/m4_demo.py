@@ -1,6 +1,6 @@
 """M4 demo — 1000 random vectors, top-10 KNN search.
 
-Verifies that the LiteVecDB search result matches a direct numpy
+Verifies that the MilvusLite search result matches a direct numpy
 brute-force computation. Crosses the flush boundary so half the data
 lives in a Parquet segment and half in the live MemTable.
 
@@ -16,8 +16,8 @@ import tempfile
 
 import numpy as np
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 N = 1000
@@ -40,7 +40,7 @@ def main() -> None:
         for i in range(N)
     ]
 
-    data_dir = tempfile.mkdtemp(prefix="litevecdb_m4_")
+    data_dir = tempfile.mkdtemp(prefix="milvus_lite_m4_")
     print(f"data_dir = {data_dir}")
 
     try:
@@ -59,12 +59,12 @@ def main() -> None:
         # Random query.
         query = rng.standard_normal((1, DIM)).astype(np.float32)
 
-        # ── LiteVecDB search ────────────────────────────────────
+        # ── MilvusLite search ────────────────────────────────────
         results = col.search(query.tolist(), top_k=TOP_K, metric_type="L2")
         [hits] = results
         actual_ids = [h["id"] for h in hits]
         actual_dists = [h["distance"] for h in hits]
-        print(f"LiteVecDB top-{TOP_K} ids: {actual_ids}")
+        print(f"MilvusLite top-{TOP_K} ids: {actual_ids}")
 
         # ── Direct numpy brute-force ────────────────────────────
         dists = np.linalg.norm(vectors - query[0], axis=1)
@@ -77,7 +77,7 @@ def main() -> None:
         assert actual_ids == expected_ids, "ID mismatch vs brute force"
         for a, e in zip(actual_dists, expected_dists):
             assert abs(a - e) < 1e-4, f"distance mismatch: {a} vs {e}"
-        print("\nOK — LiteVecDB top-10 matches numpy brute force exactly")
+        print("\nOK — MilvusLite top-10 matches numpy brute force exactly")
 
         col.close()
     finally:

@@ -1,6 +1,6 @@
 """
 Partial Update (Upsert) 兼容性测试 — 通过 pymilvus MilvusClient 验证
-LiteVecDB 的 partial upsert 功能。
+MilvusLite 的 partial upsert 功能。
 
 Partial Update 语义:
   - upsert 时只提供部分字段 + 主键
@@ -37,7 +37,7 @@ import numpy as np
 import pytest
 from pymilvus import MilvusClient, DataType as MilvusDataType
 
-from litevecdb.adapter.grpc.server import start_server_in_thread
+from milvus_lite.adapter.grpc.server import start_server_in_thread
 
 DIM = 8
 SEED = 42

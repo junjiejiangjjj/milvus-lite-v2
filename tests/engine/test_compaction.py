@@ -9,18 +9,18 @@ import os
 import pyarrow as pa
 import pytest
 
-from litevecdb.constants import (
+from milvus_lite.constants import (
     COMPACTION_BUCKET_BOUNDARIES,
     COMPACTION_MIN_FILES_PER_BUCKET,
     DEFAULT_PARTITION,
     MAX_DATA_FILES,
 )
-from litevecdb.engine.compaction import CompactionManager
-from litevecdb.schema.arrow_builder import build_data_schema, build_delta_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.data_file import read_data_file, write_data_file
-from litevecdb.storage.delta_index import DeltaIndex
-from litevecdb.storage.manifest import Manifest
+from milvus_lite.engine.compaction import CompactionManager
+from milvus_lite.schema.arrow_builder import build_data_schema, build_delta_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.data_file import read_data_file, write_data_file
+from milvus_lite.storage.delta_index import DeltaIndex
+from milvus_lite.storage.manifest import Manifest
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ def test_select_target_force_compact_total_exceeds_max(harness):
 
 def test_select_target_respects_2x_budget(harness, monkeypatch):
     """Merge group is bounded by 2x MAX_SEGMENT_ROWS (room for shrinkage)."""
-    import litevecdb.engine.compaction as comp_mod
+    import milvus_lite.engine.compaction as comp_mod
     monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 10)
     # Budget = 20. 4 files × 10 rows = 40 > budget → pick only 2.
     # But MIN_FILES=4 → no merge since only 2 fit.
@@ -169,7 +169,7 @@ def test_select_target_respects_2x_budget(harness, monkeypatch):
 
 def test_select_target_skips_over_budget_files(harness, monkeypatch):
     """Files already over 2×MAX_SEGMENT_ROWS are skipped entirely."""
-    import litevecdb.engine.compaction as comp_mod
+    import milvus_lite.engine.compaction as comp_mod
     monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
     # Each file has 20 rows, budget = 10 → all skipped.
     partition_dir, names = _make_files(harness, 4, rows_per_file=20)
@@ -185,7 +185,7 @@ def test_select_target_skips_over_budget_files(harness, monkeypatch):
 
 def test_compaction_splits_oversized_output(harness, monkeypatch):
     """When merged live rows > MAX_SEGMENT_ROWS, output is split."""
-    import litevecdb.engine.compaction as comp_mod
+    import milvus_lite.engine.compaction as comp_mod
     monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
 
     # 4 files × 3 rows = 12 rows total. Budget = 10. Only 3 files fit,
@@ -207,7 +207,7 @@ def test_compaction_splits_oversized_output(harness, monkeypatch):
 
 def test_compact_files_splits_when_live_rows_exceed_cap(harness, monkeypatch):
     """End-to-end: compaction output is split when merged rows > cap."""
-    import litevecdb.engine.compaction as comp_mod
+    import milvus_lite.engine.compaction as comp_mod
     monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
 
     # Create 2 files × 6 rows each = 12 live rows (no deletes, no overlap).
@@ -246,7 +246,7 @@ def test_compact_files_splits_when_live_rows_exceed_cap(harness, monkeypatch):
 
 def test_compact_files_single_output_when_under_cap(harness, monkeypatch):
     """No split when merged rows fit under cap (normal case)."""
-    import litevecdb.engine.compaction as comp_mod
+    import milvus_lite.engine.compaction as comp_mod
     monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 20)
 
     # 2 files × 5 rows = 10 total < cap(20) → single output file.
@@ -276,7 +276,7 @@ def test_compact_files_single_output_when_under_cap(harness, monkeypatch):
 
 def test_compact_files_tombstones_shrink_to_single_output(harness, monkeypatch):
     """Scenario A: two full segments with many deletes → single merged output."""
-    import litevecdb.engine.compaction as comp_mod
+    import milvus_lite.engine.compaction as comp_mod
     monkeypatch.setattr(comp_mod, "MAX_SEGMENT_ROWS", 5)
 
     # 2 files × 6 rows each = 12 raw rows. Delete 8 of them → 4 live rows
@@ -554,7 +554,7 @@ def test_pick_unique_seq_range_collision(tmp_path, schema):
     data_dir = os.path.join(partition_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
 
-    from litevecdb.constants import DATA_FILE_TEMPLATE, SEQ_FORMAT_WIDTH
+    from milvus_lite.constants import DATA_FILE_TEMPLATE, SEQ_FORMAT_WIDTH
 
     # Create files that occupy the first 3 candidate filenames.
     for bump in range(3):
@@ -592,9 +592,9 @@ def test_concurrent_inserts_with_compaction(tmp_path):
     """Multiple insert batches that trigger flush + background compaction
     must not lose data or corrupt state."""
     import threading
-    from litevecdb.db import LiteVecDB
+    from milvus_lite.db import MilvusLite
 
-    db = LiteVecDB(str(tmp_path / "db"))
+    db = MilvusLite(str(tmp_path / "db"))
     int_schema = CollectionSchema(fields=[
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
         FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=2),

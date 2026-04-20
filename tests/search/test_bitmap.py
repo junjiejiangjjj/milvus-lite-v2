@@ -4,10 +4,10 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.arrow_builder import build_delta_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.search.bitmap import build_valid_mask
-from litevecdb.storage.delta_index import DeltaIndex
+from milvus_lite.schema.arrow_builder import build_delta_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.search.bitmap import build_valid_mask
+from milvus_lite.storage.delta_index import DeltaIndex
 
 
 @pytest.fixture

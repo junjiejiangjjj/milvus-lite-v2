@@ -14,8 +14,8 @@ import tempfile
 import pyarrow as pa
 import pytest
 
-from litevecdb.analyzer.sparse import bytes_to_sparse, compute_tf, sparse_to_bytes
-from litevecdb.analyzer.hash import term_to_id
+from milvus_lite.analyzer.sparse import bytes_to_sparse, compute_tf, sparse_to_bytes
+from milvus_lite.analyzer.hash import term_to_id
 
 
 # ---------------------------------------------------------------------------
@@ -105,11 +105,11 @@ class TestBM25AutoGeneration:
         users have dense embeddings for semantic search and BM25 for
         keyword search.
         """
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType, FieldSchema,
             Function, FunctionType,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         schema = CollectionSchema(
             fields=[
@@ -179,11 +179,11 @@ class TestBM25AutoGeneration:
             assert records[0]["sparse_emb"] == {}
 
     def test_none_text_nullable(self):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType, FieldSchema,
             Function, FunctionType,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         with tempfile.TemporaryDirectory() as d:
             schema = CollectionSchema(

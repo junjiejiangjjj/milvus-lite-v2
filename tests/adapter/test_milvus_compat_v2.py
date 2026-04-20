@@ -16,14 +16,14 @@ Focuses on NEW patterns not covered by test_milvus_compat.py:
   - Large batch insert + search
   - Delete-then-verify lifecycle
 
-All tests go through pymilvus → gRPC → LiteVecDB engine.
+All tests go through pymilvus → gRPC → MilvusLite engine.
 """
 
 import numpy as np
 import pytest
 from pymilvus import DataType, MilvusClient
 
-from litevecdb.index.factory import is_faiss_available
+from milvus_lite.index.factory import is_faiss_available
 
 pytestmark = pytest.mark.skipif(
     not is_faiss_available(), reason="faiss-cpu required for search tests"

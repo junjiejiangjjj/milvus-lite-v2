@@ -23,10 +23,10 @@ from pymilvus import DataType, MilvusClient
 
 class TestAutoIdEngine:
     def _make_collection(self, tmpdir, auto_id=True):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType as LDT, FieldSchema,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=LDT.INT64, is_primary=True, auto_id=auto_id),
@@ -107,17 +107,17 @@ class TestAutoIdEngine:
 
     def test_auto_id_only_on_int64(self):
         """auto_id on VARCHAR pk raises error."""
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType as LDT, FieldSchema,
         )
-        from litevecdb.exceptions import SchemaValidationError
+        from milvus_lite.exceptions import SchemaValidationError
 
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=LDT.VARCHAR, is_primary=True, auto_id=True),
             FieldSchema(name="vec", dtype=LDT.FLOAT_VECTOR, dim=4),
         ])
         with pytest.raises(SchemaValidationError, match="INT64"):
-            from litevecdb.engine.collection import Collection
+            from milvus_lite.engine.collection import Collection
             Collection(name="bad", data_dir="/tmp/bad", schema=schema)
 
     def test_num_entities_with_auto_id(self):

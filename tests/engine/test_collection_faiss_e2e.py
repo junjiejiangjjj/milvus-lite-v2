@@ -13,9 +13,9 @@ import os
 import numpy as np
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.index.factory import is_faiss_available
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.index.factory import is_faiss_available
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 pytestmark = pytest.mark.skipif(
     not is_faiss_available(), reason="faiss-cpu is not installed"
@@ -64,7 +64,7 @@ def test_create_index_load_search_full_flow(tmp_path, schema):
         assert c.load_state == "loaded"
 
         # Every segment should now have a FaissHnswIndex attached
-        from litevecdb.index.faiss_hnsw import FaissHnswIndex
+        from milvus_lite.index.faiss_hnsw import FaissHnswIndex
         for seg in c._segment_cache.values():
             assert isinstance(seg.index, FaissHnswIndex)
 
@@ -182,7 +182,7 @@ def test_hnsw_survives_compaction(tmp_path, schema, monkeypatch):
     """After compaction merges segments, the new merged segment should
     have a freshly built HNSW; the old segments' .idx files should be
     gone; search should return correct top-k."""
-    monkeypatch.setattr("litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2)
+    monkeypatch.setattr("milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2)
 
     c = Collection("compact", str(tmp_path / "data"), schema)
     try:

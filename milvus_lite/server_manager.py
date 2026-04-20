@@ -3,7 +3,7 @@
 pymilvus calls ``server_manager_instance.start_and_get_uri("./demo.db")``
 when it detects a ``.db`` URI. This module:
 
-1. Uses the ``.db`` path as the LiteVecDB data directory
+1. Uses the ``.db`` path as the MilvusLite data directory
 2. Starts a gRPC server in a background thread on a free port
 3. Returns ``http://127.0.0.1:{port}`` so pymilvus can connect
 
@@ -56,7 +56,7 @@ class ServerManager:
                 return f"http://127.0.0.1:{port}"
 
         try:
-            from litevecdb.adapter.grpc.server import start_server_in_thread
+            from milvus_lite.adapter.grpc.server import start_server_in_thread
 
             server, db, port = start_server_in_thread(
                 data_dir=abs_path,
@@ -75,12 +75,12 @@ class ServerManager:
                 self._servers[abs_path] = (server, db, port)
 
             logger.info(
-                "LiteVecDB server started for %s on port %d", abs_path, port
+                "MilvusLite server started for %s on port %d", abs_path, port
             )
             return f"http://127.0.0.1:{port}"
 
         except Exception:
-            logger.exception("Failed to start LiteVecDB server for %s", abs_path)
+            logger.exception("Failed to start MilvusLite server for %s", abs_path)
             return None
 
     def release_server(self, path: str) -> None:
@@ -98,7 +98,7 @@ class ServerManager:
                 db.close()
             except Exception:
                 pass
-            logger.info("LiteVecDB server stopped for %s (port %d)", abs_path, port)
+            logger.info("MilvusLite server stopped for %s (port %d)", abs_path, port)
 
     def release_all(self) -> None:
         """Stop all running servers. Called automatically at process exit."""

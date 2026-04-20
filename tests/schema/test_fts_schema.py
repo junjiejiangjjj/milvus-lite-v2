@@ -16,7 +16,7 @@ import tempfile
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.types import (
+from milvus_lite.schema.types import (
     CollectionSchema,
     DataType,
     FieldSchema,
@@ -24,15 +24,15 @@ from litevecdb.schema.types import (
     FunctionType,
     TYPE_MAP,
 )
-from litevecdb.schema.validation import validate_schema, validate_record
-from litevecdb.schema.arrow_builder import (
+from milvus_lite.schema.validation import validate_schema, validate_record
+from milvus_lite.schema.arrow_builder import (
     _arrow_type,
     build_data_schema,
     build_wal_data_schema,
     get_vector_field,
 )
-from litevecdb.schema.persistence import save_schema, load_schema
-from litevecdb.exceptions import SchemaValidationError
+from milvus_lite.schema.persistence import save_schema, load_schema
+from milvus_lite.exceptions import SchemaValidationError
 
 
 # ---------------------------------------------------------------------------

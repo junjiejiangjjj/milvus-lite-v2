@@ -29,10 +29,10 @@ def test_server_starts_and_binds_port(grpc_server):
 
 
 def test_server_data_dir_lock_held(tmp_path):
-    """The server should hold the LiteVecDB LOCK file for its lifetime,
+    """The server should hold the MilvusLite LOCK file for its lifetime,
     so a second concurrent server on the same data_dir is rejected."""
-    from litevecdb.adapter.grpc.server import start_server_in_thread
-    from litevecdb.exceptions import DataDirLockedError
+    from milvus_lite.adapter.grpc.server import start_server_in_thread
+    from milvus_lite.exceptions import DataDirLockedError
 
     s1, db1, port1 = start_server_in_thread(str(tmp_path / "data"))
     try:
@@ -54,7 +54,7 @@ def test_pymilvus_client_constructs_successfully(milvus_client):
     assert milvus_client is not None
 
 
-def test_get_version_returns_litevecdb_string(grpc_server):
+def test_get_version_returns_milvus_lite_string(grpc_server):
     """GetVersion should return our identity string. Use the
     pymilvus.utility helper since MilvusClient doesn't surface
     GetVersion directly."""
@@ -65,7 +65,7 @@ def test_get_version_returns_litevecdb_string(grpc_server):
     connections.connect(alias=alias, host="127.0.0.1", port=port)
     try:
         version = utility.get_server_version(using=alias)
-        assert "litevecdb" in version.lower()
+        assert "milvus_lite" in version.lower()
     finally:
         connections.disconnect(alias)
 
@@ -101,6 +101,6 @@ def test_connection_survives_unimplemented_call(grpc_server, milvus_client):
     connections.connect(alias=alias, host="127.0.0.1", port=port)
     try:
         v = utility.get_server_version(using=alias)
-        assert "litevecdb" in v.lower()
+        assert "milvus_lite" in v.lower()
     finally:
         connections.disconnect(alias)

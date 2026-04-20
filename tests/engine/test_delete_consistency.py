@@ -16,8 +16,8 @@ import time
 import numpy as np
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture
@@ -36,9 +36,9 @@ def _vec(i):
 def test_delete_not_lost_across_compaction(tmp_path, schema, monkeypatch):
     """Insert N rows, delete half, flush + compact multiple times.
     Deleted pks must never surface in query."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
     monkeypatch.setattr(
-        "litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2
+        "milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2
     )
 
     col = Collection("c", str(tmp_path / "d"), schema)
@@ -71,9 +71,9 @@ def test_delete_not_lost_across_compaction(tmp_path, schema, monkeypatch):
 def test_delete_not_lost_under_concurrent_reader(tmp_path, schema, monkeypatch):
     """Stress version of issue #21: one thread inserts/deletes,
     another thread queries continuously. No ghost data should surface."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
     monkeypatch.setattr(
-        "litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2
+        "milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 2
     )
 
     col = Collection("c", str(tmp_path / "d"), schema)

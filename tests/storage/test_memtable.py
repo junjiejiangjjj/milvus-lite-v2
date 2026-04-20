@@ -8,9 +8,9 @@ Phase 0 design fix.
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.arrow_builder import build_wal_data_schema, build_wal_delta_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.memtable import MemTable
+from milvus_lite.schema.arrow_builder import build_wal_data_schema, build_wal_delta_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.memtable import MemTable
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ def test_all_six_orderings_give_same_state(mt, wal_data_schema, wal_delta_schema
     and assert the final state is the same: X alive with title="new".
     """
     from itertools import permutations
-    from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+    from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
     def make_mt():
         return MemTable(CollectionSchema(fields=[
@@ -501,7 +501,7 @@ def test_flush_does_not_clear_internal_state(mt, wal_data_schema):
 
 def test_flush_schema_matches_data_schema(mt, wal_data_schema, schema):
     """The data_table emitted by flush must match build_data_schema(schema)."""
-    from litevecdb.schema.arrow_builder import build_data_schema
+    from milvus_lite.schema.arrow_builder import build_data_schema
 
     mt.apply_insert(insert_batch(wal_data_schema, [
         (1, "_default", "a", [0.5, 0.25], "x"),
@@ -513,7 +513,7 @@ def test_flush_schema_matches_data_schema(mt, wal_data_schema, schema):
 
 
 def test_flush_schema_matches_delta_schema(mt, wal_delta_schema, schema):
-    from litevecdb.schema.arrow_builder import build_delta_schema
+    from milvus_lite.schema.arrow_builder import build_delta_schema
 
     mt.apply_delete(delete_batch(wal_delta_schema, ["x"], seq=1, partition="_default"))
     result = mt.flush()

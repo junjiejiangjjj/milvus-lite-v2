@@ -10,17 +10,17 @@ import os
 import pyarrow as pa
 import pytest
 
-from litevecdb.constants import DEFAULT_PARTITION
-from litevecdb.engine.flush import execute_flush
-from litevecdb.schema.arrow_builder import (
+from milvus_lite.constants import DEFAULT_PARTITION
+from milvus_lite.engine.flush import execute_flush
+from milvus_lite.schema.arrow_builder import (
     build_wal_data_schema,
     build_wal_delta_schema,
 )
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.delta_index import DeltaIndex
-from litevecdb.storage.manifest import Manifest
-from litevecdb.storage.memtable import MemTable
-from litevecdb.storage.wal import WAL
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.delta_index import DeltaIndex
+from milvus_lite.storage.manifest import Manifest
+from milvus_lite.storage.memtable import MemTable
+from milvus_lite.storage.wal import WAL
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ def test_flush_inserts_writes_parquet_and_updates_manifest(harness, wal_data_sch
     assert list(p for p in os.listdir(wal_dir) if p.startswith("wal_")) == []
 
     # 6. Manifest persisted.
-    from litevecdb.storage.manifest import Manifest
+    from milvus_lite.storage.manifest import Manifest
     reloaded = Manifest.load(harness["data_dir"])
     assert reloaded.get_data_files(DEFAULT_PARTITION) == files
     assert reloaded.current_seq == 2
@@ -200,7 +200,7 @@ def test_flush_inserts_parquet_round_trip(harness, wal_data_schema):
     abs_path = os.path.join(
         harness["data_dir"], "partitions", DEFAULT_PARTITION, files[0]
     )
-    from litevecdb.storage.data_file import read_data_file
+    from milvus_lite.storage.data_file import read_data_file
     table = read_data_file(abs_path)
     assert table.num_rows == 3
     assert set(table.column("id").to_pylist()) == {"a", "b", "c"}

@@ -20,11 +20,11 @@ import os
 import shutil
 import sys
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
-DATA_DIR = "/tmp/litevecdb_m3_demo"
+DATA_DIR = "/tmp/milvus_lite_m3_demo"
 N_RECORDS = 50
 
 

@@ -3,8 +3,8 @@
 import pytest
 import pyarrow as pa
 
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.schema.arrow_builder import (
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.arrow_builder import (
     build_data_schema,
     build_delta_schema,
     build_wal_data_schema,

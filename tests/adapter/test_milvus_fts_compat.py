@@ -107,8 +107,8 @@ def test_bm25_search_text_query(milvus_client):
     """BM25 search with text string query."""
     name = _setup_loaded(milvus_client)
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     query = compute_tf([term_to_id("python")])
 
     results = milvus_client.search(
@@ -132,8 +132,8 @@ def test_bm25_search_relevance_ordering(milvus_client):
     """BM25 results should be ordered by relevance (distance ascending = score descending)."""
     name = _setup_loaded(milvus_client)
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     query = compute_tf([term_to_id("python")])
 
     results = milvus_client.search(
@@ -233,8 +233,8 @@ def test_text_match_and_scalar_filter(milvus_client):
 def test_bm25_search_with_filter(milvus_client):
     name = _setup_loaded(milvus_client)
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     query = compute_tf([term_to_id("python")])
 
     results = milvus_client.search(
@@ -258,8 +258,8 @@ def test_bm25_search_after_flush(milvus_client):
     name = _setup_loaded(milvus_client)
     milvus_client.flush(name)
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     query = compute_tf([term_to_id("database")])
 
     results = milvus_client.search(
@@ -289,8 +289,8 @@ def test_upsert_updates_bm25(milvus_client):
          "category": "programming", "dense": [1, 0, 0, 0]},
     ])
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
 
     # "python" should no longer match doc 1
     query = compute_tf([term_to_id("python")])
@@ -324,8 +324,8 @@ def test_delete_excludes_from_bm25(milvus_client):
 
     milvus_client.delete(name, ids=[1])
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     query = compute_tf([term_to_id("python")])
 
     results = milvus_client.search(
@@ -348,8 +348,8 @@ def test_delete_excludes_from_bm25(milvus_client):
 def test_bm25_multiple_queries(milvus_client):
     name = _setup_loaded(milvus_client)
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     q1 = compute_tf([term_to_id("python")])
     q2 = compute_tf([term_to_id("database")])
 
@@ -374,8 +374,8 @@ def test_bm25_multiple_queries(milvus_client):
 def test_bm25_output_fields(milvus_client):
     name = _setup_loaded(milvus_client)
 
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     query = compute_tf([term_to_id("python")])
 
     results = milvus_client.search(

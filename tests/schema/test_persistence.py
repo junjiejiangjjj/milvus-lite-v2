@@ -5,9 +5,9 @@ import os
 
 import pytest
 
-from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.schema.persistence import load_schema, save_schema
+from milvus_lite.exceptions import SchemaValidationError
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.persistence import load_schema, save_schema
 
 
 # ---------------------------------------------------------------------------

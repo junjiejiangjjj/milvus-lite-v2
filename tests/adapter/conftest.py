@@ -18,11 +18,11 @@ grpc = pytest.importorskip("grpc")
 
 @pytest.fixture(scope="session")
 def grpc_server():
-    """Start a single LiteVecDB gRPC server for the entire adapter
+    """Start a single MilvusLite gRPC server for the entire adapter
     test session. Avoids fd exhaustion from per-test server creation."""
-    from litevecdb.adapter.grpc.server import start_server_in_thread
+    from milvus_lite.adapter.grpc.server import start_server_in_thread
 
-    tmpdir = tempfile.mkdtemp(prefix="litevecdb_test_")
+    tmpdir = tempfile.mkdtemp(prefix="milvus_lite_test_")
     server, db, port = start_server_in_thread(tmpdir)
     yield port, db
     server.stop(grace=2)

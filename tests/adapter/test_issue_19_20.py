@@ -122,23 +122,23 @@ class TestJiebaAnalyzerKey:
     def test_jieba_via_type_key(self):
         """create_analyzer({"type": "jieba"}) should return JiebaAnalyzer."""
         pytest.importorskip("jieba")
-        from litevecdb.analyzer.factory import create_analyzer
+        from milvus_lite.analyzer.factory import create_analyzer
         a = create_analyzer({"type": "jieba"})
         assert type(a).__name__ == "JiebaAnalyzer"
 
     def test_jieba_via_tokenizer_key_still_works(self):
         """create_analyzer({"tokenizer": "jieba"}) should still work."""
         pytest.importorskip("jieba")
-        from litevecdb.analyzer.factory import create_analyzer
+        from milvus_lite.analyzer.factory import create_analyzer
         a = create_analyzer({"tokenizer": "jieba"})
         assert type(a).__name__ == "JiebaAnalyzer"
 
     def test_standard_via_type_key(self):
-        from litevecdb.analyzer.factory import create_analyzer
+        from milvus_lite.analyzer.factory import create_analyzer
         a = create_analyzer({"type": "standard"})
         assert type(a).__name__ == "StandardAnalyzer"
 
     def test_default_without_key(self):
-        from litevecdb.analyzer.factory import create_analyzer
+        from milvus_lite.analyzer.factory import create_analyzer
         a = create_analyzer({})
         assert type(a).__name__ == "StandardAnalyzer"

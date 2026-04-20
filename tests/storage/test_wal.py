@@ -5,9 +5,9 @@ import os
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.schema.arrow_builder import build_wal_data_schema, build_wal_delta_schema
-from litevecdb.storage.wal import WAL, _read_wal_file, _cleanup_old_wals
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.arrow_builder import build_wal_data_schema, build_wal_delta_schema
+from milvus_lite.storage.wal import WAL, _read_wal_file, _cleanup_old_wals
 
 
 # ---------------------------------------------------------------------------

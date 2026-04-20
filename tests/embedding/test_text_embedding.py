@@ -11,12 +11,12 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from litevecdb.embedding.protocol import EmbeddingProvider
-from litevecdb.embedding.factory import create_embedding_provider
-from litevecdb.schema.types import (
+from milvus_lite.embedding.protocol import EmbeddingProvider
+from milvus_lite.embedding.factory import create_embedding_provider
+from milvus_lite.schema.types import (
     CollectionSchema, DataType, FieldSchema, Function, FunctionType,
 )
-from litevecdb.engine.collection import Collection
+from milvus_lite.engine.collection import Collection
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ class TestFactory:
 class TestTextEmbeddingInsert:
     """Test auto-embedding during insert."""
 
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
     def test_insert_auto_generates_vector(self, mock_create):
         with tempfile.TemporaryDirectory() as d:
             col = Collection(name="test", data_dir=d, schema=_make_schema())
@@ -127,7 +127,7 @@ class TestTextEmbeddingInsert:
                 assert len(r["vec"]) == 8
                 assert isinstance(r["vec"][0], float)
 
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
     def test_different_texts_get_different_vectors(self, mock_create):
         with tempfile.TemporaryDirectory() as d:
             col = Collection(name="test", data_dir=d, schema=_make_schema())
@@ -141,7 +141,7 @@ class TestTextEmbeddingInsert:
             v2 = rows[1]["vec"]
             assert v1 != v2
 
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
     def test_null_text_gets_zero_vector(self, mock_create):
         schema = CollectionSchema(fields=[
             FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
@@ -168,7 +168,7 @@ class TestTextEmbeddingInsert:
 class TestTextEmbeddingSearch:
     """Test auto-embedding of text queries during search."""
 
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
     def test_search_with_text_query(self, mock_create):
         with tempfile.TemporaryDirectory() as d:
             col = Collection(name="test", data_dir=d, schema=_make_schema())
@@ -196,7 +196,7 @@ class TestTextEmbeddingSearch:
             # Same text should match itself at rank 1
             assert results[0][0]["id"] == 1
 
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
     def test_search_with_vector_query(self, mock_create):
         """Passing a pre-computed vector should also work."""
         with tempfile.TemporaryDirectory() as d:
@@ -222,7 +222,7 @@ class TestTextEmbeddingSearch:
             )
             assert len(results[0]) == 2
 
-    @patch("litevecdb.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
+    @patch("milvus_lite.embedding.factory.create_embedding_provider", side_effect=_mock_factory)
     def test_search_text_query_without_embedding_function_fails(self, mock_create):
         """Text query on a field without TEXT_EMBEDDING should fail."""
         schema = CollectionSchema(fields=[
@@ -239,7 +239,7 @@ class TestTextEmbeddingSearch:
             })
             col.load()
 
-            from litevecdb.exceptions import SchemaValidationError
+            from milvus_lite.exceptions import SchemaValidationError
             with pytest.raises(SchemaValidationError, match="TEXT_EMBEDDING"):
                 col.search(
                     query_vectors=["some text"],

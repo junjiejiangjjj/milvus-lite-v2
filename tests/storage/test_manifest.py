@@ -5,14 +5,14 @@ import os
 
 import pytest
 
-from litevecdb.constants import DEFAULT_PARTITION
-from litevecdb.exceptions import (
+from milvus_lite.constants import DEFAULT_PARTITION
+from milvus_lite.exceptions import (
     DefaultPartitionError,
     ManifestCorruptedError,
     PartitionAlreadyExistsError,
     PartitionNotFoundError,
 )
-from litevecdb.storage.manifest import (
+from milvus_lite.storage.manifest import (
     MANIFEST_FILENAME,
     MANIFEST_PREV_FILENAME,
     Manifest,

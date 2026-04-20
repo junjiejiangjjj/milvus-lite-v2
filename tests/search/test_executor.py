@@ -4,11 +4,11 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.arrow_builder import build_delta_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.search.distance import METRIC_COSINE, METRIC_IP, METRIC_L2
-from litevecdb.search.executor import execute_search
-from litevecdb.storage.delta_index import DeltaIndex
+from milvus_lite.schema.arrow_builder import build_delta_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.search.distance import METRIC_COSINE, METRIC_IP, METRIC_L2
+from milvus_lite.search.executor import execute_search
+from milvus_lite.storage.delta_index import DeltaIndex
 
 
 @pytest.fixture

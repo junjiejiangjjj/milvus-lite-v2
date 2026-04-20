@@ -125,8 +125,8 @@ def test_bm25_search_via_grpc(milvus_client):
     name = _setup_fts_collection(milvus_client)
 
     # Build sparse query dict: search for "python"
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     query_tf = compute_tf([term_to_id("python")])
 
     results = milvus_client.search(

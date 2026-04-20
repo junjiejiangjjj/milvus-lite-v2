@@ -16,8 +16,8 @@ import os
 import shutil
 import tempfile
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 def main() -> None:
@@ -30,7 +30,7 @@ def main() -> None:
         ],
     )
 
-    data_dir = tempfile.mkdtemp(prefix="litevecdb_m2_")
+    data_dir = tempfile.mkdtemp(prefix="milvus_lite_m2_")
     print(f"data_dir = {data_dir}")
 
     try:

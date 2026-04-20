@@ -1,7 +1,7 @@
 """Phase 10.5 — pymilvus quickstart full end-to-end smoke test.
 
 This is the Phase 10 completion marker. If this test passes, the
-LiteVecDB gRPC adapter supports the Milvus "hello world" workflow
+MilvusLite gRPC adapter supports the Milvus "hello world" workflow
 that every pymilvus user expects on first contact:
 
     connect → create_collection → insert → flush →
@@ -16,7 +16,7 @@ Skipped if pymilvus / grpcio / faiss-cpu is not installed.
 import pytest
 from pymilvus import DataType, MilvusClient
 
-from litevecdb.index.factory import is_faiss_available
+from milvus_lite.index.factory import is_faiss_available
 
 pytestmark = pytest.mark.skipif(
     not is_faiss_available(), reason="faiss-cpu is not installed"

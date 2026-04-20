@@ -10,11 +10,11 @@ import tempfile
 
 import pytest
 
-from litevecdb.search.filter.parser import parse_expr
-from litevecdb.search.filter.ast import TextMatchOp, FieldRef, StringLit
-from litevecdb.search.filter.semantic import compile_expr
-from litevecdb.search.filter.eval.python_backend import _eval_row
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.search.filter.parser import parse_expr
+from milvus_lite.search.filter.ast import TextMatchOp, FieldRef, StringLit
+from milvus_lite.search.filter.semantic import compile_expr
+from milvus_lite.search.filter.eval.python_backend import _eval_row
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 # ---------------------------------------------------------------------------
@@ -41,20 +41,20 @@ class TestTextMatchParser:
         assert ast.query.value == "machine learning"
 
     def test_combined_with_and(self):
-        from litevecdb.search.filter.ast import And
+        from milvus_lite.search.filter.ast import And
         ast = parse_expr("text_match(text, 'hello') and id > 5")
         assert isinstance(ast, And)
         assert isinstance(ast.operands[0], TextMatchOp)
 
     def test_combined_with_or(self):
-        from litevecdb.search.filter.ast import Or
+        from milvus_lite.search.filter.ast import Or
         ast = parse_expr("text_match(text, 'hello') or text_match(text, 'world')")
         assert isinstance(ast, Or)
         assert isinstance(ast.operands[0], TextMatchOp)
         assert isinstance(ast.operands[1], TextMatchOp)
 
     def test_unknown_function_error(self):
-        from litevecdb.search.filter.exceptions import FilterParseError
+        from milvus_lite.search.filter.exceptions import FilterParseError
         with pytest.raises(FilterParseError, match="unknown function"):
             parse_expr("unknown_func(x, 'y')")
 
@@ -132,8 +132,8 @@ class TestTextMatchSemantic:
 
 class TestTextMatchEngine:
     def _make_collection(self, tmpdir):
-        from litevecdb.schema.types import Function, FunctionType
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.schema.types import Function, FunctionType
+        from milvus_lite.engine.collection import Collection
 
         schema = CollectionSchema(
             fields=[

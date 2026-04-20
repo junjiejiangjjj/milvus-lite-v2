@@ -35,11 +35,11 @@ benchmark:
 
 # Run tests with coverage
 coverage:
-	$(BIN)/pytest --cov=litevecdb --cov-report=term-missing -q
+	$(BIN)/pytest --cov=milvus_lite --cov-report=term-missing -q
 
 # Start gRPC server
 serve:
-	$(BIN)/litevecdb-grpc --data-dir ./data --port 19530
+	$(BIN)/milvus-lite-server --data-dir ./data --port 19530
 
 # Clean up
 clean:

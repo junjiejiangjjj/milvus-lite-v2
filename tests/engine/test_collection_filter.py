@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from litevecdb import (
+from milvus_lite import (
     Collection,
     CollectionSchema,
     DataType,
@@ -779,7 +779,7 @@ def test_filter_cache_through_get(col):
 
 def test_filter_cache_lru_eviction(col):
     """Force a small cache and verify LRU eviction."""
-    from litevecdb.search.filter.cache import LRUCache
+    from milvus_lite.search.filter.cache import LRUCache
     col._filter_cache = LRUCache(maxsize=2)
 
     _populate(col)

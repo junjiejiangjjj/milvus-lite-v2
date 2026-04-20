@@ -22,11 +22,11 @@ from pymilvus import DataType, Function, FunctionType, MilvusClient
 
 class TestMultiIndexEngine:
     def _make_collection(self, tmpdir):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType as LDT, FieldSchema,
             Function as LFunc, FunctionType as LFT,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         schema = CollectionSchema(
             fields=[
@@ -170,8 +170,8 @@ def test_grpc_multi_index_search_both(milvus_client):
     assert len(r1[0]) == 3
 
     # BM25 search (no index needed — on-the-fly)
-    from litevecdb.analyzer.hash import term_to_id
-    from litevecdb.analyzer.sparse import compute_tf
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
     q = compute_tf([term_to_id("python")])
     r2 = milvus_client.search("mi_search", data=[q], anns_field="sparse",
                               search_params={"metric_type": "BM25"}, limit=3)

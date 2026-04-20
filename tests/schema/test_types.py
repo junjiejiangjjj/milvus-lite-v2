@@ -2,7 +2,7 @@
 
 import pyarrow as pa
 
-from litevecdb.schema.types import (
+from milvus_lite.schema.types import (
     CollectionSchema,
     DataType,
     FieldSchema,

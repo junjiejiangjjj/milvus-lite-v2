@@ -9,8 +9,8 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from litevecdb.index.brute_force import BruteForceIndex
-from litevecdb.storage.segment import Segment
+from milvus_lite.index.brute_force import BruteForceIndex
+from milvus_lite.storage.segment import Segment
 
 
 @pytest.fixture

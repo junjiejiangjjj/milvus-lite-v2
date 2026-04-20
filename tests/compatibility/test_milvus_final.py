@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 from pymilvus import MilvusClient, DataType as MilvusDataType
 
-from litevecdb.adapter.grpc.server import start_server_in_thread
+from milvus_lite.adapter.grpc.server import start_server_in_thread
 
 DIM = 16
 SEED = 33

@@ -16,16 +16,16 @@ import tempfile
 
 import numpy as np
 
-from litevecdb import (
+from milvus_lite import (
     CollectionSchema,
     DataType,
     FieldSchema,
-    LiteVecDB,
+    MilvusLite,
 )
 
 
 def main() -> None:
-    data_dir = tempfile.mkdtemp(prefix="litevecdb_m7_")
+    data_dir = tempfile.mkdtemp(prefix="milvus_lite_m7_")
     print(f"data_dir = {data_dir}")
 
     schema_docs = CollectionSchema(fields=[
@@ -43,7 +43,7 @@ def main() -> None:
 
     try:
         # ── Phase A: create + populate two collections ─────────
-        with LiteVecDB(data_dir) as db:
+        with MilvusLite(data_dir) as db:
             print("\n[A] creating two collections under one DB")
             docs = db.create_collection("docs", schema_docs)
             images = db.create_collection("images", schema_images)
@@ -73,7 +73,7 @@ def main() -> None:
 
         # ── Phase B: reopen, query both ─────────────────────────
         print("\n[B] reopen DB, query each collection")
-        with LiteVecDB(data_dir) as db:
+        with MilvusLite(data_dir) as db:
             assert set(db.list_collections()) == {"docs", "images"}
 
             docs = db.get_collection("docs")
@@ -92,7 +92,7 @@ def main() -> None:
 
         # ── Phase C: drop one, keep the other ───────────────────
         print("\n[C] drop 'images', keep 'docs'")
-        with LiteVecDB(data_dir) as db:
+        with MilvusLite(data_dir) as db:
             db.drop_collection("images")
             assert db.list_collections() == ["docs"]
             docs = db.get_collection("docs")
@@ -107,11 +107,11 @@ def main() -> None:
 
         # ── Phase D: LOCK demo ──────────────────────────────────
         print("\n[D] LOCK demo: a second open should be rejected")
-        from litevecdb import DataDirLockedError
-        held = LiteVecDB(data_dir)
+        from milvus_lite import DataDirLockedError
+        held = MilvusLite(data_dir)
         try:
             try:
-                LiteVecDB(data_dir)
+                MilvusLite(data_dir)
                 print("    ERROR: second open succeeded (LOCK not working)")
             except DataDirLockedError as e:
                 print(f"    second open correctly raised DataDirLockedError")
@@ -119,7 +119,7 @@ def main() -> None:
             held.close()
 
         # After release, third open works
-        with LiteVecDB(data_dir) as db:
+        with MilvusLite(data_dir) as db:
             assert "docs" in db.list_collections()
             print("    after release, third open works")
 

@@ -18,12 +18,12 @@ import json
 import pytest
 from pymilvus.grpc_gen import schema_pb2
 
-from litevecdb.adapter.grpc.translators.records import (
+from milvus_lite.adapter.grpc.translators.records import (
     fields_data_to_records,
     records_to_fields_data,
 )
-from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.exceptions import SchemaValidationError
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 # ---------------------------------------------------------------------------

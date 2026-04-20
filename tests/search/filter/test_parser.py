@@ -2,7 +2,7 @@
 
 import pytest
 
-from litevecdb.search.filter.ast import (
+from milvus_lite.search.filter.ast import (
     And,
     ArithOp,
     BoolLit,
@@ -19,8 +19,8 @@ from litevecdb.search.filter.ast import (
     Or,
     StringLit,
 )
-from litevecdb.search.filter.exceptions import FilterParseError
-from litevecdb.search.filter.parser import parse_expr
+from milvus_lite.search.filter.exceptions import FilterParseError
+from milvus_lite.search.filter.parser import parse_expr
 
 
 # ---------------------------------------------------------------------------

@@ -23,8 +23,8 @@ import tempfile
 
 import numpy as np
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 N = 100
@@ -45,7 +45,7 @@ def main() -> None:
         for i in range(N)
     ]
 
-    data_dir = tempfile.mkdtemp(prefix="litevecdb_m5_")
+    data_dir = tempfile.mkdtemp(prefix="milvus_lite_m5_")
     print(f"data_dir = {data_dir}")
 
     try:

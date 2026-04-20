@@ -1,6 +1,6 @@
 """Partition key — gRPC adapter integration tests.
 
-Tests pymilvus → gRPC → LiteVecDB partition key round-trip:
+Tests pymilvus → gRPC → MilvusLite partition key round-trip:
 create with is_partition_key, insert (auto-routed), search, query.
 """
 

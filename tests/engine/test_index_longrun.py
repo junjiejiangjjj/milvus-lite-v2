@@ -20,9 +20,9 @@ import os
 import numpy as np
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.index.factory import is_faiss_available
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.index.factory import is_faiss_available
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture
@@ -86,9 +86,9 @@ def test_index_lifecycle_long_run_brute_force(tmp_path, schema, monkeypatch):
     flush/compaction's _ensure_loaded_segments_indexed +
     _cleanup_orphan_index_files coordination.
     """
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
     monkeypatch.setattr(
-        "litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
+        "milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
     )
 
     data_dir = str(tmp_path / "data")
@@ -121,9 +121,9 @@ def test_index_lifecycle_long_run_brute_force(tmp_path, schema, monkeypatch):
 def test_index_lifecycle_with_deletes_brute_force(tmp_path, schema, monkeypatch):
     """Insert + delete + flush + compaction interleaved. The .idx ↔ data
     invariant must hold throughout, AND deletes must remain effective."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
     monkeypatch.setattr(
-        "litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
+        "milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
     )
 
     data_dir = str(tmp_path / "data")
@@ -167,9 +167,9 @@ def test_index_lifecycle_with_deletes_brute_force(tmp_path, schema, monkeypatch)
 def test_restart_after_long_run_brute_force(tmp_path, schema, monkeypatch):
     """Long run → close → reopen → load (should read all .idx from disk)
     → search results match what we had before close."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
     monkeypatch.setattr(
-        "litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
+        "milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
     )
 
     data_dir = str(tmp_path / "data")
@@ -213,9 +213,9 @@ def test_index_lifecycle_long_run_hnsw(tmp_path, schema, monkeypatch):
     """Same workload as the brute-force long run, but with FAISS HNSW.
     Catches any FAISS-specific failure mode in the flush/compaction
     hooks (e.g. .idx file format mismatch, stem-parsing edge cases)."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
     monkeypatch.setattr(
-        "litevecdb.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
+        "milvus_lite.engine.compaction.COMPACTION_MIN_FILES_PER_BUCKET", 3
     )
 
     data_dir = str(tmp_path / "data")

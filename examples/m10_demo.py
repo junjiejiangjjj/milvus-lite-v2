@@ -1,4 +1,4 @@
-"""M10 demo — pymilvus quickstart against LiteVecDB gRPC server.
+"""M10 demo — pymilvus quickstart against MilvusLite gRPC server.
 
 The full Phase 10 lifecycle through the eyes of a pymilvus user:
 
@@ -9,11 +9,11 @@ The full Phase 10 lifecycle through the eyes of a pymilvus user:
 
 This is the exact script that would work against a real Milvus
 deployment. The only difference is the URI points to our local
-LiteVecDB gRPC server instead of a Milvus standalone.
+MilvusLite gRPC server instead of a Milvus standalone.
 
 Run:
     # Terminal 1: start the server
-    python -m litevecdb.adapter.grpc --data-dir /tmp/litevecdb_m10 --port 19530
+    python -m milvus_lite.adapter.grpc --data-dir /tmp/milvus_lite_m10 --port 19530
 
     # Terminal 2: run this demo
     python examples/m10_demo.py
@@ -51,11 +51,11 @@ def main() -> None:
 
     if args.embedded:
         try:
-            from litevecdb.adapter.grpc.server import start_server_in_thread
+            from milvus_lite.adapter.grpc.server import start_server_in_thread
         except ImportError:
-            print("litevecdb[grpc] is required: pip install -e '.[grpc]'")
+            print("milvus_lite[grpc] is required: pip install -e '.[grpc]'")
             sys.exit(1)
-        data_dir = tempfile.mkdtemp(prefix="litevecdb_m10_")
+        data_dir = tempfile.mkdtemp(prefix="milvus_lite_m10_")
         server, db, port = start_server_in_thread(data_dir)
         uri = f"http://127.0.0.1:{port}"
         print(f"embedded server on port {port} (data_dir={data_dir})")

@@ -1,7 +1,7 @@
 """Milvus pymilvus compatibility tests — adapted from milvus-io/milvus
 python_client/milvus_client/ test suite.
 
-Covers the "can LiteVecDB pass the same test as a real Milvus?" surface:
+Covers the "can MilvusLite pass the same test as a real Milvus?" surface:
 - Full CRUD lifecycle (insert → search → query → get → delete)
 - All supported scalar types (INT8/16/32/64, FLOAT, DOUBLE, VARCHAR, BOOL)
 - VARCHAR primary key
@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from pymilvus import DataType, MilvusClient
 
-from litevecdb.index.factory import is_faiss_available
+from milvus_lite.index.factory import is_faiss_available
 
 pytestmark = pytest.mark.skipif(
     not is_faiss_available(), reason="faiss-cpu required for search tests"

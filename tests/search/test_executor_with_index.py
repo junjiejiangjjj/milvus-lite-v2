@@ -20,11 +20,11 @@ from typing import List
 import numpy as np
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.search.assembler import assemble_candidates
-from litevecdb.search.executor import execute_search
-from litevecdb.search.executor_indexed import execute_search_with_index
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.search.assembler import assemble_candidates
+from milvus_lite.search.executor import execute_search
+from milvus_lite.search.executor_indexed import execute_search_with_index
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ def test_new_path_uses_attached_segment_index(tmp_path, schema):
     should use it instead of building a fresh one. We can't easily
     instrument that, but we can at least confirm the result is still
     correct when an index is attached."""
-    from litevecdb.index.brute_force import BruteForceIndex
+    from milvus_lite.index.brute_force import BruteForceIndex
 
     c = Collection("attached", str(tmp_path / "data"), schema)
     try:

@@ -11,12 +11,12 @@ import os
 
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.exceptions import (
+from milvus_lite.engine.collection import Collection
+from milvus_lite.exceptions import (
     PartitionNotFoundError,
     SchemaValidationError,
 )
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,7 @@ def _make_record(i):
 def test_flush_triggers_at_size_limit(tmp_path, schema, monkeypatch):
     """When MemTable hits MEMTABLE_SIZE_LIMIT, insert should trigger a flush."""
     # Lower the limit so we don't have to insert 10K rows.
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     data_dir = str(tmp_path / "data")
     col = Collection("c", data_dir, schema)

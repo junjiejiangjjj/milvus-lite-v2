@@ -10,19 +10,19 @@ import tempfile
 import numpy as np
 import pytest
 
-from litevecdb.index.brute_force import BruteForceIndex
-from litevecdb.index.factory import (
+from milvus_lite.index.brute_force import BruteForceIndex
+from milvus_lite.index.factory import (
     build_index_from_spec, load_index_from_spec, is_faiss_available,
 )
-from litevecdb.index.spec import IndexSpec
+from milvus_lite.index.spec import IndexSpec
 
 pytestmark = pytest.mark.skipif(
     not is_faiss_available(), reason="faiss-cpu is not installed"
 )
 
 if is_faiss_available():
-    from litevecdb.index.faiss_ivf_sq8 import FaissIvfSq8Index
-    from litevecdb.index.faiss_hnsw_sq import FaissHnswSqIndex
+    from milvus_lite.index.faiss_ivf_sq8 import FaissIvfSq8Index
+    from milvus_lite.index.faiss_hnsw_sq import FaissHnswSqIndex
 
 
 def _gen_vectors(n: int, dim: int, seed: int) -> np.ndarray:
@@ -226,8 +226,8 @@ class TestHnswSq:
 
 class TestE2E:
     def test_collection_create_ivf_sq8_index(self, tmp_path):
-        from litevecdb.engine.collection import Collection
-        from litevecdb.schema.types import (
+        from milvus_lite.engine.collection import Collection
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType, FieldSchema,
         )
         schema = CollectionSchema(fields=[
@@ -252,8 +252,8 @@ class TestE2E:
         col.close()
 
     def test_collection_create_hnsw_sq_index(self, tmp_path):
-        from litevecdb.engine.collection import Collection
-        from litevecdb.schema.types import (
+        from milvus_lite.engine.collection import Collection
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType, FieldSchema,
         )
         schema = CollectionSchema(fields=[

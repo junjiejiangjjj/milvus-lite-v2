@@ -1,5 +1,5 @@
 """
-Milvus API 兼容性测试 — 通过 pymilvus MilvusClient 验证 LiteVecDB
+Milvus API 兼容性测试 — 通过 pymilvus MilvusClient 验证 MilvusLite
 与真实 Milvus 行为的一致性。
 
 覆盖范围:
@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 from pymilvus import MilvusClient, DataType as MilvusDataType
 
-from litevecdb.adapter.grpc.server import start_server_in_thread
+from milvus_lite.adapter.grpc.server import start_server_in_thread
 
 DIM = 32
 SEED = 42

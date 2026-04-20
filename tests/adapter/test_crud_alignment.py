@@ -1,4 +1,4 @@
-"""CRUD alignment tests — gaps fixed between LiteVecDB and pymilvus.
+"""CRUD alignment tests — gaps fixed between MilvusLite and pymilvus.
 
 1. delete(filter=...) without load
 2. query(output_fields=["count(*)"])

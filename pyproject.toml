@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "litevecdb"
-version = "0.1.0"
-description = "A local embedded vector database — local version of Milvus"
+name = "milvus-lite"
+version = "2.5.0"
+description = "Lightweight version of Milvus for local development and testing"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 authors = [
-    {name = "LiteVecDB Contributors"},
+    {name = "Milvus Contributors"},
 ]
 keywords = ["vector", "database", "embedding", "milvus", "search", "bm25"]
 classifiers = [
@@ -34,8 +34,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/junjiejiangjjj/milvus-lite-v2"
-Repository = "https://github.com/junjiejiangjjj/milvus-lite-v2"
+Homepage = "https://github.com/milvus-io/milvus-lite"
+Repository = "https://github.com/milvus-io/milvus-lite"
 
 [project.optional-dependencies]
 dev = [
@@ -50,12 +50,10 @@ faiss = []
 grpc = []
 
 [project.scripts]
-# Phase 10: CLI entry for the gRPC server.
-# Enabled when installed with the [grpc] extra.
-litevecdb-grpc = "litevecdb.adapter.grpc.cli:main"
+milvus-lite-server = "milvus_lite.adapter.grpc.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["litevecdb", "milvus_lite"]
+packages = ["milvus_lite"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

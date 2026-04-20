@@ -14,14 +14,14 @@ Milvus-aligned semantics:
 
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.exceptions import (
+from milvus_lite.engine.collection import Collection
+from milvus_lite.exceptions import (
     CollectionNotLoadedError,
     IndexAlreadyExistsError,
     IndexNotFoundError,
     SchemaValidationError,
 )
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture

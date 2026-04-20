@@ -13,11 +13,11 @@ from dataclasses import replace
 import pyarrow as pa
 import pytest
 
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.search.filter.eval.arrow_backend import evaluate_arrow
-from litevecdb.search.filter.eval.python_backend import evaluate_python
-from litevecdb.search.filter.parser import parse_expr
-from litevecdb.search.filter.semantic import compile_expr
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.search.filter.eval.arrow_backend import evaluate_arrow
+from milvus_lite.search.filter.eval.python_backend import evaluate_python
+from milvus_lite.search.filter.parser import parse_expr
+from milvus_lite.search.filter.semantic import compile_expr
 
 
 @pytest.fixture
@@ -323,21 +323,21 @@ def test_record_batch_input(sample_table, schema):
 # ===========================================================================
 
 def test_dispatcher_arrow(sample_table, schema):
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     compiled = compile_str("age > 25", schema)
     result = evaluate(compiled, sample_table)
     assert pa.types.is_boolean(result.type)
 
 
 def test_dispatcher_python(sample_table, schema):
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     compiled = force_python(compile_str("age > 25", schema))
     result = evaluate(compiled, sample_table)
     assert pa.types.is_boolean(result.type)
 
 
 def test_dispatcher_unknown_backend(sample_table, schema):
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     bad = replace(compile_str("age > 25", schema), backend="quantum")
     with pytest.raises(ValueError, match="unknown filter backend"):
         evaluate(bad, sample_table)
@@ -382,7 +382,7 @@ def test_meta_string_eq(meta_table, schema_dynamic):
         source='$meta["category"] == "tech"',
     )
     assert compiled.backend == "hybrid"
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     assert result.to_pylist() == [True, False, True, False, False]
 
@@ -392,7 +392,7 @@ def test_meta_int_compare(meta_table, schema_dynamic):
         parse_expr('$meta["priority"] > 2'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     # a (1, no), b (5, yes), c (3, yes), d (null), e (missing)
     assert result.to_pylist() == [False, True, True, False, False]
@@ -403,7 +403,7 @@ def test_meta_float_compare(meta_table, schema_dynamic):
         parse_expr('$meta["score"] > 0.5'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     # a (0.5, no — strictly >), b (0.7), c (0.9), d (null), e (0.2)
     assert result.to_pylist() == [False, True, True, False, False]
@@ -414,7 +414,7 @@ def test_meta_combined_with_regular_field(meta_table, schema_dynamic):
         parse_expr('age > 20 and $meta["category"] == "tech"'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     # a (10, fail), b (25, news), c (30, tech), d (null), e (70, blog)
     assert result.to_pylist() == [False, False, True, False, False]
@@ -425,7 +425,7 @@ def test_meta_arithmetic(meta_table, schema_dynamic):
         parse_expr('$meta["score"] * 2 > 1.0'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     # 0.5*2=1.0 (no, strict >), 0.7*2=1.4 (yes), 0.9*2=1.8, null, 0.2*2=0.4
     assert result.to_pylist() == [False, True, True, False, False]
@@ -437,7 +437,7 @@ def test_meta_null_meta_column(meta_table, schema_dynamic):
         parse_expr('$meta["anything"] == "x"'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     # d has $meta=null → False
     assert result.to_pylist()[3] is False
@@ -449,7 +449,7 @@ def test_meta_missing_key(meta_table, schema_dynamic):
         parse_expr('$meta["nonexistent"] == "x"'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     assert all(v is False for v in result.to_pylist())
 
@@ -459,7 +459,7 @@ def test_meta_in_or(meta_table, schema_dynamic):
         parse_expr('$meta["category"] == "tech" or $meta["category"] == "news"'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval import evaluate
+    from milvus_lite.search.filter.eval import evaluate
     result = evaluate(compiled, meta_table)
     # tech, news, tech, null, blog
     assert result.to_pylist() == [True, True, True, False, False]
@@ -467,7 +467,7 @@ def test_meta_in_or(meta_table, schema_dynamic):
 
 def test_arrow_backend_rejects_meta(meta_table, schema_dynamic):
     """Force arrow backend on a $meta expression — should fail loudly."""
-    from litevecdb.search.filter.eval.arrow_backend import evaluate_arrow
+    from milvus_lite.search.filter.eval.arrow_backend import evaluate_arrow
     compiled = compile_expr(
         parse_expr('$meta["category"] == "tech"'),
         schema_dynamic,
@@ -517,7 +517,7 @@ def test_meta_hybrid_vs_python_parity(source, meta_table, schema_dynamic):
     # Sanity: dispatcher should have selected hybrid for $meta exprs.
     assert compiled.backend == "hybrid"
 
-    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    from milvus_lite.search.filter.eval.hybrid_backend import evaluate_hybrid
     hybrid_result = evaluate_hybrid(compiled, meta_table)
 
     py_compiled = replace(compiled, backend="python")
@@ -542,7 +542,7 @@ def test_meta_hybrid_handles_missing_meta_column(schema_dynamic):
         schema_dynamic,
         source='$meta["x"] == "y"',
     )
-    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    from milvus_lite.search.filter.eval.hybrid_backend import evaluate_hybrid
     hybrid_result = evaluate_hybrid(compiled, table)
     python_result = evaluate_python(replace(compiled, backend="python"), table)
     assert hybrid_result.to_pylist() == python_result.to_pylist()
@@ -565,7 +565,7 @@ def test_meta_hybrid_falls_back_on_mixed_types(schema_dynamic):
         schema_dynamic,
         source='$meta["mixed"] == 1',
     )
-    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    from milvus_lite.search.filter.eval.hybrid_backend import evaluate_hybrid
     # Should not raise — fallback to python_backend.
     result = evaluate_hybrid(compiled, table)
     # Compare with python_backend directly to confirm fallback parity.
@@ -580,6 +580,6 @@ def test_meta_hybrid_record_batch_input(meta_table, schema_dynamic):
         parse_expr('$meta["category"] == "tech"'),
         schema_dynamic,
     )
-    from litevecdb.search.filter.eval.hybrid_backend import evaluate_hybrid
+    from milvus_lite.search.filter.eval.hybrid_backend import evaluate_hybrid
     result = evaluate_hybrid(compiled, batch)
     assert result.to_pylist() == [True, False, True, False, False]

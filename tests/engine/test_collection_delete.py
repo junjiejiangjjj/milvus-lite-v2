@@ -14,9 +14,9 @@ import os
 
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.exceptions import PartitionNotFoundError, SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.exceptions import PartitionNotFoundError, SchemaValidationError
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture
@@ -251,7 +251,7 @@ def test_delete_then_insert_then_restart(tmp_path, schema):
 def test_delete_triggers_flush(tmp_path, schema, monkeypatch):
     """A delete that pushes the MemTable over the size limit must
     trigger a synchronous flush."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
     col = Collection("c", str(tmp_path / "d"), schema)
     col.insert([_make_record(i) for i in range(4)])
     # Memtable size = 4. The next delete bumps it past 5.

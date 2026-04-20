@@ -2,7 +2,7 @@
 
 import pytest
 
-from litevecdb.search.filter.cache import LRUCache
+from milvus_lite.search.filter.cache import LRUCache
 
 
 # ---------------------------------------------------------------------------

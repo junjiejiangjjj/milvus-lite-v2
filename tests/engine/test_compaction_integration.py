@@ -9,13 +9,13 @@ import os
 
 import pytest
 
-from litevecdb.constants import (
+from milvus_lite.constants import (
     COMPACTION_MIN_FILES_PER_BUCKET,
     DEFAULT_PARTITION,
     MAX_DATA_FILES,
 )
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ def _rec(i, prefix="doc"):
 def test_repeated_flush_triggers_compaction(tmp_path, schema, monkeypatch):
     """N small flushes accumulate N data files; once N hits MIN_FILES_PER_BUCKET,
     compaction merges them into one."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 2)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 2)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     # Each insert(2) triggers a flush. After COMPACTION_MIN_FILES_PER_BUCKET
@@ -67,7 +67,7 @@ def test_repeated_flush_triggers_compaction(tmp_path, schema, monkeypatch):
 def test_compaction_preserves_search_results(tmp_path, schema, monkeypatch):
     """Search must return the same results before and after compaction."""
     import numpy as np
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 3)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     rng = np.random.default_rng(99)
@@ -96,7 +96,7 @@ def test_compaction_after_delete_drops_deleted_rows(tmp_path, schema, monkeypatc
     """Insert + flush, delete + flush, insert + flush + ... eventually
     compaction merges everything and the merged file should NOT contain
     the deleted pks."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 2)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 2)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     # Round 1: insert 4 records, force flushes — they end up in segments.
@@ -125,7 +125,7 @@ def test_crash_during_compaction_manifest_save(tmp_path, schema, monkeypatch):
     """Crash inside the compaction's Manifest.save(). The new merged file
     becomes an orphan; recovery cleans it up. Old files are still in the
     manifest and on disk, so all records remain queryable."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 2)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 2)
 
     data_dir = str(tmp_path / "d")
     col = Collection("c", data_dir, schema)
@@ -135,7 +135,7 @@ def test_crash_during_compaction_manifest_save(tmp_path, schema, monkeypatch):
         col.insert([_rec(i), _rec(i + 1)])
 
     # Now patch Manifest.save to raise on the NEXT call.
-    from litevecdb.storage import manifest as manifest_mod
+    from milvus_lite.storage import manifest as manifest_mod
     real_save = manifest_mod.Manifest.save
     saves_remaining = [1]  # let one save (the flush's save) succeed,
                             # then crash on compaction's save
@@ -179,7 +179,7 @@ def test_crash_during_compaction_manifest_save(tmp_path, schema, monkeypatch):
 def test_long_run_file_count_bounded(tmp_path, schema, monkeypatch):
     """Insert a lot of records with frequent flushes. Compaction must
     keep the data file count bounded."""
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     n_records = 500
@@ -215,7 +215,7 @@ def test_long_run_with_deletes_bounds_delta_index(tmp_path, schema, monkeypatch)
     keep the global min_active low forever, so almost no GC happens.
     Aggressive per-pk GC is a Phase 6+ optimization.
     """
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     n_records = 200
@@ -250,7 +250,7 @@ def test_gc_progress_when_old_data_compacted_out(tmp_path, schema, monkeypatch):
     them all so their seqs all advance, then delete some again. After
     enough churn the early tombstones become unreachable.
     """
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 5)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     # Round 1: insert 20 records, delete first 10 (their seqs are ~1..30).
@@ -280,7 +280,7 @@ def test_long_run_search_consistency(tmp_path, schema, monkeypatch):
     """After many flushes + compactions, search results must still
     match a brute-force computation against the live state."""
     import numpy as np
-    monkeypatch.setattr("litevecdb.engine.collection.MEMTABLE_SIZE_LIMIT", 4)
+    monkeypatch.setattr("milvus_lite.engine.collection.MEMTABLE_SIZE_LIMIT", 4)
 
     col = Collection("c", str(tmp_path / "d"), schema)
     rng = np.random.default_rng(2026)

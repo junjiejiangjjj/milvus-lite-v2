@@ -16,9 +16,9 @@ import tempfile
 import numpy as np
 import pytest
 
-from litevecdb.analyzer.hash import term_to_id
-from litevecdb.analyzer.sparse import compute_tf
-from litevecdb.index.sparse_inverted import SparseInvertedIndex
+from milvus_lite.analyzer.hash import term_to_id
+from milvus_lite.analyzer.sparse import compute_tf
+from milvus_lite.index.sparse_inverted import SparseInvertedIndex
 
 
 # ---------------------------------------------------------------------------
@@ -175,11 +175,11 @@ class TestSparseInvertedIndex:
 
 class TestBM25EndToEnd:
     def _make_collection(self, tmpdir):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType, FieldSchema,
             Function, FunctionType,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         schema = CollectionSchema(
             fields=[

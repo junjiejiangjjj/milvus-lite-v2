@@ -6,10 +6,10 @@ N bucket partitions and routes records by hashing the partition key value.
 
 import pytest
 
-from litevecdb.engine.collection import Collection
-from litevecdb.constants import PARTITION_KEY_BUCKET_PREFIX, DEFAULT_NUM_PARTITIONS
-from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.constants import PARTITION_KEY_BUCKET_PREFIX, DEFAULT_NUM_PARTITIONS
+from milvus_lite.exceptions import SchemaValidationError
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 @pytest.fixture

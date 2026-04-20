@@ -5,8 +5,8 @@ import os
 
 import pytest
 
-from litevecdb.index.spec import IndexSpec
-from litevecdb.storage.manifest import (
+from milvus_lite.index.spec import IndexSpec
+from milvus_lite.storage.manifest import (
     MANIFEST_FILENAME,
     MANIFEST_FORMAT_VERSION,
     Manifest,

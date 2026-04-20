@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from litevecdb.search.distance import (
+from milvus_lite.search.distance import (
     METRIC_COSINE,
     METRIC_IP,
     METRIC_L2,

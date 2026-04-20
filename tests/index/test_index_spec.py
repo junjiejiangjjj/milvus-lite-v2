@@ -2,7 +2,7 @@
 
 import pytest
 
-from litevecdb.index.spec import IndexSpec
+from milvus_lite.index.spec import IndexSpec
 
 
 def test_basic_construction():

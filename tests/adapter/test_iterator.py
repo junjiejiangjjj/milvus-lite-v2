@@ -27,10 +27,10 @@ class TestQueryAllRecords:
     """query(expr=None) and query(expr='') return all records."""
 
     def test_query_none_returns_all(self):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType as LDT, FieldSchema,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         with tempfile.TemporaryDirectory() as d:
             schema = CollectionSchema(fields=[
@@ -46,10 +46,10 @@ class TestQueryAllRecords:
             assert len(results) == 10
 
     def test_query_empty_string_returns_all(self):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType as LDT, FieldSchema,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         with tempfile.TemporaryDirectory() as d:
             schema = CollectionSchema(fields=[
@@ -65,10 +65,10 @@ class TestQueryAllRecords:
             assert len(results) == 5
 
     def test_query_none_with_limit(self):
-        from litevecdb.schema.types import (
+        from milvus_lite.schema.types import (
             CollectionSchema, DataType as LDT, FieldSchema,
         )
-        from litevecdb.engine.collection import Collection
+        from milvus_lite.engine.collection import Collection
 
         with tempfile.TemporaryDirectory() as d:
             schema = CollectionSchema(fields=[

@@ -1,5 +1,5 @@
 """
-Milvus API 边缘用例测试 — 验证 LiteVecDB 在极端/非典型场景下的行为。
+Milvus API 边缘用例测试 — 验证 MilvusLite 在极端/非典型场景下的行为。
 
 覆盖范围:
   1. 空集合操作 (search/query/get on empty collection)
@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 from pymilvus import MilvusClient, DataType as MilvusDataType
 
-from litevecdb.adapter.grpc.server import start_server_in_thread
+from milvus_lite.adapter.grpc.server import start_server_in_thread
 
 DIM = 16
 SEED = 77

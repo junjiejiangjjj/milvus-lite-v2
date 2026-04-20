@@ -1,7 +1,7 @@
 """Phase 10.2 — schema translator unit tests.
 
-Tight focus: just the proto ↔ litevecdb conversion in
-litevecdb.adapter.grpc.translators.schema. The Collection lifecycle
+Tight focus: just the proto ↔ milvus_lite conversion in
+milvus_lite.adapter.grpc.translators.schema. The Collection lifecycle
 tests in test_grpc_collection_lifecycle.py exercise the same code
 path through pymilvus + the gRPC server, but those run a full
 end-to-end stack and are slower. These unit tests pin specific
@@ -11,12 +11,12 @@ edge cases.
 import pytest
 from pymilvus.grpc_gen import schema_pb2
 
-from litevecdb.adapter.grpc.translators.schema import (
-    litevecdb_to_milvus_schema,
-    milvus_to_litevecdb_schema,
+from milvus_lite.adapter.grpc.translators.schema import (
+    milvus_lite_to_milvus_schema,
+    milvus_to_milvus_lite_schema,
 )
-from litevecdb.exceptions import SchemaValidationError
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.exceptions import SchemaValidationError
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 # ---------------------------------------------------------------------------
@@ -36,8 +36,8 @@ def test_round_trip_all_supported_types():
         FieldSchema(name="i32", dtype=DataType.INT32),
         FieldSchema(name="data", dtype=DataType.JSON),
     ])
-    proto = litevecdb_to_milvus_schema("test", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("test", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
 
     # Names + types preserved
     by_name = {f.name: f for f in decoded.fields}
@@ -60,8 +60,8 @@ def test_round_trip_dynamic_field_flag():
         ],
         enable_dynamic_field=True,
     )
-    proto = litevecdb_to_milvus_schema("d", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("d", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
     assert decoded.enable_dynamic_field is True
 
 
@@ -71,14 +71,14 @@ def test_round_trip_nullable():
         FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
         FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=64, nullable=True),
     ])
-    proto = litevecdb_to_milvus_schema("n", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("n", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
     by_name = {f.name: f for f in decoded.fields}
     assert by_name["title"].nullable is True
 
 
 # ---------------------------------------------------------------------------
-# Direct proto → litevecdb (skipping the round-trip)
+# Direct proto → milvus_lite (skipping the round-trip)
 # ---------------------------------------------------------------------------
 
 def test_decode_int64_pk_field():
@@ -95,7 +95,7 @@ def test_decode_int64_pk_field():
     kv.key = "dim"
     kv.value = "4"
 
-    decoded = milvus_to_litevecdb_schema(proto)
+    decoded = milvus_to_milvus_lite_schema(proto)
     assert decoded.fields[0].name == "id"
     assert decoded.fields[0].dtype == DataType.INT64
     assert decoded.fields[0].is_primary is True
@@ -115,7 +115,7 @@ def test_decode_float_vector_dim():
     pk.is_primary_key = True
     pk.data_type = 5
 
-    decoded = milvus_to_litevecdb_schema(proto)
+    decoded = milvus_to_milvus_lite_schema(proto)
     by_name = {f.name: f for f in decoded.fields}
     assert by_name["vec"].dim == 256
 
@@ -136,7 +136,7 @@ def test_decode_unsupported_type_raises():
     bad.data_type = 100  # BinaryVector — not supported
 
     with pytest.raises(SchemaValidationError, match="BinaryVector"):
-        milvus_to_litevecdb_schema(proto)
+        milvus_to_milvus_lite_schema(proto)
 
 
 def test_decode_float_vector_missing_dim_raises():
@@ -150,7 +150,7 @@ def test_decode_float_vector_missing_dim_raises():
     f.data_type = 101  # FloatVector but no dim type_param
 
     with pytest.raises(SchemaValidationError, match="dim"):
-        milvus_to_litevecdb_schema(proto)
+        milvus_to_milvus_lite_schema(proto)
 
 
 def test_decode_float_vector_non_integer_dim_raises():
@@ -167,7 +167,7 @@ def test_decode_float_vector_non_integer_dim_raises():
     kv.value = "not-a-number"
 
     with pytest.raises(SchemaValidationError, match="dim"):
-        milvus_to_litevecdb_schema(proto)
+        milvus_to_milvus_lite_schema(proto)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ def test_decode_float_vector_non_integer_dim_raises():
 # ---------------------------------------------------------------------------
 
 def test_encode_float_vector_without_dim_raises():
-    """A LiteVecDB FieldSchema with FLOAT_VECTOR but no dim should
+    """A MilvusLite FieldSchema with FLOAT_VECTOR but no dim should
     have already been rejected by validate_schema, but if it slips
     through the encoder must reject it loudly."""
     # Bypass FieldSchema's own validation by mutating after the fact
@@ -185,7 +185,7 @@ def test_encode_float_vector_without_dim_raises():
     ])
     object.__setattr__(schema.fields[1], "dim", None)
     with pytest.raises(SchemaValidationError, match="dim"):
-        litevecdb_to_milvus_schema("x", schema)
+        milvus_lite_to_milvus_schema("x", schema)
 
 
 # ---------------------------------------------------------------------------
@@ -199,8 +199,8 @@ def test_round_trip_default_value_varchar():
         FieldSchema(name="status", dtype=DataType.VARCHAR, max_length=32,
                     default_value="active"),
     ])
-    proto = litevecdb_to_milvus_schema("dv", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("dv", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
     by_name = {f.name: f for f in decoded.fields}
     assert by_name["status"].default_value == "active"
 
@@ -211,8 +211,8 @@ def test_round_trip_default_value_int64():
         FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
         FieldSchema(name="count", dtype=DataType.INT64, default_value=0),
     ])
-    proto = litevecdb_to_milvus_schema("dv", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("dv", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
     by_name = {f.name: f for f in decoded.fields}
     assert by_name["count"].default_value == 0
 
@@ -223,8 +223,8 @@ def test_round_trip_default_value_bool():
         FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
         FieldSchema(name="flag", dtype=DataType.BOOL, default_value=True),
     ])
-    proto = litevecdb_to_milvus_schema("dv", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("dv", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
     by_name = {f.name: f for f in decoded.fields}
     assert by_name["flag"].default_value is True
 
@@ -235,8 +235,8 @@ def test_round_trip_default_value_float():
         FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
         FieldSchema(name="score", dtype=DataType.FLOAT, default_value=0.5),
     ])
-    proto = litevecdb_to_milvus_schema("dv", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("dv", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
     by_name = {f.name: f for f in decoded.fields}
     assert abs(by_name["score"].default_value - 0.5) < 1e-6
 
@@ -248,7 +248,7 @@ def test_round_trip_no_default_value():
         FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
         FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=64),
     ])
-    proto = litevecdb_to_milvus_schema("dv", schema)
-    decoded = milvus_to_litevecdb_schema(proto)
+    proto = milvus_lite_to_milvus_schema("dv", schema)
+    decoded = milvus_to_milvus_lite_schema(proto)
     by_name = {f.name: f for f in decoded.fields}
     assert by_name["title"].default_value is None

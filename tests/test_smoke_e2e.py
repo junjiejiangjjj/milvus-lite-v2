@@ -7,7 +7,7 @@ ever stops passing, the README quickstart is broken too.
 import numpy as np
 import pytest
 
-from litevecdb import (
+from milvus_lite import (
     Collection,
     CollectionAlreadyExistsError,
     CollectionNotFoundError,
@@ -15,8 +15,8 @@ from litevecdb import (
     DataDirLockedError,
     DataType,
     FieldSchema,
-    LiteVecDB,
-    LiteVecDBError,
+    MilvusLite,
+    MilvusLiteError,
     SchemaValidationError,
 )
 
@@ -34,7 +34,7 @@ def test_quickstart(tmp_path):
     data_dir = str(tmp_path / "data")
     schema = _make_schema(dim=4)
 
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         col = db.create_collection("docs", schema)
         col.insert([
             {"id": "doc_1", "vec": [1.0, 0.0, 0.0, 0.0], "title": "first"},
@@ -73,13 +73,13 @@ def test_full_lifecycle_with_restart(tmp_path):
     ]
 
     # ── 1. Create + insert + flush + close ─────────────────────
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         col = db.create_collection("docs", schema)
         col.insert(records)
         col.flush()
 
     # ── 2. Reopen + query everything ───────────────────────────
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         assert "docs" in db.list_collections()
         col = db.get_collection("docs")
         for i in range(n):
@@ -93,12 +93,12 @@ def test_full_lifecycle_with_restart(tmp_path):
 
     # ── 3. Reopen + delete half ────────────────────────────────
     deleted = [f"doc_{i:03d}" for i in range(0, n, 2)]
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         col = db.get_collection("docs")
         col.delete(deleted)
 
     # ── 4. Reopen + verify deletes persisted ───────────────────
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         col = db.get_collection("docs")
         for pk in deleted:
             assert col.get([pk]) == [], f"{pk} resurrected"
@@ -112,7 +112,7 @@ def test_multi_collection_isolation(tmp_path):
     even after restart + flush."""
     data_dir = str(tmp_path / "data")
 
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         schema_a = _make_schema(dim=4)
         schema_b = _make_schema(dim=8)
         col_a = db.create_collection("a", schema_a)
@@ -126,7 +126,7 @@ def test_multi_collection_isolation(tmp_path):
         assert col_b.get(["x"])[0]["title"] == "b-only"
 
     # After restart
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         assert set(db.list_collections()) == {"a", "b"}
         col_a = db.get_collection("a")
         col_b = db.get_collection("b")
@@ -141,7 +141,7 @@ def test_drop_then_recreate(tmp_path):
     """Drop a collection, then create one with the same name and a
     different schema — should not see any old data."""
     data_dir = str(tmp_path / "data")
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         schema_v1 = _make_schema(dim=4)
         col = db.create_collection("docs", schema_v1)
         col.insert([{"id": "doc_old", "vec": [1.0, 0.0, 0.0, 0.0], "title": "v1"}])
@@ -158,7 +158,7 @@ def test_drop_then_recreate(tmp_path):
 
 
 def test_search_brute_force_match_through_db(tmp_path):
-    """Larger end-to-end search check, opened via the public LiteVecDB API."""
+    """Larger end-to-end search check, opened via the public MilvusLite API."""
     rng = np.random.default_rng(7)
     n = 200
     dim = 16
@@ -168,7 +168,7 @@ def test_search_brute_force_match_through_db(tmp_path):
         for i in range(n)
     ]
 
-    with LiteVecDB(str(tmp_path / "data")) as db:
+    with MilvusLite(str(tmp_path / "data")) as db:
         col = db.create_collection("docs", _make_schema(dim=dim))
         col.insert(records)
         col.flush()
@@ -184,8 +184,8 @@ def test_search_brute_force_match_through_db(tmp_path):
 
 
 def test_exception_hierarchy_is_importable():
-    """All public exceptions are subclasses of LiteVecDBError."""
-    assert issubclass(SchemaValidationError, LiteVecDBError)
-    assert issubclass(CollectionNotFoundError, LiteVecDBError)
-    assert issubclass(CollectionAlreadyExistsError, LiteVecDBError)
-    assert issubclass(DataDirLockedError, LiteVecDBError)
+    """All public exceptions are subclasses of MilvusLiteError."""
+    assert issubclass(SchemaValidationError, MilvusLiteError)
+    assert issubclass(CollectionNotFoundError, MilvusLiteError)
+    assert issubclass(CollectionAlreadyExistsError, MilvusLiteError)
+    assert issubclass(DataDirLockedError, MilvusLiteError)

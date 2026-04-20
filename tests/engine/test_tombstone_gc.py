@@ -14,13 +14,13 @@ import sys
 import pyarrow as pa
 import pytest
 
-from litevecdb.constants import COMPACTION_MIN_FILES_PER_BUCKET, DEFAULT_PARTITION
-from litevecdb.engine.compaction import CompactionManager
-from litevecdb.schema.arrow_builder import build_data_schema, build_delta_schema
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.data_file import write_data_file
-from litevecdb.storage.delta_index import DeltaIndex
-from litevecdb.storage.manifest import Manifest
+from milvus_lite.constants import COMPACTION_MIN_FILES_PER_BUCKET, DEFAULT_PARTITION
+from milvus_lite.engine.compaction import CompactionManager
+from milvus_lite.schema.arrow_builder import build_data_schema, build_delta_schema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.data_file import write_data_file
+from milvus_lite.storage.delta_index import DeltaIndex
+from milvus_lite.storage.manifest import Manifest
 
 
 @pytest.fixture
@@ -161,7 +161,7 @@ def test_gc_after_compaction_does_not_break_query(harness, schema):
     # The merged file should contain doc_1, doc_2, doc_3.
     [rel] = harness["manifest"].get_data_files(DEFAULT_PARTITION)
     abs_path = os.path.join(harness["data_dir"], "partitions", DEFAULT_PARTITION, rel)
-    from litevecdb.storage.data_file import read_data_file
+    from milvus_lite.storage.data_file import read_data_file
     table = read_data_file(abs_path)
     pks = set(table.column("id").to_pylist())
     assert pks == {"doc_1", "doc_2", "doc_3"}
@@ -205,7 +205,7 @@ def _write_delta_file(harness, schema, seq_min, seq_max, pks):
         schema=build_delta_schema(schema),
     )
     partition_dir = os.path.join(harness["data_dir"], "partitions", DEFAULT_PARTITION)
-    from litevecdb.storage.delta_file import write_delta_file
+    from milvus_lite.storage.delta_file import write_delta_file
     rel = write_delta_file(table, partition_dir, seq_min, seq_max)
     harness["manifest"].add_delta_file(DEFAULT_PARTITION, rel)
     return rel

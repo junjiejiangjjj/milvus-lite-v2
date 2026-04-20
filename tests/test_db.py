@@ -1,4 +1,4 @@
-"""Tests for litevecdb.db.LiteVecDB — multi-Collection lifecycle + LOCK."""
+"""Tests for milvus_lite.db.MilvusLite — multi-Collection lifecycle + LOCK."""
 
 import multiprocessing
 import os
@@ -6,14 +6,14 @@ import time
 
 import pytest
 
-from litevecdb.db import LiteVecDB, LOCK_FILENAME, SCHEMA_FILENAME
-from litevecdb.exceptions import (
+from milvus_lite.db import MilvusLite, LOCK_FILENAME, SCHEMA_FILENAME
+from milvus_lite.exceptions import (
     CollectionAlreadyExistsError,
     CollectionNotFoundError,
     DataDirLockedError,
     SchemaValidationError,
 )
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,7 @@ def schema():
 
 @pytest.fixture
 def db(tmp_path):
-    d = LiteVecDB(str(tmp_path / "data"))
+    d = MilvusLite(str(tmp_path / "data"))
     yield d
     d.close()
 
@@ -51,7 +51,7 @@ def _make_record(i, prefix="doc"):
 def test_construction_creates_data_dir(tmp_path):
     data_dir = tmp_path / "fresh"
     assert not data_dir.exists()
-    db = LiteVecDB(str(data_dir))
+    db = MilvusLite(str(data_dir))
     try:
         assert data_dir.exists()
         assert (data_dir / "collections").exists()
@@ -62,9 +62,9 @@ def test_construction_creates_data_dir(tmp_path):
 
 def test_construction_idempotent_on_existing(tmp_path):
     data_dir = str(tmp_path / "data")
-    db1 = LiteVecDB(data_dir)
+    db1 = MilvusLite(data_dir)
     db1.close()
-    db2 = LiteVecDB(data_dir)
+    db2 = MilvusLite(data_dir)
     db2.close()  # no error
 
 
@@ -120,7 +120,7 @@ def test_drop_nonexistent_is_idempotent(db):
 
 
 def test_drop_removes_data_dir(tmp_path, schema):
-    db = LiteVecDB(str(tmp_path / "data"))
+    db = MilvusLite(str(tmp_path / "data"))
     db.create_collection("docs", schema)
     col_dir = os.path.join(db.data_dir, "collections", "docs")
     assert os.path.exists(col_dir)
@@ -227,13 +227,13 @@ def test_non_string_name_rejected(db, schema):
 
 def test_collection_persists_across_reopen(tmp_path, schema):
     data_dir = str(tmp_path / "data")
-    db1 = LiteVecDB(data_dir)
+    db1 = MilvusLite(data_dir)
     col1 = db1.create_collection("docs", schema)
     col1.insert([_make_record(0), _make_record(1)])
     col1.close()
     db1.close()
 
-    db2 = LiteVecDB(data_dir)
+    db2 = MilvusLite(data_dir)
     assert db2.has_collection("docs")
     col2 = db2.get_collection("docs")
     rec = col2.get(["doc_0000"])
@@ -243,11 +243,11 @@ def test_collection_persists_across_reopen(tmp_path, schema):
 
 def test_get_loads_schema_from_disk(tmp_path, schema):
     data_dir = str(tmp_path / "data")
-    db1 = LiteVecDB(data_dir)
+    db1 = MilvusLite(data_dir)
     db1.create_collection("docs", schema)
     db1.close()
 
-    db2 = LiteVecDB(data_dir)
+    db2 = MilvusLite(data_dir)
     col = db2.get_collection("docs")
     # The schema loaded from disk should match the original.
     assert col.schema.fields[0].name == "id"
@@ -295,7 +295,7 @@ def test_close_is_idempotent(db):
 
 
 def test_operations_after_close_raise(tmp_path, schema):
-    db = LiteVecDB(str(tmp_path / "data"))
+    db = MilvusLite(str(tmp_path / "data"))
     db.close()
     with pytest.raises(RuntimeError, match="closed"):
         db.create_collection("docs", schema)
@@ -306,12 +306,12 @@ def test_operations_after_close_raise(tmp_path, schema):
 
 
 def test_close_releases_lock(tmp_path):
-    """After close(), another LiteVecDB instance should be able to open
+    """After close(), another MilvusLite instance should be able to open
     the same data_dir."""
     data_dir = str(tmp_path / "data")
-    db1 = LiteVecDB(data_dir)
+    db1 = MilvusLite(data_dir)
     db1.close()
-    db2 = LiteVecDB(data_dir)  # should not raise
+    db2 = MilvusLite(data_dir)  # should not raise
     db2.close()
 
 
@@ -321,11 +321,11 @@ def test_close_releases_lock(tmp_path):
 
 def test_context_manager(tmp_path, schema):
     data_dir = str(tmp_path / "data")
-    with LiteVecDB(data_dir) as db:
+    with MilvusLite(data_dir) as db:
         db.create_collection("docs", schema)
         assert db.has_collection("docs")
     # After exit, the lock should be released.
-    with LiteVecDB(data_dir) as db2:
+    with MilvusLite(data_dir) as db2:
         assert db2.has_collection("docs")
 
 
@@ -335,10 +335,10 @@ def test_context_manager(tmp_path, schema):
 
 def test_double_open_in_same_process_raises(tmp_path):
     data_dir = str(tmp_path / "data")
-    db1 = LiteVecDB(data_dir)
+    db1 = MilvusLite(data_dir)
     try:
         with pytest.raises(DataDirLockedError):
-            LiteVecDB(data_dir)
+            MilvusLite(data_dir)
     finally:
         db1.close()
 
@@ -346,7 +346,7 @@ def test_double_open_in_same_process_raises(tmp_path):
 def _try_open_in_subprocess(data_dir, result_queue):
     """Helper for the subprocess multi-process test."""
     try:
-        db = LiteVecDB(data_dir)
+        db = MilvusLite(data_dir)
         db.close()
         result_queue.put("opened")
     except DataDirLockedError:
@@ -359,7 +359,7 @@ def test_lock_blocks_subprocess(tmp_path):
     """A separate process trying to open the same data_dir while we
     hold the lock should fail with DataDirLockedError."""
     data_dir = str(tmp_path / "data")
-    db = LiteVecDB(data_dir)
+    db = MilvusLite(data_dir)
     try:
         ctx = multiprocessing.get_context("spawn")
         q = ctx.Queue()
@@ -376,7 +376,7 @@ def test_lock_blocks_subprocess(tmp_path):
 def test_subprocess_can_open_after_close(tmp_path):
     """After we close, a subprocess should be able to take the lock."""
     data_dir = str(tmp_path / "data")
-    db = LiteVecDB(data_dir)
+    db = MilvusLite(data_dir)
     db.close()
 
     ctx = multiprocessing.get_context("spawn")

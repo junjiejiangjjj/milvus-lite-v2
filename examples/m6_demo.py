@@ -22,10 +22,10 @@ import tempfile
 
 import numpy as np
 
-import litevecdb.engine.collection as collection_mod
-from litevecdb.constants import DEFAULT_PARTITION, MAX_DATA_FILES
-from litevecdb.engine.collection import Collection
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
+import milvus_lite.engine.collection as collection_mod
+from milvus_lite.constants import DEFAULT_PARTITION, MAX_DATA_FILES
+from milvus_lite.engine.collection import Collection
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
 
 
 N = 500
@@ -51,7 +51,7 @@ def main() -> None:
     original_limit = collection_mod.MEMTABLE_SIZE_LIMIT
     collection_mod.MEMTABLE_SIZE_LIMIT = 8
 
-    data_dir = tempfile.mkdtemp(prefix="litevecdb_m6_")
+    data_dir = tempfile.mkdtemp(prefix="milvus_lite_m6_")
     print(f"data_dir = {data_dir}")
     print(f"MEMTABLE_SIZE_LIMIT = {collection_mod.MEMTABLE_SIZE_LIMIT}, "
           f"MAX_DATA_FILES = {MAX_DATA_FILES}")

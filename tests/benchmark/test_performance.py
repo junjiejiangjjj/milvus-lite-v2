@@ -14,9 +14,9 @@ from typing import List
 import numpy as np
 import pytest
 
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.engine.collection import Collection
-from litevecdb.index.factory import is_faiss_available
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.engine.collection import Collection
+from milvus_lite.index.factory import is_faiss_available
 
 pytestmark = pytest.mark.slow
 

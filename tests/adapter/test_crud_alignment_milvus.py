@@ -147,7 +147,7 @@ def test_delete_with_filters_nullable_vector_field(milvus_client):
     where the vector field is nullable (even rows have vectors, odd rows None).
     Verifies surviving row count via count(*) after each round of deletes.
 
-    NOTE: LiteVecDB may not yet support nullable vector fields. If the
+    NOTE: MilvusLite may not yet support nullable vector fields. If the
     collection creation fails with an unsupported-feature error the test is
     skipped rather than failing.
     """

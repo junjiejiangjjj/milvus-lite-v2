@@ -13,19 +13,19 @@ import os
 import pyarrow as pa
 import pytest
 
-from litevecdb.constants import DEFAULT_PARTITION
-from litevecdb.engine.flush import execute_flush
-from litevecdb.engine.operation import DeleteOp, InsertOp
-from litevecdb.engine.recovery import execute_recovery, replay_wal_operations
-from litevecdb.schema.arrow_builder import (
+from milvus_lite.constants import DEFAULT_PARTITION
+from milvus_lite.engine.flush import execute_flush
+from milvus_lite.engine.operation import DeleteOp, InsertOp
+from milvus_lite.engine.recovery import execute_recovery, replay_wal_operations
+from milvus_lite.schema.arrow_builder import (
     build_wal_data_schema,
     build_wal_delta_schema,
 )
-from litevecdb.schema.types import CollectionSchema, DataType, FieldSchema
-from litevecdb.storage.delta_index import DeltaIndex
-from litevecdb.storage.manifest import Manifest
-from litevecdb.storage.memtable import MemTable
-from litevecdb.storage.wal import WAL
+from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.storage.delta_index import DeltaIndex
+from milvus_lite.storage.manifest import Manifest
+from milvus_lite.storage.memtable import MemTable
+from milvus_lite.storage.wal import WAL
 
 
 # ---------------------------------------------------------------------------

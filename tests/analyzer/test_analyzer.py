@@ -10,11 +10,11 @@ Covers:
 
 import pytest
 
-from litevecdb.analyzer.hash import term_to_id
-from litevecdb.analyzer.standard import StandardAnalyzer
-from litevecdb.analyzer.factory import create_analyzer
-from litevecdb.analyzer.protocol import Analyzer
-from litevecdb.exceptions import SchemaValidationError
+from milvus_lite.analyzer.hash import term_to_id
+from milvus_lite.analyzer.standard import StandardAnalyzer
+from milvus_lite.analyzer.factory import create_analyzer
+from milvus_lite.analyzer.protocol import Analyzer
+from milvus_lite.exceptions import SchemaValidationError
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ def _jieba_available():
 @pytest.mark.skipif(not _jieba_available(), reason="jieba not installed")
 class TestJiebaAnalyzer:
     def test_basic_chinese(self):
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         a = JiebaAnalyzer(mode="exact")
         tokens = a.tokenize("我是一个学生")
         assert len(tokens) > 0
@@ -165,41 +165,41 @@ class TestJiebaAnalyzer:
         assert any("学生" in t for t in tokens)
 
     def test_search_mode(self):
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         a = JiebaAnalyzer(mode="search")
         tokens = a.tokenize("中华人民共和国")
         # search mode produces finer-grained segments
         assert len(tokens) >= 1
 
     def test_stop_words(self):
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         a = JiebaAnalyzer(stop_words={"的", "是", "了"})
         tokens = a.tokenize("今天的天气是很好的")
         assert "的" not in tokens
         assert "是" not in tokens
 
     def test_analyze_returns_ids(self):
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         a = JiebaAnalyzer()
         ids = a.analyze("机器学习算法")
         assert len(ids) > 0
         assert all(isinstance(i, int) for i in ids)
 
     def test_user_dict(self):
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         a = JiebaAnalyzer(user_dict_words=["深度学习"])
         tokens = a.tokenize("深度学习是人工智能的子领域")
         assert "深度学习" in tokens
 
     def test_english_text(self):
         """Jieba handles English text too (passes through)."""
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         a = JiebaAnalyzer()
         tokens = a.tokenize("machine learning")
         assert len(tokens) > 0
 
     def test_is_analyzer_subclass(self):
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         a = JiebaAnalyzer()
         assert isinstance(a, Analyzer)
 
@@ -208,7 +208,7 @@ def test_jieba_import_error():
     """When jieba is not installed, JiebaAnalyzer raises ImportError."""
     # We can't easily uninstall jieba mid-test, so just verify the class
     # exists and is importable.
-    from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+    from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
     assert JiebaAnalyzer is not None
 
 
@@ -242,7 +242,7 @@ class TestFactory:
     @pytest.mark.skipif(not _jieba_available(), reason="jieba not installed")
     def test_jieba_string(self):
         a = create_analyzer({"tokenizer": "jieba"})
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         assert isinstance(a, JiebaAnalyzer)
 
     @pytest.mark.skipif(not _jieba_available(), reason="jieba not installed")
@@ -250,7 +250,7 @@ class TestFactory:
         a = create_analyzer({
             "tokenizer": {"type": "jieba", "mode": "exact"},
         })
-        from litevecdb.analyzer.jieba_analyzer import JiebaAnalyzer
+        from milvus_lite.analyzer.jieba_analyzer import JiebaAnalyzer
         assert isinstance(a, JiebaAnalyzer)
 
     @pytest.mark.skipif(not _jieba_available(), reason="jieba not installed")
