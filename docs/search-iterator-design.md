@@ -1,93 +1,93 @@
-# Search Iterator 设计文档
+# Search Iterator Design Document
 
-## 1. 背景与目标
+## 1. Background and Goals
 
-pymilvus 提供两种 SearchIterator 实现：
+pymilvus provides two SearchIterator implementations:
 
-- **V1（客户端侧）**：基于距离范围的自适应分页。客户端通过 `radius` + `range_filter` 参数反复调用 Search RPC，逐步扩大搜索范围，用 PK 排除去重。
-- **V2（服务端侧）**：基于 token 的分页。服务端每次执行 `top_k=batch_size` 的搜索，用 `last_bound` 距离阈值跳过已返回的结果，实现逐批推进。
+- **V1 (client-side)**: Adaptive pagination based on distance ranges. The client repeatedly calls Search RPC with `radius` + `range_filter` parameters, progressively expanding the search range, using PK exclusion for deduplication.
+- **V2 (server-side)**: Token-based pagination. The server executes a search with `top_k=batch_size` each time, using the `last_bound` distance threshold to skip already-returned results, achieving batch-by-batch progression.
 
-### 当前状态
+### Current Status
 
-MilvusLite 已支持 V1 所依赖的全部底层能力：
-- ✅ Range Search（`radius` + `range_filter`）— Phase 14
-- ✅ Offset 分页 — Phase 17
-- ✅ PK `not in [...]` 过滤表达式 — Phase 8
-- ✅ test_iterator.py 中的 `search_iterator` 测试已通过
+MilvusLite already supports all the underlying capabilities that V1 depends on:
+- ✅ Range Search (`radius` + `range_filter`) — Phase 14
+- ✅ Offset pagination — Phase 17
+- ✅ PK `not in [...]` filter expressions — Phase 8
+- ✅ `search_iterator` tests in test_iterator.py have passed
 
-**结论：V1 已经可以工作。** pymilvus 的 SearchIterator V1 是纯客户端实现，只要 Search RPC 正确支持 `radius`、`range_filter`、`offset` 和 filter 表达式，V1 就能运行。
+**Conclusion: V1 already works.** pymilvus's SearchIterator V1 is a pure client-side implementation. As long as the Search RPC correctly supports `radius`, `range_filter`, `offset`, and filter expressions, V1 can run.
 
-### 设计目标
+### Design Goals
 
-实现 **V2 服务端迭代器**，原因：
-1. V2 是 pymilvus 的默认路径（优先尝试 V2，失败才 fallback V1）
-2. V2 避免了 V1 的多次自适应重试，延迟更低
-3. V2 避免了客户端构造 PK 排除表达式的开销（大批量时表达式可能很长）
-4. V1 在 `distance` 相同的大量记录场景下可能死循环（PK 排除列表爆炸）
+Implement **V2 server-side iterator**, for the following reasons:
+1. V2 is the default path in pymilvus (it tries V2 first, falling back to V1 on failure)
+2. V2 avoids V1's multiple adaptive retries, resulting in lower latency
+3. V2 avoids the overhead of the client constructing PK exclusion expressions (which can be very long for large batches)
+4. V1 may enter an infinite loop when there are many records with the same `distance` (the PK exclusion list explodes)
 
 ---
 
-## 2. Milvus 实现分析
+## 2. Milvus Implementation Analysis
 
-### 2.1 Milvus V2 实际架构
+### 2.1 Milvus V2 Actual Architecture
 
-Milvus 的 V2 **不是**全量搜索 + 缓存，而是**逐批搜索 + last_bound 距离过滤**：
+Milvus's V2 is **not** a full search + cache approach, but rather **batch-by-batch search + last_bound distance filtering**:
 
-1. 每次请求都执行真正的搜索，`topK = batch_size`
-2. C++ segcore 层的 `CachedSearchIterator` 缓存的是**向量索引的迭代器状态**（HNSW 图遍历位置），不是搜索结果
-3. 用 `last_bound`（上一批最后一条的距离值）过滤掉 `distance ≤ last_bound` 的结果
-4. Token 不对应服务端状态存储，真正的"游标"是 `last_bound` 值
+1. Each request performs a real search with `topK = batch_size`
+2. The `CachedSearchIterator` at the C++ segcore layer caches the **vector index iterator state** (HNSW graph traversal position), not search results
+3. Uses `last_bound` (the distance value of the last entry from the previous batch) to filter out results where `distance ≤ last_bound`
+4. The token does not correspond to server-side state storage; the real "cursor" is the `last_bound` value
 
 ```
-第1次: Search(batch_size=100, last_bound=None)
-  → 返回最近的 100 条 + last_bound=0.85
+Round 1: Search(batch_size=100, last_bound=None)
+  → Returns the nearest 100 entries + last_bound=0.85
 
-第2次: Search(batch_size=100, last_bound=0.85)
-  → 跳过 distance ≤ 0.85，返回下一批 + last_bound=1.23
+Round 2: Search(batch_size=100, last_bound=0.85)
+  → Skips distance ≤ 0.85, returns next batch + last_bound=1.23
 
-第3次: Search(batch_size=100, last_bound=1.23)
-  → 跳过 distance ≤ 1.23，返回下一批...
+Round 3: Search(batch_size=100, last_bound=1.23)
+  → Skips distance ≤ 1.23, returns next batch...
 
-结果为空 → 客户端终止
+Empty result → Client terminates
 ```
 
-### 2.2 为什么 Milvus 不用全量缓存
+### 2.2 Why Milvus Does Not Use Full Caching
 
-全量缓存意味着 `top_k` 要设成很大的值（如 16384），对 HNSW 等 ANN 索引来说等价于退化为暴力搜索，完全浪费了索引加速的意义。逐批搜索每次只取 `batch_size` 条，索引的 early termination 优势得以保留。
+Full caching means setting `top_k` to a very large value (e.g., 16384), which for ANN indexes like HNSW is equivalent to degrading to brute-force search, completely wasting the benefit of index acceleration. Batch-by-batch search fetches only `batch_size` entries each time, preserving the early termination advantage of the index.
 
-### 2.3 pymilvus V2 协议
+### 2.3 pymilvus V2 Protocol
 
-**握手流程**：
+**Handshake flow**:
 
 ```
 Client                                    Server
   |                                          |
-  |-- Search(batch_size=1, iter_v2=true) --> |   # probe 调用
-  |<--- SearchResults + {token, last_bound} -|   # 返回 token
+  |-- Search(batch_size=1, iter_v2=true) --> |   # probe call
+  |<--- SearchResults + {token, last_bound} -|   # returns token
   |                                          |
-  |-- Search(token=T, last_bound=B) -------> |   # 后续调用
+  |-- Search(token=T, last_bound=B) -------> |   # subsequent calls
   |<--- SearchResults + {token, last_bound} -|
   |                                          |
-  |       ... 重复直到结果为空 ...               |
+  |       ... repeat until results are empty ...  |
 ```
 
-**关键参数**（嵌入在 search_params KV 中）：
+**Key parameters** (embedded in search_params KV):
 
-| Key | 类型 | 说明 |
-|-----|------|------|
-| `iterator` | bool | 标记为迭代器模式 |
-| `search_iter_v2` | bool | 使用 V2 协议 |
-| `search_iter_batch_size` | int | 每批返回数量 |
-| `search_iter_id` | str | 迭代器 token（首次请求无此参数） |
-| `search_iter_last_bound` | float | 上一批最后一条的距离值 |
-| `guarantee_timestamp` | int | MVCC 时间戳（确保一致性快照） |
+| Key | Type | Description |
+|-----|------|-------------|
+| `iterator` | bool | Marks as iterator mode |
+| `search_iter_v2` | bool | Uses V2 protocol |
+| `search_iter_batch_size` | int | Number of results per batch |
+| `search_iter_id` | str | Iterator token (absent on first request) |
+| `search_iter_last_bound` | float | Distance value of the last entry from the previous batch |
+| `guarantee_timestamp` | int | MVCC timestamp (ensures consistent snapshot) |
 
-**SearchResultData 扩展字段**：
+**SearchResultData extended fields**:
 
 ```protobuf
 message SearchIteratorV2Results {
-    string token = 1;       // 迭代器唯一标识
-    float last_bound = 2;   // 本批最后一条的距离值
+    string token = 1;       // Iterator unique identifier
+    float last_bound = 2;   // Distance value of the last entry in this batch
 }
 
 message SearchResultData {
@@ -96,111 +96,111 @@ message SearchResultData {
 }
 ```
 
-**pymilvus 客户端行为**：
+**pymilvus client behavior**:
 
-1. **Probe**：首次调用 `batch_size=1`，获取 token + last_bound
-2. **Iterate**：后续调用携带 `token` + `last_bound`，`limit = batch_size`
-3. **Terminate**：返回空结果时停止
-4. **Timestamp**：首次响应中获取 `session_ts`，后续请求携带 `guarantee_timestamp` 确保快照一致性
+1. **Probe**: First call with `batch_size=1`, obtains token + last_bound
+2. **Iterate**: Subsequent calls carry `token` + `last_bound`, `limit = batch_size`
+3. **Terminate**: Stops when empty results are returned
+4. **Timestamp**: Obtains `session_ts` from the first response, subsequent requests carry `guarantee_timestamp` to ensure snapshot consistency
 
-**约束**：
-- 只支持 nq=1（单向量查询）
-- 不能与 groupBy / offset / order_by 组合
+**Constraints**:
+- Only supports nq=1 (single-vector query)
+- Cannot be combined with groupBy / offset / order_by
 
 ---
 
-## 3. MilvusLite 设计方案
+## 3. MilvusLite Design
 
-### 3.1 核心思路
+### 3.1 Core Idea
 
-对齐 Milvus：**逐批搜索 + last_bound 距离过滤**。
+Align with Milvus: **batch-by-batch search + last_bound distance filtering**.
 
-每次迭代请求都执行一次 `Collection.search(top_k=batch_size)`，通过 `last_bound` 参数过滤掉已返回的结果（`distance ≤ last_bound`），实现逐批推进。
+Each iteration request executes a `Collection.search(top_k=batch_size)`, filtering out already-returned results through the `last_bound` parameter (`distance ≤ last_bound`), achieving batch-by-batch progression.
 
 ```
 pymilvus SearchIteratorV2
     │
     ▼
-gRPC Search RPC（带 iterator 参数）
+gRPC Search RPC (with iterator parameters)
     │
     ▼
 MilvusServicer.Search()
-    │  检测 search_iter_v2=true
+    │  Detects search_iter_v2=true
     ▼
 Collection.search(top_k=batch_size, last_bound=B)
-    │  搜索时过滤 distance ≤ last_bound 的结果
+    │  Filters results with distance ≤ last_bound during search
     ▼
-返回 SearchResults + SearchIteratorV2Results{token, last_bound}
+Returns SearchResults + SearchIteratorV2Results{token, last_bound}
 ```
 
-### 3.2 核心设计决策
+### 3.2 Core Design Decisions
 
-#### 决策 1：逐批搜索 + last_bound 过滤（对齐 Milvus）
+#### Decision 1: Batch-by-Batch Search + last_bound Filtering (Aligned with Milvus)
 
-**方案**：每次迭代请求执行 `search(top_k=batch_size)`，引擎层在距离计算后过滤 `distance ≤ last_bound` 的候选。
+**Approach**: Each iteration request executes `search(top_k=batch_size)`, and the engine layer filters candidates with `distance ≤ last_bound` after distance computation.
 
-**理由**：
-- 保留 HNSW 索引的 early termination 优势，不退化为暴搜
-- 每批只计算 batch_size 条结果的距离，内存开销小
-- 无需管理服务端缓存和生命周期
-- 与 Milvus 行为一致
+**Rationale**:
+- Preserves HNSW index's early termination advantage, avoids degradation to brute-force search
+- Only computes distances for batch_size results per batch, low memory overhead
+- No need to manage server-side cache and its lifecycle
+- Consistent with Milvus behavior
 
-#### 决策 2：last_bound 过滤在 executor 层实现
+#### Decision 2: last_bound Filtering Implemented at the Executor Layer
 
-过滤时机在搜索结果排序后、返回前——将 `distance ≤ last_bound` 的结果剔除。
+The filtering happens after search results are sorted but before returning — entries with `distance ≤ last_bound` are removed.
 
-**距离约定**（内部统一 "smaller = more similar"）：
-- `COSINE`：`1 - similarity`，范围 [0, 2]，越小越相似
-- `L2`：欧氏距离，越小越相似
-- `IP`：`-dot_product`（内部取反），越小越相似
+**Distance conventions** (internally unified as "smaller = more similar"):
+- `COSINE`: `1 - similarity`, range [0, 2], smaller means more similar
+- `L2`: Euclidean distance, smaller means more similar
+- `IP`: `-dot_product` (internally negated), smaller means more similar
 
-过滤规则统一为：**跳过 `distance ≤ last_bound` 的结果**（因为内部距离已统一为"小 = 相似"，last_bound 之前的结果距离更小，应跳过）。
+The filtering rule is unified as: **skip results with `distance ≤ last_bound`** (since internal distances are unified as "small = similar", results before last_bound have smaller distances and should be skipped).
 
-注意：返回给 pymilvus 的 `last_bound` 是**外部距离**（IP 距离已取反回正值），与内部距离符号不同。需要在 adapter 层做转换。
+Note: The `last_bound` returned to pymilvus is the **external distance** (IP distance is negated back to positive), which differs in sign from the internal distance. Conversion is needed at the adapter layer.
 
-#### 决策 3：Token 是无状态标识
+#### Decision 3: Token Is a Stateless Identifier
 
-与 Milvus 一致，token 不对应服务端状态。首次请求生成 `uuid4` 返回给客户端，后续请求原样回传。真正的游标是 `last_bound` 值。
+Consistent with Milvus, the token does not correspond to server-side state. A `uuid4` is generated on the first request and returned to the client, which passes it back unchanged in subsequent requests. The real cursor is the `last_bound` value.
 
-服务端无状态 = 无需管理 TTL / 缓存清理 / 内存泄漏。
+Stateless server = no need to manage TTL / cache cleanup / memory leaks.
 
-#### 决策 4：基于 `_seq` 的快照隔离
+#### Decision 4: Snapshot Isolation Based on `_seq`
 
-**问题**：迭代器的每次 `.next()` 调用都是独立的 `Collection.search()`。如果两次调用之间有 insert/delete，会导致结果不一致：
+**Problem**: Each `.next()` call of the iterator is an independent `Collection.search()`. If there are insert/delete operations between two calls, results become inconsistent:
 
 ```
-iterator.next()  → 返回 batch 1 (distance 0.1~0.5)
+iterator.next()  → returns batch 1 (distance 0.1~0.5)
     ↓
-collection.insert(new_record)  # 新记录 distance=0.3
+collection.insert(new_record)  # new record with distance=0.3
     ↓
-iterator.next()  → 返回 batch 2 (distance > 0.5)
-                   新记录 distance=0.3 ≤ last_bound，被过滤 → 永远丢失
+iterator.next()  → returns batch 2 (distance > 0.5)
+                   new record distance=0.3 ≤ last_bound, filtered → permanently lost
 ```
 
-**方案**：利用 `_seq`（全局单调递增序列号）实现快照隔离，与 Milvus 的 `session_ts` 机制对齐。
+**Approach**: Use `_seq` (globally monotonically increasing sequence number) for snapshot isolation, aligned with Milvus's `session_ts` mechanism.
 
-本质上这就是 **MVCC（Multi-Version Concurrency Control）**：
-- `_seq` = 版本号（每条记录自带，单调递增）
-- `snapshot_seq` = 读快照的版本上界（等价于经典 MVCC 的 `read_ts`）
-- `seq_mask = (seqs <= snapshot_seq)` = 版本可见性判定
+This is essentially **MVCC (Multi-Version Concurrency Control)**:
+- `_seq` = version number (each record carries one, monotonically increasing)
+- `snapshot_seq` = upper bound of the read snapshot's version (equivalent to classic MVCC's `read_ts`)
+- `seq_mask = (seqs <= snapshot_seq)` = version visibility check
 
-MilvusLite 的 `_seq` 机制天然具备 MVCC 能力，此前只用于 dedup 和 tombstone 判定，这里扩展为快照读。
+MilvusLite's `_seq` mechanism inherently has MVCC capabilities. Previously it was only used for dedup and tombstone determination; here it is extended for snapshot reads.
 
-基于这个底层能力，Consistency Levels 理论上可以实现：
-- **Strong**：`snapshot_seq = current_seq`（当前默认行为，单进程同步天然满足）
-- **Session**：`snapshot_seq = 该 session 最后一次写入的 _seq`
-- **Eventually**：`snapshot_seq = 上一次 flush 时的 _seq`（只读持久化数据）
+Based on this underlying capability, Consistency Levels can theoretically be implemented:
+- **Strong**: `snapshot_seq = current_seq` (the current default behavior, naturally satisfied by single-process synchronous execution)
+- **Session**: `snapshot_seq = the _seq of the last write in this session`
+- **Eventually**: `snapshot_seq = the _seq at the last flush` (reads only persisted data)
 
-但对单进程嵌入式架构，Strong 是天然的，其他级别没有实际收益，因此 **Consistency Levels 不作为用户功能暴露**。`snapshot_seq` 仅在 Search Iterator 内部使用。
+However, for a single-process embedded architecture, Strong is natural, and other levels provide no practical benefit. Therefore **Consistency Levels are not exposed as a user-facing feature**. `snapshot_seq` is only used internally within Search Iterator.
 
-**流程**：
+**Flow**:
 
-1. **首次迭代请求**：捕获当前 `Collection._seq` 作为 `snapshot_seq`
-2. **返回 `session_ts`**：将 `snapshot_seq` 通过 SearchResults 的 `session_ts` 字段返回
-3. **pymilvus 自动回传**：后续请求携带 `guarantee_timestamp = snapshot_seq`
-4. **后续搜索**：bitmap pipeline 中增加 `seq_mask = (seqs <= snapshot_seq)`，合并到 valid_mask
+1. **First iteration request**: Capture the current `Collection._seq` as `snapshot_seq`
+2. **Return `session_ts`**: Return `snapshot_seq` via the `session_ts` field of SearchResults
+3. **pymilvus auto-passes it back**: Subsequent requests carry `guarantee_timestamp = snapshot_seq`
+4. **Subsequent searches**: Add `seq_mask = (seqs <= snapshot_seq)` in the bitmap pipeline, merged into valid_mask
 
-**实现位置**：`search/bitmap.py` 的 `build_valid_mask()` 中，在现有的 dedup + tombstone + scalar filter 之后，追加 seq 过滤：
+**Implementation location**: In `build_valid_mask()` of `search/bitmap.py`, after the existing dedup + tombstone + scalar filter, append seq filtering:
 
 ```python
 if snapshot_seq is not None:
@@ -208,30 +208,30 @@ if snapshot_seq is not None:
     valid_mask &= seq_mask
 ```
 
-这样快照之后插入的记录（`_seq > snapshot_seq`）和删除操作（`delete_seq > snapshot_seq`）都不可见，保证迭代过程中数据视图一致。
+This way, records inserted after the snapshot (`_seq > snapshot_seq`) and delete operations (`delete_seq > snapshot_seq`) are invisible, ensuring a consistent data view throughout the iteration process.
 
-**优势**：
-- 零额外存储——`_seq` 已存在于每条记录中，MVCC 是"免费"的
-- 零服务端状态——`snapshot_seq` 由客户端通过 `guarantee_timestamp` 回传
-- 复用 pymilvus 已有的 `session_ts` / `guarantee_timestamp` 协议字段
-- 对非迭代器请求无影响（`snapshot_seq=None` 时跳过过滤）
+**Advantages**:
+- Zero additional storage — `_seq` already exists in every record, MVCC is "free"
+- Zero server-side state — `snapshot_seq` is passed back by the client via `guarantee_timestamp`
+- Reuses pymilvus's existing `session_ts` / `guarantee_timestamp` protocol fields
+- No impact on non-iterator requests (`snapshot_seq=None` skips filtering)
 
-#### 决策 5：同距离记录处理
+#### Decision 5: Handling Records with Equal Distances
 
-当多条记录距离完全相同时，`last_bound` 可能导致部分同距离记录被跳过。处理策略：
+When multiple records have exactly the same distance, `last_bound` may cause some equal-distance records to be skipped. Handling strategies:
 
-- 使用**严格小于** `distance < last_bound` 可能导致重复
-- 使用**小于等于** `distance ≤ last_bound` 可能导致遗漏
+- Using **strict less than** `distance < last_bound` may cause duplicates
+- Using **less than or equal** `distance ≤ last_bound` may cause omissions
 
-Milvus 使用 `distance > last_bound`（严格大于，等价于跳过 ≤），接受同距离遗漏。我们对齐此行为。理由：
-- 向量搜索本身是近似的（ANN），少量同距离遗漏可接受
-- 比重复好——重复会让客户端逻辑复杂化
+Milvus uses `distance > last_bound` (strict greater than, equivalent to skipping ≤), accepting equal-distance omissions. We align with this behavior. Rationale:
+- Vector search itself is approximate (ANN), minor equal-distance omissions are acceptable
+- Better than duplicates — duplicates would complicate client-side logic
 
 ---
 
-## 4. 实现细节
+## 4. Implementation Details
 
-### 4.1 引擎层改动：Collection.search 增加迭代器参数
+### 4.1 Engine Layer Changes: Adding Iterator Parameters to Collection.search
 
 ```python
 def search(
@@ -240,88 +240,88 @@ def search(
     top_k=10,
     metric_type="COSINE",
     ...,
-    last_bound=None,       # 新增：迭代器距离阈值
-    snapshot_seq=None,      # 新增：快照序列号（迭代器一致性）
+    last_bound=None,       # New: iterator distance threshold
+    snapshot_seq=None,      # New: snapshot sequence number (iterator consistency)
 ) -> List[List[dict]]:
 ```
 
-**last_bound 过滤**——在搜索结果排序后、截取 top_k 前：
+**last_bound filtering** — after search results are sorted, before top_k truncation:
 
 ```python
-# 在 executor 层，top-k 选出后：
+# At the executor layer, after top-k selection:
 if last_bound is not None:
     hits = [h for h in hits if h["distance"] > last_bound]
 ```
 
-**snapshot_seq 过滤**——在 bitmap pipeline 中：
+**snapshot_seq filtering** — in the bitmap pipeline:
 
 ```python
-# 在 search/bitmap.py 的 build_valid_mask() 中：
+# In build_valid_mask() of search/bitmap.py:
 if snapshot_seq is not None:
     seq_mask = (all_seqs <= snapshot_seq)
     valid_mask &= seq_mask
 ```
 
-### 4.2 距离转换
+### 4.2 Distance Conversion
 
-pymilvus 传入的 `last_bound` 是**外部距离**（返回给用户的值）。引擎内部使用统一约定（smaller = more similar）。需要在 adapter 层转换：
+The `last_bound` passed in by pymilvus is the **external distance** (the value returned to the user). The engine internally uses a unified convention (smaller = more similar). Conversion is needed at the adapter layer:
 
-| metric | 外部距离 | 内部距离 | 转换 |
-|--------|---------|---------|------|
-| COSINE | `1 - sim` | `1 - sim` | 无需转换 |
-| L2 | `euclidean` | `euclidean` | 无需转换 |
-| IP | `dot_product`（正值） | `-dot_product`（负值） | `internal = -external` |
+| metric | External distance | Internal distance | Conversion |
+|--------|-------------------|-------------------|------------|
+| COSINE | `1 - sim` | `1 - sim` | No conversion needed |
+| L2 | `euclidean` | `euclidean` | No conversion needed |
+| IP | `dot_product` (positive) | `-dot_product` (negative) | `internal = -external` |
 
-返回 `last_bound` 时做反向转换。
+Reverse conversion when returning `last_bound`.
 
-### 4.3 过滤实现位置
+### 4.3 Filtering Implementation Location
 
-在 `search/executor_indexed.py` 的全局合并阶段，top-k 结果已按距离排序。追加一步过滤：
+In the global merge stage of `search/executor_indexed.py`, top-k results are already sorted by distance. Append one filtering step:
 
 ```python
 def _apply_last_bound(hits: List[dict], last_bound: float) -> List[dict]:
-    """过滤掉 distance ≤ last_bound 的结果（已在内部距离空间）。"""
+    """Filter out results with distance ≤ last_bound (already in internal distance space)."""
     return [h for h in hits if h["distance"] > last_bound]
 ```
 
-注意：这个过滤发生在 top-k 选择**之后**。因此实际流程是：
-1. 正常搜索 `top_k = batch_size + 余量`（over-fetch 以补偿被过滤的部分）
-2. 过滤 `distance ≤ last_bound`
-3. 截取前 `batch_size` 条
+Note: This filtering happens **after** top-k selection. Therefore the actual flow is:
+1. Normal search with `top_k = batch_size + margin` (over-fetch to compensate for filtered entries)
+2. Filter `distance ≤ last_bound`
+3. Truncate to the first `batch_size` entries
 
-over-fetch 的余量：Milvus C++ 层的做法是让索引迭代器自然跳过 ≤ last_bound 的结果（HNSW 图遍历中直接跳过）。MilvusLite 的 FAISS 不支持这种定制，所以用 over-fetch + post-filter 替代。over-fetch 倍率设为 2x（即 `top_k = batch_size * 2`），如果过滤后不足 batch_size，不重试——返回实际数量，客户端自行判断是否继续。
+Over-fetch margin: Milvus's C++ layer has the index iterator naturally skip results ≤ last_bound (skipped directly during HNSW graph traversal). MilvusLite's FAISS does not support this customization, so over-fetch + post-filter is used instead. The over-fetch multiplier is set to 2x (i.e., `top_k = batch_size * 2`). If fewer than batch_size entries remain after filtering, no retry is performed — the actual count is returned, and the client decides whether to continue.
 
-### 4.4 Servicer 改动
+### 4.4 Servicer Changes
 
 ```python
 def Search(self, request, context):
-    # ... 现有解析逻辑 ...
+    # ... existing parsing logic ...
     parsed = parse_search_request(request, ...)
 
-    # ── 新增：检测 V2 迭代器模式 ──
+    # ── New: detect V2 iterator mode ──
     if parsed.get("search_iter_v2"):
         return self._handle_search_iterator_v2(request, col, parsed)
 
-    # ── 原有搜索逻辑 ──
+    # ── Original search logic ──
     results = col.search(...)
     ...
 
 def _handle_search_iterator_v2(self, request, col, parsed):
     batch_size = parsed.get("search_iter_batch_size", 1000)
-    last_bound_external = parsed.get("search_iter_last_bound")  # 外部距离
+    last_bound_external = parsed.get("search_iter_last_bound")  # external distance
     token = parsed.get("search_iter_id")
     guarantee_ts = parsed.get("guarantee_timestamp", 0)
 
-    # 首次请求：生成 token，捕获快照 _seq
+    # First request: generate token, capture snapshot _seq
     is_first = (token is None)
     if is_first:
         import uuid
         token = str(uuid.uuid4())
-        snapshot_seq = col._seq          # 捕获当前序列号作为快照
+        snapshot_seq = col._seq          # Capture current sequence number as snapshot
     else:
         snapshot_seq = guarantee_ts if guarantee_ts > 0 else None
 
-    # 转换 last_bound 到内部距离空间
+    # Convert last_bound to internal distance space
     metric = parsed["metric_type"]
     last_bound_internal = None
     if last_bound_external is not None:
@@ -330,7 +330,7 @@ def _handle_search_iterator_v2(self, request, col, parsed):
         else:
             last_bound_internal = last_bound_external
 
-    # 执行搜索（over-fetch 2x 补偿 last_bound 过滤）
+    # Execute search (over-fetch 2x to compensate for last_bound filtering)
     results = col.search(
         query_vectors=parsed["query_vectors"],
         top_k=batch_size * 2,
@@ -340,31 +340,31 @@ def _handle_search_iterator_v2(self, request, col, parsed):
         output_fields=parsed["output_fields"],
         anns_field=parsed.get("anns_field"),
         last_bound=last_bound_internal,
-        snapshot_seq=snapshot_seq,        # 快照隔离
+        snapshot_seq=snapshot_seq,        # Snapshot isolation
     )
 
-    # 截取 batch_size
+    # Truncate to batch_size
     for i, hits in enumerate(results):
         results[i] = hits[:batch_size]
 
-    # 计算本批的 last_bound（最后一条的外部距离）
+    # Compute this batch's last_bound (external distance of the last entry)
     new_last_bound = 0.0
     if results and results[0]:
         last_hit_distance = results[0][-1]["distance"]
-        # 内部距离 → 外部距离
+        # Internal distance → external distance
         if metric == "IP":
             new_last_bound = -last_hit_distance
         else:
             new_last_bound = last_hit_distance
 
-    # 构建响应
+    # Build response
     result_data = build_search_result_data(...)
 
-    # 设置 V2 迭代器信息
+    # Set V2 iterator info
     result_data.search_iterator_v2_results.token = token
     result_data.search_iterator_v2_results.last_bound = new_last_bound
 
-    # 首次请求：返回 session_ts，pymilvus 会自动回传为 guarantee_timestamp
+    # First request: return session_ts, pymilvus will auto-pass it back as guarantee_timestamp
     session_ts = snapshot_seq if is_first else 0
 
     return milvus_pb2.SearchResults(
@@ -374,12 +374,12 @@ def _handle_search_iterator_v2(self, request, col, parsed):
     )
 ```
 
-### 4.5 parse_search_request 扩展
+### 4.5 parse_search_request Extension
 
-在现有的 `parse_search_request` 返回值中新增：
+Add the following to the existing `parse_search_request` return value:
 
 ```python
-# V2 iterator 参数
+# V2 iterator parameters
 "search_iter_v2": bool(raw_params.get("search_iter_v2", False)),
 "search_iter_batch_size": int(raw_params.get("search_iter_batch_size", 1000)),
 "search_iter_id": raw_params.get("search_iter_id"),        # str or None
@@ -389,67 +389,67 @@ def _handle_search_iterator_v2(self, request, col, parsed):
 
 ---
 
-## 5. 模块拆分
+## 5. Module Breakdown
 
-| 文件 | 变更 | 说明 |
-|------|------|------|
-| `search/bitmap.py` | 修改 | build_valid_mask() 增加 `snapshot_seq` 过滤 |
-| `search/executor_indexed.py` | 修改 | top-k 后增加 last_bound 过滤，透传 snapshot_seq |
-| `engine/collection.py` | 修改 | search() 增加 `last_bound` + `snapshot_seq` 参数 |
-| `adapter/grpc/servicer.py` | 修改 | Search() 增加 V2 分支，快照 _seq 捕获 |
-| `adapter/grpc/translators/search.py` | 修改 | 提取 V2 iterator 参数 + guarantee_timestamp |
-| `adapter/grpc/translators/result.py` | 修改 | 设置 search_iterator_v2_results 字段 |
+| File | Change | Description |
+|------|--------|-------------|
+| `search/bitmap.py` | Modified | build_valid_mask() adds `snapshot_seq` filtering |
+| `search/executor_indexed.py` | Modified | Adds last_bound filtering after top-k, passes through snapshot_seq |
+| `engine/collection.py` | Modified | search() adds `last_bound` + `snapshot_seq` parameters |
+| `adapter/grpc/servicer.py` | Modified | Search() adds V2 branch, snapshot _seq capture |
+| `adapter/grpc/translators/search.py` | Modified | Extracts V2 iterator parameters + guarantee_timestamp |
+| `adapter/grpc/translators/result.py` | Modified | Sets search_iterator_v2_results field |
 
-无需新增文件。服务端无状态（snapshot_seq 由客户端通过 guarantee_timestamp 回传）。
-
----
-
-## 6. 边界条件
-
-| 场景 | 处理 |
-|------|------|
-| probe 请求（batch_size=1） | 正常搜索 top_k=2，过滤后返回 1 条 |
-| 首次请求（无 last_bound） | 不过滤，正常返回 top batch_size；捕获 _seq 作为快照 |
-| 结果为空 | 返回空结果 + token + last_bound=0，pymilvus 终止 |
-| over-fetch 后仍不足 batch_size | 返回实际数量，不重试 |
-| 同距离大量记录 | 部分遗漏，与 Milvus 行为一致 |
-| nq > 1 | 拒绝，返回错误（V2 仅支持单向量） |
-| 与 groupBy / offset 组合 | 拒绝，返回错误 |
-| 迭代过程中 insert | 新记录 `_seq > snapshot_seq`，被 seq_mask 过滤，不可见 |
-| 迭代过程中 delete | 删除操作 `_seq > snapshot_seq`，被忽略，已返回记录不受影响 |
+No new files needed. The server is stateless (snapshot_seq is passed back by the client via guarantee_timestamp).
 
 ---
 
-## 7. 测试计划
+## 6. Edge Cases
 
-| 测试 | 内容 |
-|------|------|
-| **单测：last_bound 过滤** | 验证 distance ≤ last_bound 的结果被正确过滤 |
-| **单测：snapshot_seq 过滤** | 验证 _seq > snapshot_seq 的记录不可见 |
-| **单测：距离转换** | IP metric 的内外距离转换正确性 |
-| **集成：pymilvus search_iterator** | 完整迭代流程，验证无重复、结果按距离递增 |
-| **集成：不同 batch_size** | 1, 10, 100, 大于总数 |
-| **集成：带 filter** | 标量过滤 + 迭代器 |
-| **集成：不同 metric** | COSINE / L2 / IP |
-| **集成：limit 参数** | pymilvus limit < 总数 |
-| **集成：迭代中插入** | 迭代过程中 insert 新记录，验证不影响迭代结果 |
-| **集成：稀疏场景** | 大部分结果被 filter 过滤，验证 over-fetch 表现 |
-| **回归：普通 search 不受影响** | 非迭代器请求走原路径 |
+| Scenario | Handling |
+|----------|----------|
+| Probe request (batch_size=1) | Normal search with top_k=2, returns 1 entry after filtering |
+| First request (no last_bound) | No filtering, returns top batch_size normally; captures _seq as snapshot |
+| Empty results | Returns empty results + token + last_bound=0, pymilvus terminates |
+| Still fewer than batch_size after over-fetch | Returns actual count, no retry |
+| Many records with equal distances | Partial omission, consistent with Milvus behavior |
+| nq > 1 | Rejected, returns error (V2 only supports single-vector) |
+| Combined with groupBy / offset | Rejected, returns error |
+| Insert during iteration | New records with `_seq > snapshot_seq` are filtered by seq_mask, invisible |
+| Delete during iteration | Delete operations with `_seq > snapshot_seq` are ignored, already-returned records are unaffected |
+
+---
+
+## 7. Test Plan
+
+| Test | Content |
+|------|---------|
+| **Unit: last_bound filtering** | Verify results with distance ≤ last_bound are correctly filtered |
+| **Unit: snapshot_seq filtering** | Verify records with _seq > snapshot_seq are invisible |
+| **Unit: distance conversion** | Verify correctness of internal/external distance conversion for IP metric |
+| **Integration: pymilvus search_iterator** | Complete iteration flow, verify no duplicates, results in ascending distance order |
+| **Integration: different batch_size** | 1, 10, 100, larger than total count |
+| **Integration: with filter** | Scalar filter + iterator |
+| **Integration: different metrics** | COSINE / L2 / IP |
+| **Integration: limit parameter** | pymilvus limit < total count |
+| **Integration: insert during iteration** | Insert new records during iteration, verify iteration results are unaffected |
+| **Integration: sparse scenario** | Most results filtered by filter, verify over-fetch behavior |
+| **Regression: normal search unaffected** | Non-iterator requests follow the original path |
 
 ---
 
 ## 8. Query Iterator
 
-Query Iterator 已在 Phase 16 通过 pymilvus 客户端侧实现工作正常（基于 offset 分页调用 Query RPC）。暂不需要服务端优化。
+Query Iterator already works correctly in Phase 16 through pymilvus's client-side implementation (based on offset pagination calling Query RPC). No server-side optimization is needed for now.
 
 ---
 
-## 9. 实现步骤
+## 9. Implementation Steps
 
-1. **Step 1**：`search/bitmap.py` — build_valid_mask() 增加 `snapshot_seq` 过滤（含单测）
-2. **Step 2**：`search/executor_indexed.py` — 增加 `last_bound` 过滤逻辑，透传 snapshot_seq（含单测）
-3. **Step 3**：`engine/collection.py` — search() 增加 `last_bound` + `snapshot_seq` 参数
-4. **Step 4**：`adapter/grpc/translators/search.py` — 提取 V2 参数 + guarantee_timestamp
-5. **Step 5**：`adapter/grpc/servicer.py` — Search() 增加 V2 分支，快照捕获，距离转换
-6. **Step 6**：`adapter/grpc/translators/result.py` — 设置 SearchIteratorV2Results + session_ts
-7. **Step 7**：集成测试（pymilvus search_iterator + 快照隔离 + 多场景）
+1. **Step 1**: `search/bitmap.py` — build_valid_mask() adds `snapshot_seq` filtering (with unit tests)
+2. **Step 2**: `search/executor_indexed.py` — Adds `last_bound` filtering logic, passes through snapshot_seq (with unit tests)
+3. **Step 3**: `engine/collection.py` — search() adds `last_bound` + `snapshot_seq` parameters
+4. **Step 4**: `adapter/grpc/translators/search.py` — Extracts V2 parameters + guarantee_timestamp
+5. **Step 5**: `adapter/grpc/servicer.py` — Search() adds V2 branch, snapshot capture, distance conversion
+6. **Step 6**: `adapter/grpc/translators/result.py` — Sets SearchIteratorV2Results + session_ts
+7. **Step 7**: Integration tests (pymilvus search_iterator + snapshot isolation + multiple scenarios)

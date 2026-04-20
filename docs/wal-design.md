@@ -1,174 +1,176 @@
-# 深入设计：WAL · Segment · 搜索架构
+# Deep Dive Design: WAL · Segment · Search Architecture
 
-## 1. 概述
+## 1. Overview
 
-WAL 是 MilvusLite 崩溃安全的核心保障。任何写入在进入 MemTable 之前，必须先持久化到 WAL。
-系统崩溃后，通过重放 WAL 可以恢复 MemTable 中未 flush 的数据。
+WAL is the core guarantee for MilvusLite's crash safety. Any write must be persisted to WAL before entering the MemTable.
+After a system crash, replaying the WAL can recover data in the MemTable that hasn't been flushed.
 
-**设计目标**：
-- **持久性**：进程崩溃后数据不丢失（OS 级崩溃见 §8 fsync 讨论）
-- **低写放大**：Arrow IPC 二进制格式，避免文本编码对向量的 3x 膨胀
-- **简单可靠**：只追加写入，不修改已写入内容，文件整个删除
-- **快速恢复**：顺序读取，Arrow 零拷贝反序列化
+**Design Goals**:
+- **Durability**: No data loss after process crash (see §8 for OS-level crash fsync discussion)
+- **Low Write Amplification**: Arrow IPC binary format, avoiding the 3x bloat of text encoding for vectors
+- **Simple and Reliable**: Append-only writes, never modify already-written content, delete entire files
+- **Fast Recovery**: Sequential reads, Arrow zero-copy deserialization
 
 ---
 
-## 2. Arrow IPC Streaming 格式
+## 2. Arrow IPC Streaming Format
 
-### 2.1 为什么选 Arrow IPC
+### 2.1 Why Arrow IPC
 
 | | JSONL | Arrow IPC Streaming |
 |--|-------|---------------------|
-| 向量编码 | 文本 `[0.1, 0.2, ...]` ≈ 3x 膨胀 | 二进制直写，1x |
-| 解析开销 | JSON parse + float convert | 零拷贝 mmap / 直接反序列化 |
-| Schema 校验 | 无（运行时才发现类型错误） | 文件头自带 Schema，读取时自动校验 |
-| 批量 IO | 每条记录一行，N 次 IO | 一个 RecordBatch = 一次 IO |
-| 部分写入恢复 | 可按行截断 | 需按 RecordBatch 边界截断（见 §9） |
+| Vector encoding | Text `[0.1, 0.2, ...]` ≈ 3x bloat | Binary direct write, 1x |
+| Parse overhead | JSON parse + float convert | Zero-copy mmap / direct deserialization |
+| Schema validation | None (type errors discovered only at runtime) | Schema embedded in file header, auto-validated on read |
+| Batch IO | One line per record, N IO ops | One RecordBatch = one IO op |
+| Partial write recovery | Can truncate by line | Must truncate at RecordBatch boundary (see §9) |
 
-### 2.2 文件内部结构
+### 2.2 Internal File Structure
 
 ```
-Arrow IPC Streaming 文件布局：
+Arrow IPC Streaming file layout:
 
 ┌─────────────────────────────────┐
-│  Schema Message                 │  ← 文件创建时写入（new_stream）
-│  (字段名/类型/元数据)              │
+│  Schema Message                 │  ← Written at file creation (new_stream)
+│  (field names/types/metadata)   │
 ├─────────────────────────────────┤
-│  RecordBatch Message #1         │  ← 第 1 次 write_batch
+│  RecordBatch Message #1         │  ← 1st write_batch
 │  (metadata + body)              │
 ├─────────────────────────────────┤
-│  RecordBatch Message #2         │  ← 第 2 次 write_batch
+│  RecordBatch Message #2         │  ← 2nd write_batch
 │  (metadata + body)              │
 ├─────────────────────────────────┤
 │  ...                            │
 ├─────────────────────────────────┤
-│  RecordBatch Message #N         │  ← 第 N 次 write_batch
+│  RecordBatch Message #N         │  ← Nth write_batch
 ├─────────────────────────────────┤
-│  EOS (End-of-Stream) Marker     │  ← close() 时写入
+│  EOS (End-of-Stream) Marker     │  ← Written at close()
 │  (4 bytes: 0x00000000)          │
 └─────────────────────────────────┘
 ```
 
-- **Schema Message**：包含完整的 Arrow Schema（字段名、类型、nullable、metadata）
-- **RecordBatch Message**：包含一个 batch 的所有列数据，二进制紧凑排列
-- **EOS Marker**：4 字节全零，标记流的正常结束
-- **无 Footer**：与 Arrow IPC File 格式不同，Streaming 格式没有 Footer，不支持随机访问
+- **Schema Message**: Contains the complete Arrow Schema (field names, types, nullable, metadata)
+- **RecordBatch Message**: Contains all column data for one batch, compactly arranged in binary
+- **EOS Marker**: 4 bytes of zeros, marking normal end of stream
+- **No Footer**: Unlike Arrow IPC File format, Streaming format has no Footer and does not support random access
 
-### 2.3 PyArrow 核心 API
+### 2.3 PyArrow Core API
 
 ```python
 import pyarrow as pa
 
-# ── 写入 ──
-sink = pa.OSFile(path, "wb")                           # 打开文件
-writer = pa.ipc.new_stream(sink, schema)               # 写 Schema Message
-writer.write_batch(record_batch)                       # 追加 RecordBatch
-writer.close()                                         # 写 EOS + 关闭文件
+# ── Write ──
+sink = pa.OSFile(path, "wb")                           # Open file
+writer = pa.ipc.new_stream(sink, schema)               # Write Schema Message
+writer.write_batch(record_batch)                       # Append RecordBatch
+writer.close()                                         # Write EOS + close file
 
-# ── 读取 ──
-source = pa.OSFile(path, "rb")                         # 打开文件
-reader = pa.ipc.open_stream(source)                    # 读 Schema Message
-for batch in reader:                                   # 逐个读 RecordBatch
+# ── Read ──
+source = pa.OSFile(path, "rb")                         # Open file
+reader = pa.ipc.open_stream(source)                    # Read Schema Message
+for batch in reader:                                   # Read RecordBatch one by one
     process(batch)
-# 或一次性读取：
-table = reader.read_all()                              # 所有 batch 合并为 Table
+# Or read all at once:
+table = reader.read_all()                              # Merge all batches into Table
 ```
 
 ---
 
-## 3. 双文件结构
+## 3. Dual-File Structure
 
-### 3.1 文件分离
+### 3.1 File Separation
 
 ```
 wal/
-  wal_data_000001.arrow     # Insert/Update 操作 → 对应 MemTable.insert_buf
-  wal_delta_000001.arrow    # Delete 操作        → 对应 MemTable.delete_buf
+  wal_data_000001.arrow     # Insert/Update operations → corresponds to MemTable.insert_buf
+  wal_delta_000001.arrow    # Delete operations        → corresponds to MemTable.delete_buf
 ```
 
-**为什么分两个文件而不是一个？**
+**Why two separate files instead of one?**
 
-1. **Schema 不同**：data 文件含所有用户字段 + `$meta` + `_seq` + `_partition`；delta 文件只含主键 + `_seq` + `_partition`
-2. **延迟初始化**：如果一轮只有 insert 没有 delete，delta 文件不会被创建（反之亦然）
-3. **与 MemTable 对称**：MemTable 内部也是 insert_buf / delete_buf 两个独立缓冲区，恢复时一一对应
-4. **与 Parquet 对称**：flush 后产出 data Parquet 和 delta Parquet 两种文件
+1. **Different Schemas**: Data file contains all user fields + `$meta` + `_seq` + `_partition`; delta file only contains primary key + `_seq` + `_partition`
+2. **Lazy Initialization**: If a round only has inserts without deletes, the delta file is never created (and vice versa)
+3. **Symmetric with MemTable**: MemTable also has two independent buffers internally (insert_buf / delete_buf), corresponding one-to-one during recovery
+4. **Symmetric with Parquet**: Flush produces two types of files: data Parquet and delta Parquet
 
 ### 3.2 WAL Schema
 
-**wal_data_schema**（插入/更新）：
+**wal_data_schema** (insert/update):
 
 ```
-字段           类型                   说明
+Field          Type                   Description
 ────           ────                   ────
-_seq           uint64                 每条记录独立分配的序列号
-_partition     utf8                   目标 Partition 名（恢复时路由用）
-{pk_field}     (由 Schema 决定)       主键
-{vector_field} list<float32>          向量
-{field_1}      ...                    用户自定义字段
+_seq           uint64                 Independently assigned sequence number per record
+_partition     utf8                   Target Partition name (used for routing during recovery)
+{pk_field}     (determined by Schema) Primary key
+{vector_field} list<float32>          Vector
+{field_1}      ...                    User-defined fields
 {field_N}      ...
-$meta          utf8 (nullable)        动态字段 JSON 序列化
+$meta          utf8 (nullable)        Dynamic fields JSON serialization
 ```
 
-**wal_delta_schema**（删除）：
+**wal_delta_schema** (delete):
 
 ```
-字段           类型                   说明
+Field          Type                   Description
 ────           ────                   ────
-{pk_field}     (由 Schema 决定)       主键
-_seq           uint64                 批量删除共享同一个 _seq
-_partition     utf8                   目标 Partition（"_all" 表示跨所有 Partition）
+{pk_field}     (determined by Schema) Primary key
+_seq           uint64                 Batch delete shares a single _seq
+_partition     utf8                   Target Partition ("_all" means across all Partitions)
 ```
 
-**注意**：WAL schema 比 Parquet schema 多一个 `_partition` 列。因为 WAL 是 Collection 级共享的，
-需要记录每条数据属于哪个 Partition，恢复时才能正确路由到 MemTable。Parquet 文件已经按 Partition 目录隔离，所以不需要。
+**Note**: WAL schema has one extra `_partition` column compared to Parquet schema. Because WAL is shared at the Collection level,
+it needs to record which Partition each piece of data belongs to, so it can be correctly routed to the MemTable during recovery. Parquet files are already isolated by Partition directory, so this is not needed.
 
 ---
 
-## 4. WAL 内部状态模型
+## 4. WAL Internal State Model
 
-### 4.1 实例属性
+### 4.1 Instance Attributes
 
 ```python
 class WAL:
-    wal_dir: str                           # WAL 目录路径
-    _wal_data_schema: pa.Schema            # data 文件的 Arrow Schema
-    _wal_delta_schema: pa.Schema           # delta 文件的 Arrow Schema
-    _number: int                           # 本轮 WAL 编号 N
-    _data_writer: Optional[pa.ipc.RecordBatchStreamWriter]   # 延迟初始化
-    _delta_writer: Optional[pa.ipc.RecordBatchStreamWriter]  # 延迟初始化
-    _data_sink: Optional[pa.OSFile]        # data 文件句柄
-    _delta_sink: Optional[pa.OSFile]       # delta 文件句柄
-    _closed: bool                          # 是否已关闭
+    wal_dir: str                           # WAL directory path
+    _wal_data_schema: pa.Schema            # Arrow Schema for data file
+    _wal_delta_schema: pa.Schema           # Arrow Schema for delta file
+    _number: int                           # Current round WAL number N
+    _data_writer: Optional[pa.ipc.RecordBatchStreamWriter]   # Lazily initialized
+    _delta_writer: Optional[pa.ipc.RecordBatchStreamWriter]  # Lazily initialized
+    _data_sink: Optional[pa.OSFile]        # Data file handle
+    _delta_sink: Optional[pa.OSFile]       # Delta file handle
+    _closed: bool                          # Whether already closed
 ```
 
-### 4.2 状态转换
+### 4.2 State Transitions
 
-data_writer 和 delta_writer 是**独立**的，各自有三个状态：
+data_writer and delta_writer are **independent**, each having three states:
 
 ```
-         首次 write_insert()            close_and_delete()
+         First write_insert()             close_and_delete()
   None ──────────────────────→ Active ──────────────────────→ Closed
-  (未创建文件)                  (文件已创建, writer 可写)       (文件已关闭+删除)
+  (file not created)           (file created, writer writable) (file closed+deleted)
 ```
 
-组合状态矩阵：
+Combined state matrix:
 
 ```
                         delta_writer
                   None      Active     Closed
             ┌──────────┬──────────┬──────────┐
-    None    │ 初始态    │ 仅 delete │    -     │
-data_       ├──────────┼──────────┼──────────┤
-writer Active│ 仅 insert │ 两者都有  │    -     │
+    None    │ Initial   │ Delete   │    -     │
+data_       │  state    │  only    │          │
+writer      ├──────────┼──────────┼──────────┤
+    Active  │ Insert   │  Both    │    -     │
+            │  only    │  active  │          │
             ├──────────┼──────────┼──────────┤
-    Closed  │    -     │    -     │ 已关闭    │
+    Closed  │    -     │    -     │ Closed   │
             └──────────┴──────────┴──────────┘
 
-注：close_and_delete() 一次性将两个 writer 都转为 Closed
-    不存在 data=Active + delta=Closed 的中间状态
+Note: close_and_delete() transitions both writers to Closed at once
+    There is no intermediate state where data=Active + delta=Closed
 ```
 
-### 4.3 文件路径
+### 4.3 File Paths
 
 ```python
 @property
@@ -186,7 +188,7 @@ def delta_path(self) -> Optional[str]:
 
 ---
 
-## 5. 核心方法实现
+## 5. Core Method Implementations
 
 ### 5.1 `__init__`
 
@@ -205,42 +207,42 @@ def __init__(self, wal_dir, wal_data_schema, wal_delta_schema, wal_number):
     os.makedirs(wal_dir, exist_ok=True)
 ```
 
-- **不创建文件**：延迟到首次写入
-- **创建目录**：确保 wal_dir 存在
+- **Does not create files**: Deferred to first write
+- **Creates directory**: Ensures wal_dir exists
 
 ### 5.2 `write_insert`
 
 ```python
 def write_insert(self, record_batch: pa.RecordBatch) -> None:
     """
-    流程：
-    1. 检查状态：已关闭则报错
-    2. 延迟初始化：首次调用时创建文件 + writer
-    3. 写入 RecordBatch
+    Flow:
+    1. Check state: raise error if already closed
+    2. Lazy initialization: create file + writer on first call
+    3. Write RecordBatch
     """
     assert not self._closed, "WAL already closed"
 
-    # ── 延迟初始化 ──
+    # ── Lazy initialization ──
     if self._data_writer is None:
         path = os.path.join(self.wal_dir, f"wal_data_{self._number:06d}.arrow")
         self._data_sink = pa.OSFile(path, "wb")
         self._data_writer = pa.ipc.new_stream(self._data_sink, self._wal_data_schema)
 
-    # ── 写入 ──
+    # ── Write ──
     self._data_writer.write_batch(record_batch)
 ```
 
-**关键设计点**：
+**Key Design Points**:
 
-- **不做 Schema 校验**：`write_batch()` 内部已校验，schema 不匹配会抛 `ArrowInvalid`
-- **不 flush/fsync**：依赖 OS buffer cache（见 §8 讨论）
-- **一个 RecordBatch 对应一次 insert() 调用**：批量 insert N 条 = 1 个含 N 行的 RecordBatch
+- **No Schema validation**: `write_batch()` already validates internally, schema mismatch raises `ArrowInvalid`
+- **No flush/fsync**: Relies on OS buffer cache (see §8 discussion)
+- **One RecordBatch corresponds to one insert() call**: Batch insert of N records = 1 RecordBatch with N rows
 
 ### 5.3 `write_delete`
 
 ```python
 def write_delete(self, record_batch: pa.RecordBatch) -> None:
-    """与 write_insert 对称，写入 wal_delta 文件。"""
+    """Symmetric with write_insert, writes to wal_delta file."""
     assert not self._closed, "WAL already closed"
 
     if self._delta_writer is None:
@@ -256,26 +258,26 @@ def write_delete(self, record_batch: pa.RecordBatch) -> None:
 ```python
 def close_and_delete(self) -> None:
     """
-    调用时机：flush 成功后。
-    流程：
-    1. 关闭 data_writer（写 EOS + 关闭文件句柄）
-    2. 关闭 delta_writer（写 EOS + 关闭文件句柄）
-    3. 删除 data 文件
-    4. 删除 delta 文件
-    5. 标记为 closed
+    Invocation timing: After flush succeeds.
+    Flow:
+    1. Close data_writer (write EOS + close file handle)
+    2. Close delta_writer (write EOS + close file handle)
+    3. Delete data file
+    4. Delete delta file
+    5. Mark as closed
     """
     if self._closed:
-        return  # 幂等
+        return  # Idempotent
 
-    # ── 关闭 writer ──
+    # ── Close writers ──
     if self._data_writer is not None:
-        self._data_writer.close()      # 写 EOS marker
-        self._data_sink.close()        # 关闭文件句柄
+        self._data_writer.close()      # Write EOS marker
+        self._data_sink.close()        # Close file handle
     if self._delta_writer is not None:
         self._delta_writer.close()
         self._delta_sink.close()
 
-    # ── 删除文件 ──
+    # ── Delete files ──
     data_path = os.path.join(self.wal_dir, f"wal_data_{self._number:06d}.arrow")
     delta_path = os.path.join(self.wal_dir, f"wal_delta_{self._number:06d}.arrow")
 
@@ -287,9 +289,9 @@ def close_and_delete(self) -> None:
     self._closed = True
 ```
 
-**幂等性**：多次调用 `close_and_delete()` 安全无副作用。
+**Idempotency**: Multiple calls to `close_and_delete()` are safe with no side effects.
 
-**部分成功**：如果 data 文件删除成功但 delta 文件删除失败（极端情况），下次 recovery 时会发现孤儿 delta 文件，重放它不会造成数据不一致（_seq 去重保证）。
+**Partial success**: If the data file deletion succeeds but the delta file deletion fails (extreme case), recovery next time will find an orphan delta file; replaying it won't cause data inconsistency (_seq deduplication guarantee).
 
 ### 5.5 `find_wal_files`
 
@@ -297,9 +299,9 @@ def close_and_delete(self) -> None:
 @staticmethod
 def find_wal_files(wal_dir: str) -> List[int]:
     """
-    扫描 wal_dir，找出所有存在的 WAL 编号。
-    通过匹配 wal_data_NNNNNN.arrow 和 wal_delta_NNNNNN.arrow 文件名提取编号。
-    返回去重排序的编号列表。
+    Scan wal_dir, find all existing WAL numbers.
+    Extract numbers by matching wal_data_NNNNNN.arrow and wal_delta_NNNNNN.arrow filenames.
+    Return a deduplicated, sorted list of numbers.
     """
     if not os.path.exists(wal_dir):
         return []
@@ -314,12 +316,12 @@ def find_wal_files(wal_dir: str) -> List[int]:
     return sorted(numbers)
 ```
 
-**为什么要匹配两种文件名？** 因为 data 和 delta 文件独立存在：
-- 可能只有 wal_data（只做了 insert，没有 delete）
-- 可能只有 wal_delta（只做了 delete，没有 insert）
-- 也可能两者都有
+**Why match both file name patterns?** Because data and delta files exist independently:
+- There may be only wal_data (only inserts were done, no deletes)
+- There may be only wal_delta (only deletes were done, no inserts)
+- Or both may exist
 
-只要任一文件存在，该编号就需要被恢复。
+As long as either file exists, that number needs to be recovered.
 
 ### 5.6 `recover`
 
@@ -327,13 +329,13 @@ def find_wal_files(wal_dir: str) -> List[int]:
 @staticmethod
 def recover(wal_dir, wal_number, wal_data_schema, wal_delta_schema):
     """
-    读取指定编号的 WAL 文件，返回 (data_batches, delta_batches)。
+    Read WAL files of the specified number, return (data_batches, delta_batches).
 
-    流程：
-    1. 构造文件路径
-    2. 分别读取 data 和 delta 文件
-    3. 每个文件：存在 → 读取所有 RecordBatch；不存在 → 返回空列表
-    4. 截断的 RecordBatch → 丢弃，返回截断前的完整 batch（见 §9 错误处理）
+    Flow:
+    1. Construct file paths
+    2. Read data and delta files separately
+    3. For each file: exists → read all RecordBatches; doesn't exist → return empty list
+    4. Truncated RecordBatch → discard, return complete batches before truncation (see §9 error handling)
     """
     data_path = os.path.join(wal_dir, f"wal_data_{wal_number:06d}.arrow")
     delta_path = os.path.join(wal_dir, f"wal_delta_{wal_number:06d}.arrow")
@@ -346,11 +348,11 @@ def recover(wal_dir, wal_number, wal_data_schema, wal_delta_schema):
 
 def _read_wal_file(path: str) -> List[pa.RecordBatch]:
     """
-    读取单个 WAL 文件，返回 RecordBatch 列表。
-    处理三种情况：
-    - 文件不存在 → []
-    - 文件完整 → 所有 batch
-    - 文件截断 → 截断前的完整 batch
+    Read a single WAL file, return a list of RecordBatches.
+    Handles three cases:
+    - File doesn't exist → []
+    - File is complete → all batches
+    - File is truncated → complete batches before truncation
     """
     if not os.path.exists(path):
         return []
@@ -362,82 +364,84 @@ def _read_wal_file(path: str) -> List[pa.RecordBatch]:
         for batch in reader:
             batches.append(batch)
     except pa.ArrowInvalid:
-        # 文件截断：Schema 之后的某个 RecordBatch 不完整
-        # 已读取的 batch 是完整的，丢弃不完整的部分
+        # File truncated: some RecordBatch after Schema is incomplete
+        # Already-read batches are complete, discard the incomplete part
         pass
     except Exception:
-        # Schema 都读不出来 → 文件严重损坏
-        # 返回空，让上层决定如何处理
-        # （不抛 WALCorruptedError，因为 recovery 应尽量恢复可恢复的部分）
+        # Can't even read the Schema → file is severely corrupted
+        # Return empty, let upper layer decide how to handle
+        # (Don't raise WALCorruptedError, because recovery should try to recover as much as possible)
         pass
 
     return batches
 ```
 
-**设计决策——截断处理**：
+**Design Decision -- Truncation Handling**:
 
-Arrow IPC Streaming 的特性：`pa.ipc.open_stream()` 成功 → Schema 完整。之后逐个读 RecordBatch，
-某个 batch 读到一半文件结束 → 抛 `ArrowInvalid`。已经成功读取的 batch 都是完整的。
+Arrow IPC Streaming characteristic: `pa.ipc.open_stream()` succeeds → Schema is complete. Then reading RecordBatches one by one,
+if a batch is half-read when the file ends → raises `ArrowInvalid`. Already successfully read batches are all complete.
 
-我们选择**尽量恢复**：
-- 能读多少读多少，截断的部分丢弃
-- 这比 "文件有任何损坏就全部丢弃" 更好
-- 丢弃的是最后一次 write_batch 的数据（崩溃时正在写入的那个 batch）
+We choose **best-effort recovery**:
+- Read as much as possible, discard the truncated part
+- This is better than "discard everything if the file has any corruption"
+- What's discarded is the data from the last write_batch call (the batch being written when the crash occurred)
 
 ---
 
-## 6. WAL 编号与生命周期管理
+## 6. WAL Numbering and Lifecycle Management
 
-### 6.1 编号分配规则
-
-```
-WAL 编号 N 是单调递增的整数，从 1 开始。
-每次 flush 后 N += 1。
-
-来源：Manifest.active_wal_number
-  - Collection 首次创建：N = 1
-  - 每次 flush：Manifest 更新 active_wal_number = N + 1
-  - Recovery：从 Manifest 读取，结合 wal/ 目录扫描结果，取 max
-```
-
-### 6.2 完整生命周期
+### 6.1 Numbering Rules
 
 ```
-                   Collection 初始化
+WAL number N is a monotonically increasing integer, starting from 1.
+After each flush, N += 1.
+
+Source: Manifest.active_wal_number
+  - Collection first created: N = 1
+  - Each flush: Manifest updates active_wal_number = N + 1
+  - Recovery: Read from Manifest, combined with wal/ directory scan results, take max
+```
+
+### 6.2 Complete Lifecycle
+
+```
+                   Collection initialization
                          │
                          ▼
               ┌─────────────────────┐
               │  WAL(wal_dir, ...,  │
               │       number=N)     │
-              │  状态: 两个 writer   │
-              │        都是 None    │
+              │  State: both        │
+              │  writers are None   │
               └─────────┬───────────┘
                         │
          ┌──────────────┼──────────────┐
          ▼              │              ▼
    write_insert()       │        write_delete()
-   首次: 创建文件+writer  │        首次: 创建文件+writer
-   后续: 追加 batch      │        后续: 追加 batch
+   First: create        │        First: create
+     file+writer        │          file+writer
+   Later: append batch  │        Later: append batch
          │              │              │
          └──────────────┼──────────────┘
                         │
-                  MemTable 满了
+                  MemTable is full
                         │
                         ▼
               ┌─────────────────────┐
-              │  Flush 触发          │
-              │  1. 冻结当前 WAL(N)  │
-              │  2. 创建新 WAL(N+1)  │
+              │  Flush triggered     │
+              │  1. Freeze WAL(N)   │
+              │  2. Create WAL(N+1) │
               └─────────┬───────────┘
                         │
         ┌───────────────┤
         ▼               ▼
-   新 WAL(N+1)     冻结的 WAL(N) 进入 flush 管线
-   继续接收写入          │
-                        ▼
+   New WAL(N+1)     Frozen WAL(N) enters flush pipeline
+   Continues to          │
+   accept writes         ▼
               ┌─────────────────────┐
-              │  Flush 管线          │
-              │  Step 1-4: 写 Parquet│
+              │  Flush pipeline      │
+              │  Step 1-4: Write     │
+              │    Parquet           │
               │  Step 5: Manifest   │
               │    active_wal=N+1   │
               │    manifest.save()  │
@@ -447,71 +451,71 @@ WAL 编号 N 是单调递增的整数，从 1 开始。
               └─────────────────────┘
 ```
 
-### 6.3 与 Manifest 的同步
+### 6.3 Synchronization with Manifest
 
 ```
-时间线        WAL 状态                    Manifest.active_wal_number
-──────        ────────                    ──────────────────────────
-T0            WAL(1) 创建                 1
-T1            WAL(1) 写入中...            1
-T2            WAL(1) 冻结, WAL(2) 创建    1  ← 还没更新
-T3            Flush: Parquet 写入完成     1
-T4            Flush: Manifest 更新        2  ← 此刻更新
-T5            WAL(1) 删除                 2
-T6            WAL(2) 写入中...            2
+Timeline      WAL State                       Manifest.active_wal_number
+──────        ────────                         ──────────────────────────
+T0            WAL(1) created                   1
+T1            WAL(1) writing...                1
+T2            WAL(1) frozen, WAL(2) created    1  ← Not yet updated
+T3            Flush: Parquet write complete     1
+T4            Flush: Manifest updated           2  ← Updated at this moment
+T5            WAL(1) deleted                    2
+T6            WAL(2) writing...                 2
 ```
 
-**关键不变量**：Manifest 更新（T4）先于 WAL 删除（T5）。
-这保证了：如果在 T4 和 T5 之间崩溃，WAL(1) 残留在磁盘上，
-但 Manifest 已指向新数据文件 → 重放 WAL(1) 产生的重复数据通过 _seq 去重消除。
+**Key Invariant**: Manifest update (T4) precedes WAL deletion (T5).
+This guarantees that: if a crash occurs between T4 and T5, WAL(1) remains on disk,
+but Manifest already points to the new data files → duplicate data produced by replaying WAL(1) is eliminated through _seq deduplication.
 
 ---
 
-## 7. 崩溃恢复详解
+## 7. Crash Recovery Details
 
-### 7.1 恢复时的 WAL 状态分析
+### 7.1 WAL State Analysis During Recovery
 
-Recovery 启动时，可能在 wal/ 目录下发现以下情况：
+At Recovery startup, the following situations may be found in the wal/ directory:
 
 ```
-场景 A: 无 WAL 文件
-  原因：上次正常关闭，或 flush 完成后正常退出
-  处理：无需重放，直接启动
+Scenario A: No WAL files
+  Cause: Last shutdown was normal, or normal exit after flush completed
+  Handling: No replay needed, start directly
 
-场景 B: 只有 WAL(N)，N == Manifest.active_wal_number
-  原因：正常写入过程中崩溃（flush 未触发或未完成 manifest 更新）
-  处理：重放 WAL(N) → MemTable
+Scenario B: Only WAL(N), N == Manifest.active_wal_number
+  Cause: Crash during normal writing (flush not triggered or manifest update not completed)
+  Handling: Replay WAL(N) → MemTable
 
-场景 C: WAL(N) + WAL(N+1)，Manifest.active_wal_number == N+1
-  原因：Flush 完成了 Manifest 更新（active_wal=N+1），但 WAL(N) 未删除
-  处理：重放 WAL(N)（数据已在 Parquet 中，_seq 去重消除重复）
-        重放 WAL(N+1)（新写入的数据）
+Scenario C: WAL(N) + WAL(N+1), Manifest.active_wal_number == N+1
+  Cause: Flush completed Manifest update (active_wal=N+1), but WAL(N) was not deleted
+  Handling: Replay WAL(N) (data already in Parquet, _seq deduplication eliminates duplicates)
+           Replay WAL(N+1) (newly written data)
 
-场景 D: WAL(N) + WAL(N+1)，Manifest.active_wal_number == N
-  原因：Flush 进行中，新 WAL 已创建但 Manifest 未更新就崩溃了
-  处理：重放 WAL(N)（完整数据）
-        重放 WAL(N+1)（新写入的数据）
-        孤儿 Parquet 由 recovery 清理
+Scenario D: WAL(N) + WAL(N+1), Manifest.active_wal_number == N
+  Cause: Flush in progress, new WAL already created but Manifest not updated before crash
+  Handling: Replay WAL(N) (complete data)
+           Replay WAL(N+1) (newly written data)
+           Orphan Parquet files cleaned up by recovery
 
-场景 E: 只有 WAL 的 data 文件或 delta 文件（不成对）
-  原因：该轮只做了 insert 或只做了 delete
-  处理：正常，缺失的文件视为空（_read_wal_file 返回 []）
+Scenario E: Only data file or delta file of WAL (not paired)
+  Cause: That round only had inserts or only had deletes
+  Handling: Normal, missing file treated as empty (_read_wal_file returns [])
 ```
 
-### 7.2 Recovery 中 WAL 的处理流程
+### 7.2 WAL Processing Flow in Recovery
 
 ```python
 def execute_recovery(data_dir, schema, manifest):
     wal_dir = os.path.join(data_dir, "wal")
     memtable = MemTable(schema)
 
-    # ── Step 1: 发现 WAL 文件 ──
+    # ── Step 1: Discover WAL files ──
     wal_numbers = WAL.find_wal_files(wal_dir)
     if not wal_numbers:
-        # 场景 A: 无需恢复
+        # Scenario A: No recovery needed
         return memtable, ...
 
-    # ── Step 2: 按编号升序重放所有 WAL ──
+    # ── Step 2: Replay all WALs in ascending order by number ──
     max_seq = manifest.current_seq
     for n in sorted(wal_numbers):
         data_batches, delta_batches = WAL.recover(
@@ -535,34 +539,34 @@ def execute_recovery(data_dir, schema, manifest):
                 memtable.delete(pk, seq, partition)
                 max_seq = max(max_seq, seq)
 
-    # ── Step 3: 不删除 WAL 文件（见 §7.3） ──
+    # ── Step 3: Do not delete WAL files (see §7.3) ──
     next_seq = max_seq + 1
     return memtable, delta_log, next_seq
 ```
 
-### 7.3 恢复后的 WAL 文件处理策略
+### 7.3 WAL File Handling Strategy After Recovery
 
-**核心问题**：Recovery 把 WAL 重放到 MemTable 后，旧 WAL 文件要不要立刻删除？
+**Core Question**: After Recovery replays WAL to MemTable, should old WAL files be immediately deleted?
 
-**方案对比**：
+**Approach Comparison**:
 
-| 方案 | 做法 | 优点 | 缺点 |
-|------|------|------|------|
-| A. 立刻删除 | 重放后 `os.remove()` | 磁盘干净 | 如果恢复后再次崩溃（flush 前），数据永久丢失 |
-| B. 保留不删 | 不动，等 flush 时清理 | 二次崩溃安全 | 需要处理"多轮 WAL + 当前 WAL"的清理 |
+| Approach | Method | Pros | Cons |
+|----------|--------|------|------|
+| A. Delete immediately | `os.remove()` after replay | Clean disk | If crash again after recovery (before flush), data permanently lost |
+| B. Retain, don't delete | Leave as-is, clean during flush | Safe against second crash | Need to handle cleanup of "multiple WAL rounds + current WAL" |
 
-**选择方案 B**：保留旧 WAL 文件，由 flush 统一清理。
+**Choose Approach B**: Retain old WAL files, clean up uniformly during flush.
 
-**实现**：
-- Recovery 后，Collection 知道 wal/ 目录下可能残留旧 WAL 文件
-- Collection 创建新 WAL（编号 = max(所有已有编号) + 1）
-- 当 MemTable flush 时，flush 管线在 Step 6 不仅删除 frozen WAL，
-  还清理所有编号 < 当前 active_wal_number 的旧 WAL 文件
+**Implementation**:
+- After Recovery, Collection knows that old WAL files may remain in the wal/ directory
+- Collection creates a new WAL (number = max(all existing numbers) + 1)
+- When MemTable flushes, the flush pipeline in Step 6 not only deletes the frozen WAL,
+  but also cleans up all old WAL files with numbers < current active_wal_number
 
 ```python
-# flush.py Step 6 增强
+# flush.py Step 6 enhanced
 def _cleanup_wal_files(wal_dir: str, max_number_to_delete: int) -> None:
-    """删除所有编号 <= max_number_to_delete 的 WAL 文件。"""
+    """Delete all WAL files with number <= max_number_to_delete."""
     for n in WAL.find_wal_files(wal_dir):
         if n <= max_number_to_delete:
             data_path = os.path.join(wal_dir, f"wal_data_{n:06d}.arrow")
@@ -573,12 +577,12 @@ def _cleanup_wal_files(wal_dir: str, max_number_to_delete: int) -> None:
                 os.remove(delta_path)
 ```
 
-### 7.4 Recovery 后的 WAL 编号
+### 7.4 WAL Number After Recovery
 
 ```python
-# 恢复后新 WAL 编号的确定
-found_numbers = WAL.find_wal_files(wal_dir)       # 磁盘上残留的
-manifest_number = manifest.active_wal_number       # Manifest 记录的
+# Determining the new WAL number after recovery
+found_numbers = WAL.find_wal_files(wal_dir)       # Remaining on disk
+manifest_number = manifest.active_wal_number       # Recorded in Manifest
 
 new_wal_number = max(
     manifest_number,
@@ -586,61 +590,61 @@ new_wal_number = max(
 )
 ```
 
-**这保证了新 WAL 编号不会与任何已存在或曾经存在的 WAL 文件冲突。**
+**This ensures the new WAL number will not conflict with any existing or previously existing WAL files.**
 
 ---
 
-## 8. fsync 与持久性
+## 8. fsync and Durability
 
-### 8.1 崩溃类型
+### 8.1 Crash Types
 
-| 崩溃类型 | 示例 | OS buffer cache | 不开 fsync 的数据丢失风险 |
+| Crash Type | Example | OS buffer cache | Data loss risk without fsync |
 |---------|------|----------------|------------|
-| 进程崩溃（同 OS 内立即接管） | SIGKILL, 异常退出 | 保留（仍由 OS 持有） | 低——但仍有 |
-| 容器/进程被 kill 后立刻被新进程接管 | OOM-kill → restart | 仍在 cache，新进程 read 命中 | **高**——见 §8.2 反例 |
-| OS 崩溃 | 内核 panic, 断电 | 丢失 | 有 |
+| Process crash (immediately taken over within same OS) | SIGKILL, abnormal exit | Retained (still held by OS) | Low -- but still present |
+| Container/process killed then immediately taken over by new process | OOM-kill → restart | Still in cache, new process read hits | **High** -- see §8.2 counterexample |
+| OS crash | Kernel panic, power loss | Lost | Present |
 
-### 8.2 默认 `sync_mode="close"`：在 close 时 fsync 一次
+### 8.2 Default `sync_mode="close"`: fsync Once at Close
 
 ```python
 class WAL:
     def __init__(self, ..., sync_mode: str = "close"):
         """
         sync_mode:
-          "none"   - 完全不 fsync（仅供测试 / 性能基准）
-          "close"  - 默认。在 close_and_delete 前对 sink 做一次 os.fsync
-          "batch"  - 每次 write_batch 后 fsync（最强一致性，最慢）
+          "none"   - No fsync at all (for testing / performance benchmarks only)
+          "close"  - Default. One os.fsync on sink before close_and_delete
+          "batch"  - fsync after every write_batch (strongest consistency, slowest)
         """
 ```
 
-**为什么不是"none"作为默认**：
+**Why "none" is not the default**:
 
-考虑这个反例：
+Consider this counterexample:
 
 ```
-T0: WAL.write_insert(batch_X)   # batch X 进入 OS buffer cache，未刷盘
-T1: Collection.insert 返回成功，client 收到成功响应
-T2: 容器被 OOM-killed
-T3: 编排系统立刻拉起新容器，挂同一卷
-T4: 新进程 Collection.__init__ → recovery → 读 WAL
+T0: WAL.write_insert(batch_X)   # batch X enters OS buffer cache, not flushed to disk
+T1: Collection.insert returns success, client receives success response
+T2: Container OOM-killed
+T3: Orchestration system immediately starts new container, mounts same volume
+T4: New process Collection.__init__ → recovery → reads WAL
 ```
 
-在 T4 那一刻：
-- 老进程持有的 OS buffer cache 已经随老进程消失（容器隔离）
-- batch_X 还没刷到磁盘
-- 新进程 read 看到的是**没有 batch_X 的 WAL 文件**
-- 但 client 已经被告知 "成功"——**数据丢失，违反持久性承诺**
+At T4:
+- The OS buffer cache held by the old process has already disappeared with the old process (container isolation)
+- batch_X hasn't been flushed to disk yet
+- The new process reads a **WAL file without batch_X**
+- But the client was already told "success" -- **data lost, durability promise violated**
 
-`sync_mode="close"` 在 `close_and_delete` 前调一次 `os.fsync(sink.fileno())` 就能堵掉这个窗口：
-- WAL 在 flush 触发时被 close，close 前 fsync 把整个文件持久化
-- 频率 = flush 频率 = 每 `MEMTABLE_SIZE_LIMIT` 行一次，很稀疏，性能影响可忽略
-- 关键路径："WAL 切换 → Manifest 更新"这条 commit 路径上的耐久性补齐了
+`sync_mode="close"` calls `os.fsync(sink.fileno())` once before `close_and_delete` to plug this window:
+- WAL is closed when flush is triggered, fsync before close persists the entire file
+- Frequency = flush frequency = once per `MEMTABLE_SIZE_LIMIT` rows, very sparse, negligible performance impact
+- Critical path: durability on the "WAL switch → Manifest update" commit path is now ensured
 
-**`sync_mode="batch"` 的成本**：
+**Cost of `sync_mode="batch"`**:
 
-每次 `write_batch` 都 fsync。对于嵌入式向量库（vector 体积大）这个成本明显，但作为可选项保留给追求最强持久性的用户。**默认不开**。
+fsync on every `write_batch`. For an embedded vector database (vectors are large), this cost is significant, but kept as an option for users who want the strongest durability. **Not enabled by default**.
 
-### 8.3 实现细节
+### 8.3 Implementation Details
 
 ```python
 def write_insert(self, record_batch):
@@ -656,134 +660,134 @@ def close_and_delete(self):
         return
     try:
         if self._sync_mode in ("close", "batch") and self._data_writer is not None:
-            self._data_writer.close()                      # 写 EOS marker
-            os.fsync(self._data_sink.fileno())             # ← 强刷盘
+            self._data_writer.close()                      # Write EOS marker
+            os.fsync(self._data_sink.fileno())             # ← Force flush to disk
             self._data_sink.close()
-        # ... 同上 _delta_writer
+        # ... same for _delta_writer
     finally:
         self._closed = True
-        # ... 删文件
+        # ... delete files
 ```
 
-**注意**：fsync 必须在 `_data_writer.close()` 之后、`_data_sink.close()` 之前。先 close writer 把 EOS marker 写进 OS buffer，再 fsync 把整个文件含 EOS 持久化。
+**Note**: fsync must happen after `_data_writer.close()` and before `_data_sink.close()`. First close the writer to write the EOS marker into the OS buffer, then fsync to persist the entire file including EOS to disk.
 
 ---
 
-## 9. 错误处理
+## 9. Error Handling
 
-### 9.1 写入时的错误
+### 9.1 Errors During Write
 
-| 错误类型 | 触发场景 | 处理方式 |
+| Error Type | Trigger Scenario | Handling |
 |---------|---------|---------|
-| `ArrowInvalid` | RecordBatch schema 不匹配 | 直接抛出（调用方 bug，不应到达 WAL 层） |
-| `OSError` | 磁盘满、权限不足 | 直接抛出，Collection 层处理（写入失败，MemTable 不更新） |
-| `AssertionError` | 对已关闭的 WAL 写入 | 编程错误，不应发生 |
+| `ArrowInvalid` | RecordBatch schema mismatch | Raise directly (caller bug, should not reach WAL layer) |
+| `OSError` | Disk full, permission denied | Raise directly, Collection layer handles (write fails, MemTable not updated) |
+| `AssertionError` | Writing to an already closed WAL | Programming error, should not occur |
 
-**WAL 写入失败时的影响**：
+**Impact when WAL write fails**:
 
 ```
-Collection.insert() 流程：
-  1. validate + allocate _seq     ← 成功
-  2. build RecordBatch            ← 成功
-  3. WAL.write_insert(batch)      ← 失败！抛异常
-  4. MemTable.put(...)            ← 不会执行
+Collection.insert() flow:
+  1. validate + allocate _seq     ← Succeeds
+  2. build RecordBatch            ← Succeeds
+  3. WAL.write_insert(batch)      ← Fails! Exception raised
+  4. MemTable.put(...)            ← Not executed
 
-结果：_seq 被浪费（有间隔），但数据一致性不受影响。
-WAL 和 MemTable 保持同步——都没有写入这条数据。
+Result: _seq is wasted (gaps), but data consistency is not affected.
+WAL and MemTable stay in sync -- neither has written this data.
 ```
 
-### 9.2 恢复时的错误
+### 9.2 Errors During Recovery
 
-| 错误类型 | 触发场景 | 处理方式 |
+| Error Type | Trigger Scenario | Handling |
 |---------|---------|---------|
-| 文件不存在 | 只有 data 没有 delta（或反之） | 正常，缺失的视为空 |
-| Schema 读取失败 | 文件严重损坏（只写了几个字节） | 跳过该文件，日志警告 |
-| RecordBatch 截断 | 写入过程中崩溃 | 返回截断前的完整 batch |
-| 数据校验失败 | 磁盘位翻转等极端情况 | 跳过该文件，日志警告 |
+| File doesn't exist | Only data without delta (or vice versa) | Normal, missing one treated as empty |
+| Schema read failure | File severely corrupted (only a few bytes written) | Skip the file, log warning |
+| RecordBatch truncated | Crash during write | Return complete batches before truncation |
+| Data validation failure | Extreme cases like disk bit flip | Skip the file, log warning |
 
-**恢复原则：尽力恢复，不因部分损坏而放弃全部数据。**
+**Recovery Principle: Best-effort recovery, don't abandon all data due to partial corruption.**
 
-### 9.3 _seq 间隔的安全性
+### 9.3 Safety of _seq Gaps
 
-WAL 写入失败会导致 _seq 出现间隔（gap），例如：
+WAL write failures can cause _seq gaps, for example:
 
 ```
-正常:    _seq = [1, 2, 3, 4, 5]
-有间隔:  _seq = [1, 2, 4, 5]      ← 3 因 WAL 写入失败而跳过
+Normal:    _seq = [1, 2, 3, 4, 5]
+With gap:  _seq = [1, 2, 4, 5]      ← 3 skipped due to WAL write failure
 ```
 
-这是安全的，因为：
-- _seq 只用于"同 PK 取 max_seq"的去重，不依赖连续性
-- delta_log 的 `is_deleted(pk, data_seq)` 比较的是 "delete_seq > data_seq"，不依赖连续性
+This is safe because:
+- _seq is only used for "same PK, keep max_seq" deduplication, does not depend on continuity
+- delta_log's `is_deleted(pk, data_seq)` comparison is "delete_seq > data_seq", does not depend on continuity
 
 ---
 
-## 10. 与上层组件的交互
+## 10. Interaction with Upper-Layer Components
 
-### 10.1 Insert 流程
+### 10.1 Insert Flow
 
 ```
 Collection.insert(records, partition_name)
   │
-  ├─ 1. validate_record(record, schema)       # 校验每条记录
-  ├─ 2. separate_dynamic_fields(record)       # 分离动态字段 → $meta
-  ├─ 3. seq = self._alloc_seq()               # 为每条记录分配独立 _seq
-  ├─ 4. 构建 RecordBatch (含 _seq, _partition)
+  ├─ 1. validate_record(record, schema)       # Validate each record
+  ├─ 2. separate_dynamic_fields(record)       # Separate dynamic fields → $meta
+  ├─ 3. seq = self._alloc_seq()               # Assign independent _seq to each record
+  ├─ 4. Build RecordBatch (with _seq, _partition)
   │
-  ├─ 5. self.wal.write_insert(batch)          ← WAL 先写
+  ├─ 5. self.wal.write_insert(batch)          ← WAL writes first
   │
-  ├─ 6. for each record:                      ← 然后 MemTable
+  ├─ 6. for each record:                      ← Then MemTable
   │       self.memtable.put(seq, partition, **fields)
   │
-  └─ 7. if self.memtable.size() >= LIMIT:     ← 检查是否需要 flush
+  └─ 7. if self.memtable.size() >= LIMIT:     ← Check if flush needed
            self._trigger_flush()
 ```
 
-### 10.2 Delete 流程
+### 10.2 Delete Flow
 
 ```
 Collection.delete(pks, partition_name)
   │
-  ├─ 1. shared_seq = self._alloc_seq()        # 批量共享一个 _seq
+  ├─ 1. shared_seq = self._alloc_seq()        # Batch shares a single _seq
   ├─ 2. partition = partition_name or "_all"
-  ├─ 3. 构建 RecordBatch (pk_values, shared_seq, partition)
+  ├─ 3. Build RecordBatch (pk_values, shared_seq, partition)
   │
-  ├─ 4. self.wal.write_delete(batch)          ← WAL 先写
+  ├─ 4. self.wal.write_delete(batch)          ← WAL writes first
   │
-  ├─ 5. for pk in pks:                        ← 然后 MemTable
+  ├─ 5. for pk in pks:                        ← Then MemTable
   │       self.memtable.delete(pk, shared_seq, partition)
   │
   └─ 6. if self.memtable.size() >= LIMIT:
            self._trigger_flush()
 ```
 
-### 10.3 Flush 时的 WAL 切换
+### 10.3 WAL Switching During Flush
 
 ```
 Collection._trigger_flush()
   │
-  ├─ 1. frozen_memtable = self.memtable       # 冻结
-  ├─ 2. frozen_wal = self.wal                 # 冻结
+  ├─ 1. frozen_memtable = self.memtable       # Freeze
+  ├─ 2. frozen_wal = self.wal                 # Freeze
   │
-  ├─ 3. self.memtable = MemTable(schema)      # 新建空 MemTable
+  ├─ 3. self.memtable = MemTable(schema)      # Create new empty MemTable
   ├─ 4. new_number = frozen_wal.number + 1
-  ├─ 5. self.wal = WAL(wal_dir, ..., new_number)  # 新建空 WAL
+  ├─ 5. self.wal = WAL(wal_dir, ..., new_number)  # Create new empty WAL
   │
-  └─ 6. execute_flush(                        # 后台执行 flush 管线
+  └─ 6. execute_flush(                        # Execute flush pipeline in background
   │       frozen_memtable,
-  │       frozen_wal,                         # ← 传入冻结的 WAL
+  │       frozen_wal,                         # ← Pass in frozen WAL
   │       ...
   │     )
   │
-  └─ flush 管线内部：
-       Step 1-4: 写 Parquet 文件
+  └─ Inside flush pipeline:
+       Step 1-4: Write Parquet files
        Step 5:   manifest.active_wal_number = new_number
-                 manifest.save()              # 原子更新
+                 manifest.save()              # Atomic update
        Step 6:   _cleanup_wal_files(wal_dir, frozen_wal.number)
-                                              # 删除冻结 WAL + 更早的残留 WAL
+                                              # Delete frozen WAL + earlier residual WALs
 ```
 
-### 10.4 Recovery 流程
+### 10.4 Recovery Flow
 
 ```
 Collection.__init__(name, data_dir, schema)
@@ -791,29 +795,29 @@ Collection.__init__(name, data_dir, schema)
   ├─ 1. manifest = Manifest.load(data_dir)
   │
   ├─ 2. memtable, delta_log, next_seq = execute_recovery(
-  │       data_dir, schema, manifest          # Recovery 内部:
-  │     )                                     #   find_wal_files → recover → 重放到 memtable
+  │       data_dir, schema, manifest          # Recovery internals:
+  │     )                                     #   find_wal_files → recover → replay to memtable
   │
-  ├─ 3. self.memtable = memtable              # 使用恢复后的 MemTable
-  ├─ 4. self._seq_counter = next_seq          # 恢复 _seq 计数器
+  ├─ 3. self.memtable = memtable              # Use the recovered MemTable
+  ├─ 4. self._seq_counter = next_seq          # Restore _seq counter
   │
-  ├─ 5. new_wal_number = ...                  # 见 §7.4 编号计算
-  └─ 6. self.wal = WAL(wal_dir, ..., new_wal_number)  # 新 WAL 用于后续写入
-                                              # 旧 WAL 文件留在磁盘，等 flush 清理
+  ├─ 5. new_wal_number = ...                  # See §7.4 for number calculation
+  └─ 6. self.wal = WAL(wal_dir, ..., new_wal_number)  # New WAL for subsequent writes
+                                              # Old WAL files remain on disk, await flush cleanup
 ```
 
 ---
 
-## 11. 完整接口（最终版）
+## 11. Complete Interface (Final Version)
 
-综合以上设计，更新 WAL 的完整接口：
+Combining all the above design, the complete WAL interface is updated:
 
 ```python
 class WAL:
-    """Write-Ahead Log，Arrow IPC Streaming 格式，双文件（data + delta）。
+    """Write-Ahead Log, Arrow IPC Streaming format, dual-file (data + delta).
 
-    每轮写入对应一对 WAL 文件（wal_data_{N}.arrow + wal_delta_{N}.arrow），
-    flush 成功后整个删除。Writer 延迟初始化（首次写入时创建文件）。
+    Each write round corresponds to a pair of WAL files (wal_data_{N}.arrow + wal_delta_{N}.arrow),
+    deleted entirely after flush succeeds. Writers are lazily initialized (file created on first write).
     """
 
     def __init__(
@@ -824,68 +828,68 @@ class WAL:
         wal_number: int,
         sync_mode: str = "close",
     ) -> None:
-        """初始化 WAL（不创建文件，延迟到首次写入）。
+        """Initialize WAL (does not create files, deferred to first write).
 
         Args:
-            wal_dir: WAL 文件所在目录（不存在则创建）
-            wal_data_schema: wal_data 文件的 Arrow Schema（含 _seq, _partition, 用户字段, $meta）
-            wal_delta_schema: wal_delta 文件的 Arrow Schema（含 pk, _seq, _partition）
-            wal_number: 本轮 WAL 编号 N（文件名中的 N，从 Manifest 或 recovery 推算）
-            sync_mode: 持久性策略，详见 §8。
-                - "none"  完全不 fsync（仅供测试 / 性能基准）
-                - "close" 默认。close_and_delete 前 fsync 一次
-                - "batch" 每次 write_batch 后 fsync
+            wal_dir: Directory for WAL files (created if doesn't exist)
+            wal_data_schema: Arrow Schema for wal_data file (with _seq, _partition, user fields, $meta)
+            wal_delta_schema: Arrow Schema for wal_delta file (with pk, _seq, _partition)
+            wal_number: Current round WAL number N (the N in filename, derived from Manifest or recovery)
+            sync_mode: Durability strategy, see §8 for details.
+                - "none"  No fsync at all (for testing / performance benchmarks only)
+                - "close" Default. One fsync before close_and_delete
+                - "batch" fsync after every write_batch
         """
 
     def write_insert(self, record_batch: pa.RecordBatch) -> None:
-        """追加一个 RecordBatch 到 wal_data 文件。
+        """Append a RecordBatch to the wal_data file.
 
-        首次调用时创建文件和 StreamWriter（延迟初始化）。
-        record_batch 的 schema 必须与 wal_data_schema 一致（PyArrow 内部校验）。
+        Creates file and StreamWriter on first call (lazy initialization).
+        record_batch's schema must match wal_data_schema (validated internally by PyArrow).
 
-        sync_mode="batch" 时，write_batch 后 fsync 一次。
+        When sync_mode="batch", fsync once after write_batch.
 
-        注：WAL 不知道 Operation 类型——它接受 raw RecordBatch。
-        Operation dispatch 在 Collection._apply 里完成（依赖层级原因，
-        见 modules.md §9.16.5）。
+        Note: WAL doesn't know about Operation types -- it accepts raw RecordBatch.
+        Operation dispatch is done in Collection._apply (due to dependency layering,
+        see modules.md §9.16.5).
 
         Raises:
-            ArrowInvalid: schema 不匹配
-            OSError: 磁盘满或权限不足
-            AssertionError: WAL 已关闭
+            ArrowInvalid: schema mismatch
+            OSError: disk full or permission denied
+            AssertionError: WAL already closed
         """
 
     def write_delete(self, record_batch: pa.RecordBatch) -> None:
-        """追加一个 RecordBatch 到 wal_delta 文件。语义与 write_insert 对称。"""
+        """Append a RecordBatch to the wal_delta file. Semantics symmetric with write_insert."""
 
     def close_and_delete(self) -> None:
-        """关闭 writer 并删除两个 WAL 文件。幂等操作。
+        """Close writers and delete both WAL files. Idempotent operation.
 
-        调用时机：flush Step 6（Manifest 已更新之后）。
+        Invocation timing: Flush Step 6 (after Manifest has been updated).
 
-        流程（每个 writer 各自包 try/finally，互不影响）：
+        Flow (each writer wrapped in its own try/finally, independent of each other):
             for writer in (data_writer, delta_writer):
-                writer.close()                              # 写 EOS marker
+                writer.close()                              # Write EOS marker
                 if sync_mode in ("close", "batch"):
-                    os.fsync(sink.fileno())                 # 强刷盘
+                    os.fsync(sink.fileno())                 # Force flush to disk
                 sink.close()
             for file in (data_path, delta_path):
                 if exists: os.remove(file)
             self._closed = True
 
-        幂等性：第二次调用直接 return；任一 writer.close 失败都不影响另一个。
-        文件不存在时静默跳过删除步骤。
+        Idempotency: Second call returns directly; failure of one writer.close doesn't affect the other.
+        Silently skips deletion step if file doesn't exist.
         """
 
     @staticmethod
     def find_wal_files(wal_dir: str) -> List[int]:
-        """扫描目录，返回所有 WAL 编号（去重、升序）。
+        """Scan directory, return all WAL numbers (deduplicated, ascending).
 
-        匹配 wal_data_NNNNNN.arrow 和 wal_delta_NNNNNN.arrow，
-        只要任一文件存在就包含该编号。
+        Matches wal_data_NNNNNN.arrow and wal_delta_NNNNNN.arrow,
+        includes the number as long as either file exists.
 
         Returns:
-            升序排列的 WAL 编号列表，目录不存在则返回 []
+            WAL number list in ascending order, [] if directory doesn't exist
         """
 
     @staticmethod
@@ -893,158 +897,158 @@ class WAL:
         wal_dir: str,
         wal_number: int,
     ) -> Tuple[List[pa.RecordBatch], List[pa.RecordBatch]]:
-        """读取指定编号的 WAL 文件，返回 (data_batches, delta_batches)。
+        """Read WAL files of the specified number, return (data_batches, delta_batches).
 
-        - 文件不存在 → 对应列表为空
-        - 文件截断 → 返回截断前的完整 batch，丢弃不完整部分
-        - 文件严重损坏（Schema 不可读）→ 对应列表为空，日志警告
+        - File doesn't exist → corresponding list is empty
+        - File truncated → return complete batches before truncation, discard incomplete part
+        - File severely corrupted (Schema unreadable) → corresponding list is empty, log warning
 
-        Operation 包装在 engine/recovery.py 的 replay_wal_operations() 里完成
-        （依赖层级原因，详见 modules.md §9.16.5）。
+        Operation wrapping is done in engine/recovery.py's replay_wal_operations()
+        (due to dependency layering, see modules.md §9.16.5 for details).
         """
 
     @property
     def number(self) -> int:
-        """当前 WAL 编号 N。"""
+        """Current WAL number N."""
 
     @property
     def data_path(self) -> Optional[str]:
-        """wal_data 文件路径。延迟初始化前（未写入过 insert）返回 None。"""
+        """wal_data file path. Returns None before lazy initialization (no insert written yet)."""
 
     @property
     def delta_path(self) -> Optional[str]:
-        """wal_delta 文件路径。延迟初始化前（未写入过 delete）返回 None。"""
+        """wal_delta file path. Returns None before lazy initialization (no delete written yet)."""
 
 
-# ── 模块级辅助函数（不导出） ──
+# ── Module-level helper functions (not exported) ──
 
 def _read_wal_file(path: str) -> List[pa.RecordBatch]:
-    """读取单个 WAL 文件，容错处理截断和损坏。"""
+    """Read a single WAL file, with fault-tolerant handling for truncation and corruption."""
 
 def _cleanup_old_wals(wal_dir: str, up_to_number: int) -> None:
-    """删除所有编号 <= up_to_number 的 WAL 文件。flush Step 6 调用。"""
+    """Delete all WAL files with number <= up_to_number. Called by flush Step 6."""
 ```
 
 ---
 
-## 12. WAL 设计决策汇总
+## 12. WAL Design Decision Summary
 
-| 决策 | 选择 | 理由 |
+| Decision | Choice | Rationale |
 |------|------|------|
-| 文件格式 | Arrow IPC Streaming | 向量无写放大，零拷贝解析，Schema 内建 |
-| 文件结构 | 双文件（data + delta） | Schema 不同，延迟初始化，与 MemTable 对称 |
-| Writer 初始化 | 延迟（首次写入时创建） | 避免空文件 |
-| **fsync** | **默认 `sync_mode="close"`，close 前 fsync 一次** | 覆盖容器 OOM-kill 后立即接管的崩溃场景；频率 = flush 频率，开销可忽略。详见 §8 |
-| 截断处理 | 尽力恢复（读到哪算哪） | 最大化数据恢复 |
-| Recovery 后旧 WAL | 保留，等 flush 清理 | 二次崩溃安全 |
-| WAL 编号 | 单调递增，从 Manifest 恢复 | 不重复，可追溯 |
-| close_and_delete | 幂等，每个 writer 独立 try/finally | 崩溃重试安全；一个 writer 关闭失败不影响另一个 |
-| 清理范围 | flush 时清理所有 <= frozen 编号的 WAL | 统一处理残留 + 冻结 |
-| **写入入口** | **raw `write_insert / write_delete`** | WAL 不知道 Operation；dispatch 在 Collection.\_apply 里做（依赖层级原因，见 modules.md §9.16.5） |
-| **读取入口** | **`recover() → (data_batches, delta_batches)`** | engine/recovery.py 的 `replay_wal_operations` 把它包装成按 _seq 排序的 Operation 流 |
+| File format | Arrow IPC Streaming | No write amplification for vectors, zero-copy parsing, built-in Schema |
+| File structure | Dual-file (data + delta) | Different schemas, lazy initialization, symmetric with MemTable |
+| Writer initialization | Lazy (created on first write) | Avoid empty files |
+| **fsync** | **Default `sync_mode="close"`, one fsync before close** | Covers container OOM-kill then immediate takeover crash scenario; frequency = flush frequency, negligible overhead. See §8 for details |
+| Truncation handling | Best-effort recovery (read as much as possible) | Maximize data recovery |
+| Old WAL after Recovery | Retain, wait for flush cleanup | Safe against second crash |
+| WAL numbering | Monotonically increasing, recovered from Manifest | No duplicates, traceable |
+| close_and_delete | Idempotent, each writer has independent try/finally | Safe for crash retry; one writer's close failure doesn't affect the other |
+| Cleanup scope | Flush cleans all WALs with number <= frozen number | Unified handling of residual + frozen |
+| **Write entry point** | **Raw `write_insert / write_delete`** | WAL doesn't know about Operations; dispatch is done in Collection.\_apply (due to dependency layering, see modules.md §9.16.5) |
+| **Read entry point** | **`recover() → (data_batches, delta_batches)`** | engine/recovery.py's `replay_wal_operations` wraps it into an Operation stream sorted by _seq |
 
 ---
 
-# Part II: Segment 与搜索架构
+# Part II: Segment and Search Architecture
 
 ---
 
-## 13. Upsert 与 WAL 的关系
+## 13. Upsert and Its Relationship with WAL
 
-### 13.1 Upsert 不是 Delete + Insert
+### 13.1 Upsert Is Not Delete + Insert
 
-传统数据库的 upsert 通常实现为"先删后插"，涉及两步写入。
-MilvusLite 采用 LSM-Tree 风格，**upsert 纯粹是一次 insert，只写 `wal_data`，不碰 `wal_delta`**。
-
-```
-Insert("doc_1", new_data)   ← PK "doc_1" 已存在于磁盘 Parquet 中
-
-WAL:       wal_data 追加一条 RecordBatch（_seq=新值）  ✅ 只写一个文件
-MemTable:  put("doc_1", ...) → dict 按 PK 覆盖旧条目    ✅ 内存覆盖
-磁盘旧数据: 仍在 Parquet 中，不动                       ✅ 不需要显式删除
-```
-
-"覆盖"通过 **_seq 去重**隐式实现：
+Traditional databases typically implement upsert as "delete then insert", involving two write steps.
+MilvusLite uses an LSM-Tree style where **upsert is purely an insert, only writing to `wal_data`, never touching `wal_delta`**.
 
 ```
-磁盘 Parquet:  doc_1, _seq=100, embedding=[0.1, ...]    ← 旧版本
-MemTable:      doc_1, _seq=500, embedding=[0.9, ...]    ← 新版本
+Insert("doc_1", new_data)   ← PK "doc_1" already exists in Parquet on disk
 
-搜索时 bitmap 去重：同 PK 保留 max_seq → _seq=500 胜出 → 旧版本不可见
-Compaction 时：旧记录 (_seq=100) 被物理清除
+WAL:       wal_data appends one RecordBatch (_seq=new value)  ✅ Only writes one file
+MemTable:  put("doc_1", ...) → dict overwrites old entry by PK  ✅ In-memory overwrite
+Old data on disk: Still in Parquet, untouched                  ✅ No explicit deletion needed
 ```
 
-### 13.2 每个 API 操作涉及的 WAL 文件
+"Overwrite" is implicitly achieved through **_seq deduplication**:
 
-| 操作 | wal_data | wal_delta | 原子性风险 |
+```
+Disk Parquet:  doc_1, _seq=100, embedding=[0.1, ...]    ← Old version
+MemTable:      doc_1, _seq=500, embedding=[0.9, ...]    ← New version
+
+During search, bitmap dedup: same PK keeps max_seq → _seq=500 wins → old version invisible
+During Compaction: old record (_seq=100) is physically purged
+```
+
+### 13.2 WAL Files Involved in Each API Operation
+
+| Operation | wal_data | wal_delta | Atomicity risk |
 |------|----------|-----------|-----------|
-| insert（新 PK） | 写 | - | 无（单文件） |
-| insert（已有 PK = upsert） | 写 | - | 无（单文件） |
-| delete | - | 写 | 无（单文件） |
+| insert (new PK) | Write | - | None (single file) |
+| insert (existing PK = upsert) | Write | - | None (single file) |
+| delete | - | Write | None (single file) |
 
-**没有任何单个 API 调用需要同时写两个 WAL 文件**，因此不存在"双文件半写"的一致性问题。
+**No single API call needs to write to both WAL files simultaneously**, so there is no "dual-file half-write" consistency issue.
 
-### 13.3 LSM-Tree 风格的 trade-off
+### 13.3 LSM-Tree Style Trade-off
 
-写入简单（只追加）→ 但搜索时需要额外过滤过期数据 → 由 bitmap 去重解决 → 由 Compaction 最终清理物理数据。
+Simple writes (append-only) → but search needs extra filtering of expired data → solved by bitmap dedup → Compaction ultimately cleans up physical data.
 
 ---
 
-## 14. Segment：数据文件的内存缓存
+## 14. Segment: In-Memory Cache of Data Files
 
-### 14.1 问题：每次搜索都读磁盘不可接受
+### 14.1 Problem: Reading Disk on Every Search Is Unacceptable
 
-MVP 暴力搜索需要读取所有 Parquet 文件的全量数据。如果每次 search 都从磁盘读取：
+MVP brute-force search needs to read all data from all Parquet files. If every search reads from disk:
 
 ```
-100 万条 × 128 维 × 4 bytes = 488 MB
-每次 search 都读 488 MB → 延迟数秒 → 不可接受
+1 million records × 128 dims × 4 bytes = 488 MB
+Reading 488 MB on every search → latency of several seconds → unacceptable
 ```
 
-### 14.2 Segment 概念
+### 14.2 Segment Concept
 
-每个 Parquet 数据文件在内存中对应一个 **Segment**（封存段）。
-Parquet 文件不可变 → Segment 加载后永不失效，无需缓存淘汰策略。
+Each Parquet data file has a corresponding **Segment** (sealed segment) in memory.
+Parquet files are immutable → Segment never invalidates once loaded, no cache eviction strategy needed.
 
 ```python
 class Segment:
-    """一个 Parquet 数据文件的内存缓存。文件不可变 → 缓存永不失效。"""
+    """In-memory cache of a Parquet data file. File is immutable → cache never invalidates."""
 
-    file_path: str              # 源文件路径
-    partition: str              # 所属 Partition
+    file_path: str              # Source file path
+    partition: str              # Belonging Partition
 
-    # ── 预提取的 NumPy 数组（搜索热路径用） ──
-    pks: np.ndarray             # 主键数组，bitmap 去重用
-    seqs: np.ndarray            # _seq 数组，bitmap 去重用
-    vectors: np.ndarray         # (N, dim) float32 矩阵，距离计算用
+    # ── Pre-extracted NumPy arrays (for search hot path) ──
+    pks: np.ndarray             # Primary key array, used for bitmap dedup
+    seqs: np.ndarray            # _seq array, used for bitmap dedup
+    vectors: np.ndarray         # (N, dim) float32 matrix, used for distance calculation
 
-    # ── 完整记录（返回搜索结果用） ──
-    table: pa.Table             # 原始 Arrow Table，取 top-k 对应行返回
+    # ── Complete records (for returning search results) ──
+    table: pa.Table             # Original Arrow Table, retrieve rows corresponding to top-k results
 
-    # ── 未来 ──
-    # faiss_index: faiss.Index  # FAISS 索引
+    # ── Future ──
+    # faiss_index: faiss.Index  # FAISS index
 ```
 
-### 14.3 为什么要预提取 NumPy 数组
+### 14.3 Why Pre-extract NumPy Arrays
 
 ```
-方案 A: 每次搜索时从 pa.Table 提取
-  pa.Table → .column("vec") → .to_numpy() → 有转换开销
-  向量列是 list<float32>（变长），需 stack 成 (N, dim) 连续数组
-  每次搜索都做 → 重复浪费
+Approach A: Extract from pa.Table on every search
+  pa.Table → .column("vec") → .to_numpy() → has conversion overhead
+  Vector column is list<float32> (variable length), needs stack into (N, dim) contiguous array
+  Doing this on every search → repeated waste
 
-方案 B: 加载时一次性预提取（选择此方案）
-  Segment 创建时 → 提取 pks / seqs / vectors 到 NumPy 数组
-  搜索时 → 直接使用，零额外开销
+Approach B: One-time pre-extraction at load time (chosen approach)
+  At Segment creation → extract pks / seqs / vectors into NumPy arrays
+  During search → use directly, zero extra overhead
 ```
 
-### 14.4 Segment 完整接口
+### 14.4 Segment Complete Interface
 
 ```python
 # storage/segment.py
 
 class Segment:
-    """不可变数据文件的内存表示。加载时预提取搜索热路径所需的 NumPy 数组。"""
+    """In-memory representation of an immutable data file. Pre-extracts NumPy arrays needed for search hot path at load time."""
 
     def __init__(self, file_path: str, partition: str, table: pa.Table,
                  pk_field: str, vector_field: str):
@@ -1052,7 +1056,7 @@ class Segment:
         self.partition = partition
         self.table = table
 
-        # 一次性预提取
+        # One-time pre-extraction
         self.pks = table.column(pk_field).to_numpy()
         self.seqs = table.column("_seq").to_numpy()
         self.vectors = self._extract_vectors(table, vector_field)
@@ -1060,22 +1064,22 @@ class Segment:
     @staticmethod
     def load(file_path: str, partition: str,
              pk_field: str, vector_field: str) -> "Segment":
-        """从 Parquet 文件加载为 Segment。"""
+        """Load from Parquet file into Segment."""
         table = read_data_file(file_path)
         return Segment(file_path, partition, table, pk_field, vector_field)
 
     @staticmethod
     def from_table(file_path: str, partition: str, table: pa.Table,
                    pk_field: str, vector_field: str) -> "Segment":
-        """从已有 Arrow Table 构建 Segment（Flush 时跳过磁盘读取）。"""
+        """Build Segment from existing Arrow Table (skip disk read during Flush)."""
         return Segment(file_path, partition, table, pk_field, vector_field)
 
     def search(self, query_vector: np.ndarray, valid_mask: np.ndarray,
                top_k: int, metric_type: str) -> List["Hit"]:
-        """在本 Segment 内搜索，只对 valid_mask=True 的行计算距离。
+        """Search within this Segment, only compute distances for rows where valid_mask=True.
 
         Returns:
-            按距离升序排列的 Hit 列表（最多 top_k 个）
+            Hit list sorted by distance in ascending order (at most top_k)
         """
         valid_indices = np.where(valid_mask)[0]
         if len(valid_indices) == 0:
@@ -1097,14 +1101,14 @@ class Segment:
         ]
 
     def get_record(self, row_index: int) -> dict:
-        """按行索引取完整记录（top-k 结果回查用）。"""
+        """Get complete record by row index (for top-k result lookback)."""
         return {col: self.table.column(col)[row_index].as_py()
                 for col in self.table.schema.names
                 if col != "_seq"}
 
     @staticmethod
     def _extract_vectors(table: pa.Table, vector_field: str) -> np.ndarray:
-        """list<float32> 列 → (N, dim) float32 连续数组。"""
+        """list<float32> column → (N, dim) float32 contiguous array."""
         vec_col = table.column(vector_field)
         return np.stack([v.as_py() for v in vec_col]).astype(np.float32)
 
@@ -1112,27 +1116,27 @@ class Segment:
         return len(self.table)
 ```
 
-### 14.5 缓存生命周期
+### 14.5 Cache Lifecycle
 
-Segment 的生死完全跟随 Manifest，不需要 LRU 等淘汰策略：
+Segment lifecycle follows the Manifest exactly, no LRU or other eviction strategies needed:
 
 ```
-事件                          缓存操作
-────                          ────────
-Collection 启动 / Recovery    加载 Manifest 中所有 data 文件 → Segment 列表
-Flush 完成                    新 Parquet → 创建新 Segment 加入缓存
-Compaction 完成               旧文件删除 → 驱逐旧 Segment；新文件 → 创建新 Segment
-Collection.close()            释放所有 Segment
+Event                              Cache Operation
+────                               ────────
+Collection startup / Recovery      Load all data files from Manifest → Segment list
+Flush complete                     New Parquet → create new Segment and add to cache
+Compaction complete                Old files deleted → evict old Segments; new file → create new Segment
+Collection.close()                 Release all Segments
 ```
 
 ```python
-# engine/collection.py 中的 Segment 管理
+# Segment management in engine/collection.py
 
 class Collection:
     _segments: Dict[str, List[Segment]]   # partition_name → [Segment, ...]
 
     def __init__(self, name, data_dir, schema):
-        # 启动时加载所有 Segment
+        # Load all Segments at startup
         self._segments = {}
         for partition in manifest.list_partitions():
             self._segments[partition] = [
@@ -1141,12 +1145,12 @@ class Collection:
             ]
 
     def _on_flush_complete(self, partition, new_file, table):
-        """Flush 回调：用内存中的 table 直接构建 Segment（跳过磁盘读取）"""
+        """Flush callback: build Segment directly from in-memory table (skip disk read)"""
         seg = Segment.from_table(new_file, partition, table, pk_field, vec_field)
         self._segments.setdefault(partition, []).append(seg)
 
     def _on_compaction_complete(self, partition, old_files, new_file):
-        """Compaction 回调：驱逐旧 Segment，加载新 Segment"""
+        """Compaction callback: evict old Segments, load new Segment"""
         old_set = set(old_files)
         self._segments[partition] = [
             s for s in self._segments[partition] if s.file_path not in old_set
@@ -1155,65 +1159,65 @@ class Collection:
         self._segments[partition].append(seg)
 ```
 
-### 14.6 Flush 优化：零拷贝建 Segment
+### 14.6 Flush Optimization: Zero-Copy Segment Building
 
-Flush 时数据已经在内存中（冻结的 MemTable → Arrow Table）。
-写入 Parquet 后，**直接用这个 Table 构建 Segment，不需要再从磁盘读回来**：
-
-```
-普通路径：  MemTable → pa.Table → write_data_file() → read_data_file() → Segment
-                                        写磁盘              读磁盘（浪费）
-
-优化路径：  MemTable → pa.Table ──┬── write_data_file()     写磁盘
-                                 └── Segment.from_table()  直接复用内存
-```
-
-### 14.7 内存预算
-
-对于嵌入式本地数据库，MVP 假设数据集能放进内存：
+During Flush, data is already in memory (frozen MemTable → Arrow Table).
+After writing to Parquet, **use this Table directly to build a Segment, no need to read it back from disk**:
 
 ```
-100 万条 × 128 维 float32 = 488 MB（向量）
-加上 PK / _seq / 其他字段 ≈ 600-800 MB 总计
+Normal path:   MemTable → pa.Table → write_data_file() → read_data_file() → Segment
+                                          write to disk        read from disk (wasteful)
 
-对本地机器（8-16 GB 内存）完全可接受
+Optimized path: MemTable → pa.Table ──┬── write_data_file()     write to disk
+                                      └── Segment.from_table()  directly reuse memory
 ```
 
-未来如果数据量超出内存，可按 Segment 粒度加 LRU 驱逐——但 MVP 不需要。
+### 14.7 Memory Budget
+
+For an embedded local database, MVP assumes the dataset fits in memory:
+
+```
+1 million records × 128 dims float32 = 488 MB (vectors)
+Plus PK / _seq / other fields ≈ 600-800 MB total
+
+Perfectly acceptable for local machines (8-16 GB RAM)
+```
+
+In the future, if data exceeds memory, LRU eviction can be added at Segment granularity -- but MVP doesn't need it.
 
 ---
 
-## 15. 分段搜索架构
+## 15. Segmented Search Architecture
 
-### 15.1 两类 Segment
-
-```
-Sealed Segment    从 Parquet 文件加载，不可变，可建 FAISS 索引
-                  数据来源：storage/segment.py
-
-Growing Segment   MemTable 中未落盘的数据，持续变化，只能暴力搜索
-                  数据来源：storage/memtable.py
-```
-
-搜索时两者都要参与，行为一致：接收 valid_mask，返回 local top-k。
-
-### 15.2 核心矛盾：去重是全局的，搜索是分段的
-
-同一个 PK 可能存在于多个 Segment 中（upsert 导致）：
+### 15.1 Two Types of Segments
 
 ```
-Segment A (旧 Parquet):  doc_1  _seq=100  vec=[0.1, ...]
-Segment B (新 Parquet):  doc_1  _seq=500  vec=[0.9, ...]   ← upsert 后 flush
-MemTable:                doc_1  _seq=800  vec=[0.5, ...]   ← 又一次 upsert
+Sealed Segment    Loaded from Parquet files, immutable, can build FAISS index
+                  Data source: storage/segment.py
+
+Growing Segment   Unflushed data in MemTable, continuously changing, can only brute-force search
+                  Data source: storage/memtable.py
 ```
 
-如果每个 Segment 独立去重，Segment A 不知道 doc_1 已被覆盖。
-因此必须：**先全局去重，再分段搜索**。
+Both participate in search with consistent behavior: accept valid_mask, return local top-k.
 
-### 15.3 完整搜索流程
+### 15.2 Core Contradiction: Dedup Is Global, Search Is Segmented
+
+The same PK may exist in multiple Segments (caused by upsert):
 
 ```
-Step 1: 全局去重 → 生成 per-segment mask（轻量，只用预提取的 pk/seq 数组）
+Segment A (old Parquet):  doc_1  _seq=100  vec=[0.1, ...]
+Segment B (new Parquet):  doc_1  _seq=500  vec=[0.9, ...]   ← Flushed after upsert
+MemTable:                 doc_1  _seq=800  vec=[0.5, ...]   ← Yet another upsert
+```
+
+If each Segment deduplicates independently, Segment A wouldn't know doc_1 has been overwritten.
+Therefore: **global dedup first, then segmented search**.
+
+### 15.3 Complete Search Flow
+
+```
+Step 1: Global dedup → generate per-segment mask (lightweight, only uses pre-extracted pk/seq arrays)
 ──────────────────────────────────────────────────────────────────────────────
 
   segments:
@@ -1221,40 +1225,40 @@ Step 1: 全局去重 → 生成 per-segment mask（轻量，只用预提取的 p
     seg_B.pks  = [doc_1, doc_3]     seg_B.seqs = [500, 501]
     memtable   = [doc_1, doc_4]     seqs       = [800, 802]
 
-  全局去重：
-    doc_1 → seg_A(100) vs seg_B(500) vs memtable(800) → memtable 胜
-    doc_2 → seg_A(101) 唯一 → 有效
-    doc_3 → seg_B(501) 唯一 → 有效
-    doc_4 → memtable(802) 唯一 → 有效
+  Global dedup:
+    doc_1 → seg_A(100) vs seg_B(500) vs memtable(800) → memtable wins
+    doc_2 → seg_A(101) unique → valid
+    doc_3 → seg_B(501) unique → valid
+    doc_4 → memtable(802) unique → valid
 
-  删除过滤：delta_log.is_deleted(pk, seq)
+  Delete filtering: delta_log.is_deleted(pk, seq)
 
-  输出 per-segment mask：
-    seg_A_mask = [False, True ]     ← doc_1 被覆盖，doc_2 有效
-    seg_B_mask = [False, True ]     ← doc_1 被覆盖，doc_3 有效
-    mem_mask   = [True,  True ]     ← doc_1 最新版有效，doc_4 有效
+  Output per-segment masks:
+    seg_A_mask = [False, True ]     ← doc_1 overwritten, doc_2 valid
+    seg_B_mask = [False, True ]     ← doc_1 overwritten, doc_3 valid
+    mem_mask   = [True,  True ]     ← doc_1 latest version valid, doc_4 valid
 
-Step 2: 每个 Segment 独立搜索（只对 valid 的行计算距离）
+Step 2: Each Segment searches independently (only compute distances for valid rows)
 ──────────────────────────────────────────────────────────────────────────────
 
   seg_A.search(query, seg_A_mask, top_k) → [(doc_2, dist=0.3)]
   seg_B.search(query, seg_B_mask, top_k) → [(doc_3, dist=0.5)]
   memtable.search(query, mem_mask, top_k) → [(doc_1, dist=0.1), (doc_4, dist=0.7)]
 
-Step 3: 合并所有 local top-k → global top-k
+Step 3: Merge all local top-k → global top-k
 ──────────────────────────────────────────────────────────────────────────────
 
   all_hits = [(doc_1, 0.1), (doc_2, 0.3), (doc_3, 0.5), (doc_4, 0.7)]
-  sort by distance → 取前 top_k 个
+  sort by distance → take first top_k
 
-Step 4: 取完整记录（只查 top-k 条）
+Step 4: Retrieve complete records (only query top-k rows)
 ──────────────────────────────────────────────────────────────────────────────
 
   for hit in global_top_k:
-      hit.segment.get_record(hit.row_index)   ← 从对应 Segment 回查
+      hit.segment.get_record(hit.row_index)   ← Look back in corresponding Segment
 ```
 
-### 15.4 全局去重实现
+### 15.4 Global Dedup Implementation
 
 ```python
 # search/bitmap.py
@@ -1265,12 +1269,12 @@ def build_segment_masks(
     delta_log: DeltaLog,
     pk_field: str,
 ) -> List[np.ndarray]:
-    """全局去重 + 删除过滤，输出 per-segment mask。
+    """Global dedup + delete filtering, output per-segment masks.
 
-    返回 N+1 个 boolean mask：前 N 个对应 segments，最后 1 个对应 memtable。
-    每个 mask 长度等于对应段的行数。
+    Returns N+1 boolean masks: first N correspond to segments, last one to memtable.
+    Each mask length equals the row count of the corresponding segment.
     """
-    # ── 全局去重：PK → (max_seq, segment_idx, row_idx) ──
+    # ── Global dedup: PK → (max_seq, segment_idx, row_idx) ──
     best = {}  # pk → (max_seq, seg_idx, row_idx)
 
     for seg_idx, seg in enumerate(segments):
@@ -1280,7 +1284,7 @@ def build_segment_masks(
             if pk not in best or seq > best[pk][0]:
                 best[pk] = (seq, seg_idx, row_idx)
 
-    # MemTable 作为最后一个"段"
+    # MemTable as the last "segment"
     mem_idx = len(segments)
     mem_pks, mem_seqs = memtable.get_pk_seq_arrays()
     for row_idx in range(len(mem_pks)):
@@ -1289,7 +1293,7 @@ def build_segment_masks(
         if pk not in best or seq > best[pk][0]:
             best[pk] = (seq, mem_idx, row_idx)
 
-    # ── 构建 per-segment mask ──
+    # ── Build per-segment masks ──
     masks = [np.zeros(len(seg.pks), dtype=bool) for seg in segments]
     masks.append(np.zeros(len(mem_pks), dtype=bool))  # MemTable mask
 
@@ -1300,55 +1304,55 @@ def build_segment_masks(
     return masks
 ```
 
-### 15.5 MemTable 的搜索支持
+### 15.5 MemTable Search Support
 
-MemTable 是 Growing Segment，需要提供与 Sealed Segment 对称的搜索接口：
+MemTable is the Growing Segment and needs to provide a search interface symmetric with Sealed Segment:
 
 ```python
-# storage/memtable.py 新增方法
+# New methods added to storage/memtable.py
 
 class MemTable:
     def get_pk_seq_arrays(self) -> Tuple[np.ndarray, np.ndarray]:
-        """返回 insert_buf 中所有活跃记录的 (pks, seqs) 数组。
-        用于 bitmap 全局去重。"""
+        """Return (pks, seqs) arrays of all active records in insert_buf.
+        Used for bitmap global dedup."""
 
     def get_vectors(self, vector_field: str) -> np.ndarray:
-        """返回 insert_buf 中所有活跃记录的向量矩阵 (N, dim)。
-        用于暴力搜索。"""
+        """Return vector matrix (N, dim) of all active records in insert_buf.
+        Used for brute-force search."""
 
     def search(self, query_vector: np.ndarray, valid_mask: np.ndarray,
                top_k: int, metric_type: str) -> List["Hit"]:
-        """暴力搜索 insert_buf 中 valid_mask=True 的记录。
-        逻辑与 Segment.search() 相同。"""
+        """Brute-force search records in insert_buf where valid_mask=True.
+        Logic same as Segment.search()."""
 
     def get_record(self, row_index: int) -> dict:
-        """按行索引取完整记录（top-k 回查用）。"""
+        """Get complete record by row index (for top-k lookback)."""
 ```
 
-### 15.6 合并策略
+### 15.6 Merge Strategy
 
 ```python
 # search/merge.py
 
 @dataclass
 class Hit:
-    """单条搜索结果。"""
+    """A single search result."""
     pk: Any
     distance: float
     row_index: int
-    segment: Any        # Segment 或 MemTable 引用，用于回查完整记录
+    segment: Any        # Reference to Segment or MemTable, for looking back complete records
 
     def to_record(self) -> dict:
-        """回查完整记录并附上距离。"""
+        """Look back complete record and attach distance."""
         record = self.segment.get_record(self.row_index)
         record["_distance"] = self.distance
         return record
 
 def merge_results(segment_hits: List[List[Hit]], top_k: int) -> List[Hit]:
-    """合并多个段的 local top-k，取 global top-k。
+    """Merge local top-k from multiple segments, take global top-k.
 
-    MVP: 简单拼接 + 排序（段数量少，足够快）
-    未来: k-way merge with heap（段多时更高效）
+    MVP: Simple concatenation + sort (few segments, fast enough)
+    Future: k-way merge with heap (more efficient when many segments)
     """
     all_hits = []
     for hits in segment_hits:
@@ -1357,7 +1361,7 @@ def merge_results(segment_hits: List[List[Hit]], top_k: int) -> List[Hit]:
     return all_hits[:top_k]
 ```
 
-### 15.7 更新后的 executor
+### 15.7 Updated Executor
 
 ```python
 # search/executor.py
@@ -1371,14 +1375,14 @@ def execute_search(
     metric_type: str,
     pk_field: str,
 ) -> List[List[dict]]:
-    """搜索入口。全局去重 → 分段搜索 → 合并 → 回查记录。"""
+    """Search entry point. Global dedup → segmented search → merge → record lookback."""
 
     results = []
     for query in query_vectors:
-        # ── Step 1: 全局去重 → per-segment mask ──
+        # ── Step 1: Global dedup → per-segment mask ──
         masks = build_segment_masks(segments, memtable, delta_log, pk_field)
 
-        # ── Step 2: 分段搜索 ──
+        # ── Step 2: Segmented search ──
         all_hits = []
         for seg, mask in zip(segments, masks[:-1]):
             all_hits.append(seg.search(query, mask, top_k, metric_type))
@@ -1386,10 +1390,10 @@ def execute_search(
         mem_mask = masks[-1]
         all_hits.append(memtable.search(query, mem_mask, top_k, metric_type))
 
-        # ── Step 3: 合并 ──
+        # ── Step 3: Merge ──
         merged = merge_results(all_hits, top_k)
 
-        # ── Step 4: 回查完整记录 ──
+        # ── Step 4: Look back complete records ──
         results.append([hit.to_record() for hit in merged])
 
     return results
@@ -1397,520 +1401,521 @@ def execute_search(
 
 ---
 
-## 16. data_file.py 接口扩展
+## 16. data_file.py Interface Extension
 
-当前 `data_file.py` 只有全量读取。为搜索优化和未来 FAISS 支持，新增列投影和行选择：
+Currently `data_file.py` only has full reads. For search optimization and future FAISS support, column projection and row selection are added:
 
 ```python
 # storage/data_file.py
 
-# ── 已有 ──
+# ── Existing ──
 def write_data_file(table, partition_dir, seq_min, seq_max) -> str:
-    """写 Parquet 数据文件。"""
+    """Write Parquet data file."""
 
 def read_data_file(path) -> pa.Table:
-    """全量读取 Parquet 文件。Segment.load() 调用。"""
+    """Full read of Parquet file. Called by Segment.load()."""
 
 def parse_seq_range(filename) -> Tuple[int, int]:
-    """从文件名解析 seq 范围。"""
+    """Parse seq range from filename."""
 
 def get_file_size(path) -> int:
-    """获取文件大小（Compaction 分桶用）。"""
+    """Get file size (for Compaction bucketing)."""
 
-# ── 新增 ──
+# ── New ──
 def read_columns(path: str, columns: List[str]) -> pa.Table:
-    """列投影读取。只读指定列，跳过其余列（尤其是向量列）。
+    """Column projection read. Only read specified columns, skip the rest (especially vector column).
 
-    Parquet 列式存储下，跳过向量列可节省 90%+ 的 IO。
-    用途：未来 FAISS 场景下，bitmap 构建只需 PK + _seq。
+    Under Parquet columnar storage, skipping the vector column saves 90%+ IO.
+    Use case: In future FAISS scenario, bitmap building only needs PK + _seq.
 
-    示例: read_columns(path, ["doc_id", "_seq"])
+    Example: read_columns(path, ["doc_id", "_seq"])
     """
     return pq.read_table(path, columns=columns)
 
 def read_rows(path: str, row_indices: List[int],
               columns: Optional[List[str]] = None) -> pa.Table:
-    """行选择读取。只读指定行（可选列投影）。
+    """Row selection read. Only read specified rows (with optional column projection).
 
-    用途：未来 FAISS 返回 top-k 的 row_index 后，
-    只读这几行的完整记录，而非加载整个文件。
+    Use case: In future when FAISS returns top-k row_indices,
+    only read complete records for those few rows, rather than loading the entire file.
     """
 ```
 
-**MVP vs FAISS 对 data_file 的调用对比**：
+**MVP vs FAISS data_file call comparison**:
 
 ```
-MVP（全量缓存在 Segment 中）：
-  启动时: read_data_file(path) → Segment          ← 一次加载，常驻内存
-  搜索时: 直接访问 Segment 的 NumPy 数组            ← 不读磁盘
+MVP (full data cached in Segment):
+  At startup: read_data_file(path) → Segment          ← One-time load, resident in memory
+  During search: Directly access Segment's NumPy arrays ← No disk reads
 
-FAISS（未来，按需读取）：
-  启动时: read_data_file(path) → Segment + build FAISS index
-  搜索时: Segment 提供 pk/seq（bitmap）
-          FAISS index 提供向量搜索
-          read_rows(path, top_k_indices) → 回查完整记录  ← 只读 top-k 行
+FAISS (future, on-demand reads):
+  At startup: read_data_file(path) → Segment + build FAISS index
+  During search: Segment provides pk/seq (bitmap)
+          FAISS index provides vector search
+          read_rows(path, top_k_indices) → look back complete records  ← Only read top-k rows
 ```
 
 ---
 
-## 17. 模块结构更新
+## 17. Module Structure Update
 
-### 17.1 新增和变更的模块
+### 17.1 New and Changed Modules
 
 ```
 storage/
-  segment.py        ← 新增：Parquet 文件的内存表示 (Segment 类)
-  data_file.py      ← 扩展：新增 read_columns(), read_rows()
-  memtable.py       ← 扩展：新增 get_pk_seq_arrays(), get_vectors(), search()
+  segment.py        ← New: In-memory representation of Parquet files (Segment class)
+  data_file.py      ← Extended: New read_columns(), read_rows()
+  memtable.py       ← Extended: New get_pk_seq_arrays(), get_vectors(), search()
 
 search/
-  bitmap.py         ← 变更：build_valid_mask() → build_segment_masks()
-  distance.py       ← 不变
-  executor.py       ← 变更：输入从裸数组 → segments + memtable
-  merge.py          ← 新增：Hit 数据类 + merge_results()
+  bitmap.py         ← Changed: build_valid_mask() → build_segment_masks()
+  distance.py       ← Unchanged
+  executor.py       ← Changed: Input from raw arrays → segments + memtable
+  merge.py          ← New: Hit data class + merge_results()
 ```
 
-### 17.2 更新后的完整结构
+### 17.2 Updated Complete Structure
 
 ```
 milvus_lite/
 ├── storage/
-│   ├── wal.py           # WAL 读写
-│   ├── memtable.py      # 内存缓冲（含搜索支持）
-│   ├── segment.py       # ★ Parquet 文件的内存缓存（含搜索能力）
-│   ├── data_file.py     # Parquet 磁盘 IO（含列投影/行选择）
-│   ├── delta_log.py     # 删除记录
-│   └── manifest.py      # 全局状态
+│   ├── wal.py           # WAL read/write
+│   ├── memtable.py      # In-memory buffer (with search support)
+│   ├── segment.py       # ★ In-memory cache of Parquet files (with search capability)
+│   ├── data_file.py     # Parquet disk IO (with column projection/row selection)
+│   ├── delta_log.py     # Delete records
+│   └── manifest.py      # Global state
 │
 ├── search/
-│   ├── bitmap.py        # 全局去重 → per-segment mask
-│   ├── distance.py      # 距离计算
-│   ├── executor.py      # 分段搜索编排
-│   └── merge.py         # ★ Hit + 多路合并
+│   ├── bitmap.py        # Global dedup → per-segment mask
+│   ├── distance.py      # Distance computation
+│   ├── executor.py      # Segmented search orchestration
+│   └── merge.py         # ★ Hit + multi-way merge
 │
 ├── engine/
-│   ├── collection.py    # 核心引擎（管理 Segment 列表）
-│   ├── flush.py         # Flush 管线（含 Segment 创建回调）
-│   ├── recovery.py      # 崩溃恢复
-│   └── compaction.py    # Compaction（含 Segment 替换回调）
+│   ├── collection.py    # Core engine (manages Segment list)
+│   ├── flush.py         # Flush pipeline (with Segment creation callback)
+│   ├── recovery.py      # Crash recovery
+│   └── compaction.py    # Compaction (with Segment replacement callback)
 │
-├── schema/              # 不变
-├── db.py                # 不变
-├── constants.py         # 不变
-└── exceptions.py        # 不变
+├── schema/              # Unchanged
+├── db.py                # Unchanged
+├── constants.py         # Unchanged
+└── exceptions.py        # Unchanged
 ```
 
-### 17.3 更新后的依赖图
+### 17.3 Updated Dependency Graph
 
 ```
 Level 0:  constants.py, exceptions.py
 Level 1:  schema/*
 Level 2:  storage/wal, storage/memtable, storage/data_file,
           storage/delta_log, storage/manifest
-Level 3:  storage/segment                         ← 依赖 data_file + schema
-Level 4:  search/bitmap, search/distance          ← 依赖 segment + delta_log
-Level 5:  search/merge                            ← 依赖 Hit 定义
-Level 6:  search/executor                         ← 依赖 L3-L5
-Level 7:  engine/flush, recovery, compaction       ← 依赖 L2-L6
-Level 8:  engine/collection                        ← 依赖 L2-L7
-Level 9:  db.py                                    ← 依赖 L8
+Level 3:  storage/segment                         ← Depends on data_file + schema
+Level 4:  search/bitmap, search/distance          ← Depends on segment + delta_log
+Level 5:  search/merge                            ← Depends on Hit definition
+Level 6:  search/executor                         ← Depends on L3-L5
+Level 7:  engine/flush, recovery, compaction       ← Depends on L2-L6
+Level 8:  engine/collection                        ← Depends on L2-L7
+Level 9:  db.py                                    ← Depends on L8
 ```
 
 ---
 
-## 18. 全部设计决策汇总
+## 18. Complete Design Decision Summary
 
-### WAL 决策（§1-§12）
+### WAL Decisions (§1-§12)
 
-| 决策 | 选择 | 理由 |
+| Decision | Choice | Rationale |
 |------|------|------|
-| 文件格式 | Arrow IPC Streaming | 向量无写放大，零拷贝解析，Schema 内建 |
-| 文件结构 | 双文件（data + delta） | Schema 不同，延迟初始化，与 MemTable 对称 |
-| Writer 初始化 | 延迟（首次写入时创建） | 避免空文件 |
-| fsync | MVP 不 fsync | 嵌入式场景，进程崩溃由 OS cache 保护 |
-| 截断处理 | 尽力恢复（读到哪算哪） | 最大化数据恢复 |
-| Recovery 后旧 WAL | 保留，等 flush 清理 | 二次崩溃安全 |
-| WAL 编号 | 单调递增，从 Manifest 恢复 | 不重复，可追溯 |
-| close_and_delete | 幂等 | 崩溃重试安全 |
-| 清理范围 | flush 时清理所有 <= frozen 编号的 WAL | 统一处理残留 + 冻结 |
+| File format | Arrow IPC Streaming | No write amplification for vectors, zero-copy parsing, built-in Schema |
+| File structure | Dual-file (data + delta) | Different schemas, lazy initialization, symmetric with MemTable |
+| Writer initialization | Lazy (created on first write) | Avoid empty files |
+| fsync | MVP no fsync | Embedded scenario, process crash protected by OS cache |
+| Truncation handling | Best-effort recovery (read as much as possible) | Maximize data recovery |
+| Old WAL after Recovery | Retain, wait for flush cleanup | Safe against second crash |
+| WAL numbering | Monotonically increasing, recovered from Manifest | No duplicates, traceable |
+| close_and_delete | Idempotent | Safe for crash retry |
+| Cleanup scope | Flush cleans all WALs with number <= frozen number | Unified handling of residual + frozen |
 
-### Segment 与搜索决策（§13-§17）
+### Segment and Search Decisions (§13-§17)
 
-| 决策 | 选择 | 理由 |
+| Decision | Choice | Rationale |
 |------|------|------|
-| Upsert 实现 | 纯 insert，_seq 去重 | 单文件写入，无原子性风险 |
-| 数据缓存 | Segment 常驻内存 | 避免每次搜索读磁盘 |
-| 缓存失效 | 跟随 Manifest（无 LRU） | 文件不可变，增删明确 |
-| NumPy 预提取 | 加载时一次性转换 | 搜索热路径零转换开销 |
-| Flush 建 Segment | 复用内存 Table，不重读磁盘 | 减少一次磁盘 IO |
-| 搜索模型 | 全局去重 → 分段搜索 → 合并 | 去重必须全局；搜索可分段并行 + 适配 FAISS |
-| MemTable 搜索 | 暴力搜索（Growing Segment） | 数据量小，无需索引 |
-| 合并策略 | MVP 拼接排序 | 段少够快；未来可换 k-way merge |
+| Upsert implementation | Pure insert, _seq dedup | Single file write, no atomicity risk |
+| Data caching | Segment resident in memory | Avoid disk reads on every search |
+| Cache invalidation | Follows Manifest (no LRU) | Files are immutable, additions/removals are explicit |
+| NumPy pre-extraction | One-time conversion at load | Zero conversion overhead on search hot path |
+| Segment building during Flush | Reuse in-memory Table, don't re-read disk | Save one disk IO |
+| Search model | Global dedup → segmented search → merge | Dedup must be global; search can be segmented in parallel + FAISS-compatible |
+| MemTable search | Brute-force search (Growing Segment) | Small data volume, no index needed |
+| Merge strategy | MVP concatenation + sort | Few segments, fast enough; can switch to k-way merge in the future |
 
-### 去重与演进决策（§19-§21）
+### Dedup and Evolution Decisions (§19-§21)
 
-| 决策 | 选择 | 理由 |
+| Decision | Choice | Rationale |
 |------|------|------|
-| delta_log.is_deleted 比较 | `delete_seq > data_seq`（严格大于） | _seq 单调递增，语义精确 |
-| 全局去重数据来源 | Segment 内存中预提取的 pk/seq 数组 | 零磁盘 IO |
-| Milvus 式优化时机 | MVP 不引入，Phase 2 渐进引入 | 先保证正确，再优化性能 |
-| Upsert 原子性（未来） | 方案 A 单 WAL 文件为最终形态 | RecordBatch 级原子，根本解决 |
-| _seq 去重的定位 | 正确性安全网，永远保留 | 即使引入 bitset 优化，仍作为兜底 |
-| 去重时机（MVP） | 前置去重（搜索前） | 暴力搜索要求精确 top-k，不可丢结果 |
-| 去重时机（FAISS） | 可切换后置去重 | ANN 本身近似，over-fetch 补偿足够 |
-| PK 唯一性范围 | Collection 级（跨 Partition） | _seq 全局去重天然实现，比 Milvus 更强保证 |
+| delta_log.is_deleted comparison | `delete_seq > data_seq` (strictly greater than) | _seq monotonically increasing, precise semantics |
+| Global dedup data source | Pre-extracted pk/seq arrays in Segment memory | Zero disk IO |
+| Milvus-style optimization timing | Not introduced in MVP, gradually introduced in Phase 2 | Ensure correctness first, then optimize performance |
+| Upsert atomicity (future) | Approach A single WAL file as the final form | RecordBatch-level atomicity, fundamental solution |
+| Role of _seq dedup | Correctness safety net, always retained | Even with bitset optimization, remains as a fallback |
+| Dedup timing (MVP) | Pre-dedup (before search) | Brute-force search requires precise top-k, cannot miss results |
+| Dedup timing (FAISS) | Can switch to post-dedup | ANN is inherently approximate, over-fetch compensation is sufficient |
+| PK uniqueness scope | Collection-level (cross-Partition) | _seq global dedup naturally achieves this, stronger guarantee than Milvus |
 
 ---
 
-# Part III: 全局去重详解与演进
+# Part III: Global Dedup Details and Evolution
 
 ---
 
-## 19. 全局去重详细逻辑
+## 19. Global Dedup Detailed Logic
 
-### 19.1 去重规则
+### 19.1 Dedup Rules
 
 ```
-对于每一个 PK：
-  1. 在所有 Sealed Segment + MemTable 中找出该 PK 的所有出现
-  2. 保留 _seq 最大的那个（最新版本），淘汰其余
-  3. 对保留的版本检查 delta_log：
-     如果 delete_seq > data_seq → 已删除 → 过滤掉
+For each PK:
+  1. Find all occurrences of that PK across all Sealed Segments + MemTable
+  2. Retain the one with the largest _seq (latest version), discard the rest
+  3. Check delta_log for the retained version:
+     If delete_seq > data_seq → deleted → filter out
 ```
 
-### 19.2 delta_log.is_deleted 判定逻辑
+### 19.2 delta_log.is_deleted Judgment Logic
 
 ```python
 class DeltaLog:
     _deleted_map: Dict[Any, int]   # pk → max_delete_seq
 
     def is_deleted(self, pk, data_seq: int) -> bool:
-        """判断一条数据记录是否已被删除。
+        """Determine whether a data record has been deleted.
 
-        规则：存在 delete_seq 且 delete_seq > data_seq
-              即删除操作发生在该条数据写入之后。
+        Rule: A delete_seq exists and delete_seq > data_seq
+              i.e., the delete operation occurred after the data was written.
         """
         if pk not in self._deleted_map:
             return False
         return self._deleted_map[pk] > data_seq
 ```
 
-**为什么是 `>` 而不是 `>=`？**
+**Why `>` instead of `>=`?**
 
-_seq 是单调递增的，insert 和 delete 不会拿到同一个 _seq：
-- insert：每条记录分配独立 _seq（批量 N 条 = N 个不同 _seq）
-- delete：批量共享一个 _seq，但与 insert 的 _seq 不会重复（来自同一个计数器）
+_seq is monotonically increasing, insert and delete will never get the same _seq:
+- insert: each record gets an independent _seq (batch of N records = N different _seq values)
+- delete: batch shares a single _seq, but it won't duplicate insert _seq values (comes from the same counter)
 
-所以 `>` 和 `>=` 实际等价，但 `>` 语义更精确：
-"删除操作的 _seq 严格大于数据记录的 _seq" = "删除发生在写入之后"。
+So `>` and `>=` are effectively equivalent, but `>` has more precise semantics:
+"The delete operation's _seq is strictly greater than the data record's _seq" = "the delete happened after the write".
 
-### 19.3 逐场景推演
+### 19.3 Step-by-Step Scenario Analysis
 
-**场景 1：正常 upsert（跨 Segment 去重）**
+**Scenario 1: Normal upsert (cross-Segment dedup)**
 
 ```
-Segment A (早期 flush):  doc_1  _seq=100  vec=[0.1, ...]
-Segment B (后来 flush):  doc_1  _seq=500  vec=[0.9, ...]
+Segment A (early flush):  doc_1  _seq=100  vec=[0.1, ...]
+Segment B (later flush):  doc_1  _seq=500  vec=[0.9, ...]
 
-best["doc_1"] = max(100, 500) = 500 → Segment B 的版本胜出
-delta_log.is_deleted("doc_1", 500) → "doc_1" 不在 deleted_map → False
+best["doc_1"] = max(100, 500) = 500 → Segment B's version wins
+delta_log.is_deleted("doc_1", 500) → "doc_1" not in deleted_map → False
 
-seg_A_mask: doc_1 → False   ← 旧版本，跳过
-seg_B_mask: doc_1 → True    ← 最新版本，参与搜索
+seg_A_mask: doc_1 → False   ← Old version, skipped
+seg_B_mask: doc_1 → True    ← Latest version, participates in search
 ```
 
-**场景 2：Segment + MemTable 去重**
+**Scenario 2: Segment + MemTable dedup**
 
 ```
 Segment A:  doc_1  _seq=100
-MemTable:   doc_1  _seq=800   ← 最近又 upsert 了
+MemTable:   doc_1  _seq=800   ← Recently upserted again
 
-best["doc_1"] = max(100, 800) = 800 → MemTable 胜出
+best["doc_1"] = max(100, 800) = 800 → MemTable wins
 
 seg_A_mask: doc_1 → False
 mem_mask:   doc_1 → True
 ```
 
-**场景 3：先删除，再插入（delete + re-insert）**
+**Scenario 3: Delete first, then insert (delete + re-insert)**
 
 ```
-时间线：
-  T1: insert doc_1 → _seq=100 → flush 到 Segment A
+Timeline:
+  T1: insert doc_1 → _seq=100 → flushed to Segment A
   T2: delete doc_1 → _seq=300 → delta_log: {doc_1: 300}
-  T3: insert doc_1 → _seq=500 → flush 到 Segment B
+  T3: insert doc_1 → _seq=500 → flushed to Segment B
 
-去重：best["doc_1"] = max(100, 500) = 500 → Segment B
+Dedup: best["doc_1"] = max(100, 500) = 500 → Segment B
 
-删除检查：
+Delete check:
   delta_log._deleted_map = {"doc_1": 300}
   is_deleted("doc_1", data_seq=500)
-  → 300 > 500?  → False → 没有被删除 ✅
+  → 300 > 500?  → False → Not deleted ✅
 
-结果：doc_1 可见，使用 Segment B 的版本
-      （删除发生在重新插入之前，不影响新版本）
+Result: doc_1 is visible, using Segment B's version
+      (deletion occurred before re-insertion, does not affect the new version)
 ```
 
-**场景 4：先 upsert，再删除**
+**Scenario 4: Upsert first, then delete**
 
 ```
-时间线：
+Timeline:
   T1: insert doc_1 → _seq=100 → Segment A
   T2: insert doc_1 → _seq=500 → Segment B (upsert)
   T3: delete doc_1 → _seq=700 → delta_log: {doc_1: 700}
 
-去重：best["doc_1"] = max(100, 500) = 500 → Segment B
+Dedup: best["doc_1"] = max(100, 500) = 500 → Segment B
 
-删除检查：
+Delete check:
   is_deleted("doc_1", data_seq=500)
-  → 700 > 500?  → True → 已删除
+  → 700 > 500?  → True → Deleted
 
-结果：doc_1 不可见（Segment A 的旧版本在去重阶段就被淘汰了，
-      Segment B 的新版本在删除检查阶段被过滤了）
+Result: doc_1 is not visible (Segment A's old version was eliminated during dedup phase,
+      Segment B's new version was filtered out during delete check phase)
 ```
 
-**场景 5：MemTable 中的 delete 覆盖 Segment 数据**
+**Scenario 5: Delete in MemTable covering Segment data**
 
 ```
-Segment A:  doc_1  _seq=100  (磁盘上的旧数据)
+Segment A:  doc_1  _seq=100  (old data on disk)
 MemTable delete_buf:  delete doc_1, _seq=200
 
-delta_log._deleted_map（含 MemTable delete_buf 和磁盘 delta 文件）:
+delta_log._deleted_map (includes MemTable delete_buf and on-disk delta files):
   {"doc_1": 200}
 
-去重：best["doc_1"] = 100 → Segment A（唯一 insert 版本）
+Dedup: best["doc_1"] = 100 → Segment A (only insert version)
 
-删除检查：
-  is_deleted("doc_1", 100) → 200 > 100 → True → 已删除
+Delete check:
+  is_deleted("doc_1", 100) → 200 > 100 → True → Deleted
 
-结果：doc_1 不可见 ✅
+Result: doc_1 is not visible ✅
 ```
 
-**场景 6：多次删除，保留最大 delete_seq**
+**Scenario 6: Multiple deletes, retain max delete_seq**
 
 ```
-时间线：
+Timeline:
   T1: insert doc_1 → _seq=100
   T2: delete doc_1 → _seq=200
   T3: insert doc_1 → _seq=300   ← re-insert
-  T4: delete doc_1 → _seq=400   ← 再次删除
+  T4: delete doc_1 → _seq=400   ← delete again
 
-delta_log._deleted_map = {"doc_1": 400}  ← 保留 max(200, 400) = 400
+delta_log._deleted_map = {"doc_1": 400}  ← Retains max(200, 400) = 400
 
-去重：best["doc_1"] = 300
-删除检查：is_deleted("doc_1", 300) → 400 > 300 → True
-结果：doc_1 不可见 ✅
+Dedup: best["doc_1"] = 300
+Delete check: is_deleted("doc_1", 300) → 400 > 300 → True
+Result: doc_1 is not visible ✅
 ```
 
-### 19.4 一个重要性质：Segment 内 PK 唯一
+### 19.4 An Important Property: PK Uniqueness Within a Segment
 
-单个 Segment 内部，每个 PK 只出现一次，原因：
-- **MemTable flush**：insert_buf 是 dict（按 PK 去重），输出的 Table 每个 PK 只一行
-- **Compaction 合并**：同 PK 保留 max_seq，输出唯一
+Within a single Segment, each PK appears only once, because:
+- **MemTable flush**: insert_buf is a dict (deduped by PK), output Table has only one row per PK
+- **Compaction merge**: Same PK retains max_seq, output is unique
 
-因此全局去重只处理**跨 Segment 重复**，不需要处理段内重复。
-`best` dict 的大小 = 唯一 PK 数（≤ 总行数），不会额外膨胀。
+Therefore global dedup only handles **cross-Segment duplicates**, no need to handle intra-segment duplicates.
+The size of the `best` dict = number of unique PKs (≤ total rows), no extra bloat.
 
-### 19.5 算法复杂度
+### 19.5 Algorithm Complexity
 
 ```
-Phase 1（收集 max_seq）:
-  遍历所有 Segment 的 pks + seqs 数组 → O(N)  N = 总行数
-  dict 查找/更新 → O(1) per entry
+Phase 1 (collect max_seq):
+  Traverse all Segments' pks + seqs arrays → O(N)  N = total rows
+  dict lookup/update → O(1) per entry
 
-Phase 2（生成 mask）:
-  遍历 best dict → O(U)  U = 唯一 PK 数
-  delta_log.is_deleted() → O(1) per PK (dict 查找)
+Phase 2 (generate mask):
+  Traverse best dict → O(U)  U = number of unique PKs
+  delta_log.is_deleted() → O(1) per PK (dict lookup)
 
-总计: O(N) 时间，O(U) 空间
+Total: O(N) time, O(U) space
 ```
 
-### 19.6 全局信息的来源
+### 19.6 Source of Global Information
 
-搜索时不需要额外查询机制——**数据已全部在内存中**：
+No extra query mechanism needed during search -- **all data is already in memory**:
 
 ```
 Collection._segments = {
-    "_default": [seg_A, seg_B, seg_C],     ← Segment 对象常驻内存
+    "_default": [seg_A, seg_B, seg_C],     ← Segment objects resident in memory
 }
-Collection.memtable                         ← 内存中
-Collection.delta_log._deleted_map           ← 内存中
+Collection.memtable                         ← In memory
+Collection.delta_log._deleted_map           ← In memory
 
-每个 Segment 在加载时预提取了 NumPy 数组：
+Each Segment pre-extracted NumPy arrays at load time:
   seg_A.pks  = np.array(["doc_1", "doc_2", ...])
   seg_A.seqs = np.array([100, 101, ...])
 
-全局去重 = 遍历这些内存数组 + 查 delta_log 内存 dict
-         全程零磁盘 IO
+Global dedup = traverse these in-memory arrays + query delta_log's in-memory dict
+         Zero disk IO throughout
 ```
 
 ---
 
-## 20. Milvus 的去重方案对比
+## 20. Milvus Dedup Approach Comparison
 
-### 20.1 Milvus 的做法：写入时显式删除
+### 20.1 Milvus's Approach: Explicit Deletion at Write Time
 
-Milvus 把去重代价从搜索时转移到写入时：
+Milvus shifts the dedup cost from search time to write time:
 
 ```
 Milvus upsert("doc_1", new_vec):
-  → Step 1: delete("doc_1")        ← 先显式删除所有旧版本
-  → Step 2: insert("doc_1", ...)   ← 再插入新版本
-  → 搜索时：每个 Segment 只看自己的 bitset，不需要跨 Segment 去重
+  → Step 1: delete("doc_1")        ← Explicitly delete all old versions first
+  → Step 2: insert("doc_1", ...)   ← Then insert new version
+  → At search time: each Segment only checks its own bitset, no cross-Segment dedup needed
 ```
 
-### 20.2 关键机制：Bloom Filter
+### 20.2 Key Mechanism: Bloom Filter
 
-Milvus 每个 Sealed Segment 维护一个 Bloom Filter，记录该 Segment 含哪些 PK：
-
-```
-Segment A: bloom_filter_A = {doc_1, doc_2, doc_3 的指纹}
-Segment B: bloom_filter_B = {doc_4, doc_5 的指纹}
-Segment C: bloom_filter_C = {doc_1, doc_6 的指纹}
-```
-
-当 delete("doc_1") 到达时：
+Milvus maintains a Bloom Filter for each Sealed Segment, recording which PKs the Segment contains:
 
 ```
-检查每个 Segment 的 Bloom Filter：
-  bloom_filter_A.might_contain("doc_1") → True   → 标记 A 中 doc_1 为删除
-  bloom_filter_B.might_contain("doc_1") → False  → 跳过（doc_1 肯定不在 B）
-  bloom_filter_C.might_contain("doc_1") → True   → 标记 C 中 doc_1 为删除
-
-复杂度：O(Segment 数量)，每个 Bloom Filter 查询 O(1)
+Segment A: bloom_filter_A = {fingerprints of doc_1, doc_2, doc_3}
+Segment B: bloom_filter_B = {fingerprints of doc_4, doc_5}
+Segment C: bloom_filter_C = {fingerprints of doc_1, doc_6}
 ```
 
-Bloom Filter 特性：
-- 说"不在" → **一定不在**（无假阴性）
-- 说"可能在" → **可能误报**（假阳性，但无害——多记一条无效删除而已）
+When delete("doc_1") arrives:
+
+```
+Check each Segment's Bloom Filter:
+  bloom_filter_A.might_contain("doc_1") → True   → Mark doc_1 in A as deleted
+  bloom_filter_B.might_contain("doc_1") → False  → Skip (doc_1 definitely not in B)
+  bloom_filter_C.might_contain("doc_1") → True   → Mark doc_1 in C as deleted
+
+Complexity: O(number of Segments), each Bloom Filter query O(1)
+```
+
+Bloom Filter characteristics:
+- Says "not present" → **definitely not present** (no false negatives)
+- Says "might be present" → **could be a false positive** (but harmless -- just records one extra invalid deletion)
 
 ### 20.3 Per-Segment Bitset
 
-每个 Segment 有自己的 bitset，搜索时只看本 Segment 的 bitset：
+Each Segment has its own bitset, search only checks the local Segment's bitset:
 
 ```
-Segment A (1000 行):
-  bitset = [1,1,0,1,1,0,1,...]     ← 0 = 已删除/过期，1 = 有效
+Segment A (1000 rows):
+  bitset = [1,1,0,1,1,0,1,...]     ← 0 = deleted/expired, 1 = valid
 
-搜索 Segment A 时：
-  index.search(query, bitset=bitset)   ← FAISS 直接跳过 bitset=0 的行
-  不需要知道其他 Segment 有什么 ← 与我们的方案的根本区别
+When searching Segment A:
+  index.search(query, bitset=bitset)   ← FAISS directly skips rows where bitset=0
+  No need to know what other Segments have ← Fundamental difference from our approach
 ```
 
-### 20.4 两种方案全面对比
+### 20.4 Full Comparison of Two Approaches
 
 ```
-                        我们的设计                    Milvus
-                        (隐式去重)                   (显式删除)
-                        ─────────                    ─────────
+                        Our Design                      Milvus
+                        (Implicit dedup)                (Explicit deletion)
+                        ─────────                       ─────────
 
-upsert 实现             只写 wal_data               delete(旧) + insert(新)
-写入复杂度              O(1)                        O(S) S=Segment 数（Bloom Filter 查询）
-写入额外结构            无                           每个 Segment 维护 Bloom Filter
-搜索时去重              全局扫描 O(N)                不需要（旧版本已被显式删除）
-                        N=总行数                     O(1) per row（只看本段 bitset）
-Compaction             清理旧版本 + 已删除            清理已删除
-正确性保证              _seq 比较                     Bloom Filter + 显式 delete log
+upsert implementation   Only write wal_data             delete(old) + insert(new)
+Write complexity        O(1)                            O(S) S=number of Segments (Bloom Filter queries)
+Extra write structures  None                            Each Segment maintains Bloom Filter
+Search-time dedup       Global scan O(N)                Not needed (old versions explicitly deleted)
+                        N=total rows                    O(1) per row (only check local bitset)
+Compaction              Clean old versions + deleted     Clean deleted
+Correctness guarantee   _seq comparison                  Bloom Filter + explicit delete log
 ```
 
-核心 trade-off：
+Core trade-off:
 
 ```
-我们：写入简单 O(1)，搜索代价 O(N)
-      → 适合写多读少、数据量小的嵌入式场景
+Ours: Simple writes O(1), search cost O(N)
+      → Suitable for write-heavy, read-light, small data embedded scenarios
 
-Milvus：写入代价 O(S)，搜索代价 O(1) per row
-        → 适合读多写少、数据量大的生产环境
+Milvus: Write cost O(S), search cost O(1) per row
+        → Suitable for read-heavy, write-light, large data production environments
 ```
 
-### 20.5 Milvus 搜索流程 vs 我们的搜索流程
+### 20.5 Milvus Search Flow vs Our Search Flow
 
 ```
-Milvus search:                              我们的 search:
+Milvus search:                              Our search:
   │                                           │
-  ├─ for each segment:                        ├─ 全局扫描所有 seg.pks + seg.seqs
-  │    ├─ 读本 segment 的 bitset              │   构建 best = {pk → max_seq}
-  │    │   (已包含删除+去重信息，                │   O(N)
-  │    │    不需要跨 segment 查)               │
-  │    ├─ index.search(query, bitset)         ├─ 生成 per-segment masks
-  │    └─ 返回 local top-k                    │
+  ├─ for each segment:                        ├─ Global scan of all seg.pks + seg.seqs
+  │    ├─ Read this segment's bitset          │   Build best = {pk → max_seq}
+  │    │   (already contains delete+dedup     │   O(N)
+  │    │    info, no cross-segment query      │
+  │    │    needed)                            │
+  │    ├─ index.search(query, bitset)         ├─ Generate per-segment masks
+  │    └─ Return local top-k                  │
   │                                           ├─ for each segment:
   ├─ merge local top-k → global top-k        │    seg.search(query, mask, top_k)
   │                                           │
   └─ done                                    ├─ merge → global top-k
                                               └─ done
 
-  搜索时零全局协调                              搜索时需要全局扫描去重
+  Zero global coordination during search       Global dedup scan needed during search
 ```
 
 ---
 
-## 21. 未来演进：Upsert 原子性问题与解决方案
+## 21. Future Evolution: Upsert Atomicity Problem and Solutions
 
-### 21.1 问题：显式删除引入双文件写入
+### 21.1 Problem: Explicit Deletion Introduces Dual-File Writes
 
-一旦采用 Milvus 风格的 upsert = delete + insert，一次 upsert 就需要同时写 wal_data 和 wal_delta：
+Once Milvus-style upsert = delete + insert is adopted, a single upsert needs to write both wal_data and wal_delta simultaneously:
 
 ```
 upsert("doc_1", new_vec)
   │
-  ├─ wal_delta.write_delete(doc_1)     ← 删除旧版本
-  │                               ← ⚡ 崩溃
-  └─ wal_data.write_insert(doc_1)      ← 插入新版本
+  ├─ wal_delta.write_delete(doc_1)     ← Delete old version
+  │                               ← ⚡ Crash
+  └─ wal_data.write_insert(doc_1)      ← Insert new version
 ```
 
-**崩溃在两步之间：delete 写了但 insert 没写 → doc_1 被删除，新版本丢失 → 数据丢了。**
+**Crash between the two steps: delete written but insert not written → doc_1 is deleted, new version lost → data lost.**
 
-反过来先 insert 后 delete：
+Reversed order, insert first then delete:
 
 ```
-  ├─ wal_data.write_insert(doc_1, _seq=500)    ← 先写 insert
-  │                                       ← ⚡ 崩溃
-  └─ wal_delta.write_delete(doc_1)              ← 再写 delete
+  ├─ wal_data.write_insert(doc_1, _seq=500)    ← Write insert first
+  │                                       ← ⚡ Crash
+  └─ wal_delta.write_delete(doc_1)              ← Then write delete
 
-崩溃：insert 在，delete 不在
-→ 旧版本 (_seq=100) 没被显式删除
-→ 新版本 (_seq=500) 存在
-→ 同一个 PK 出现两次（如果只靠 per-segment bitset，不做 _seq 去重）
+Crash: insert exists, delete doesn't
+→ Old version (_seq=100) not explicitly deleted
+→ New version (_seq=500) exists
+→ Same PK appears twice (if relying only on per-segment bitset without _seq dedup)
 ```
 
-**不管什么顺序，双文件写入都无法保证原子性。**
+**Regardless of order, dual-file writes cannot guarantee atomicity.**
 
-### 21.2 方案 A：合并为单 WAL 文件（根本解决）
+### 21.2 Approach A: Merge into Single WAL File (Fundamental Solution)
 
-把 wal_data 和 wal_delta 合并为一个 WAL 文件，用 `_op` 列区分操作类型。
+Merge wal_data and wal_delta into a single WAL file, using an `_op` column to distinguish operation types.
 
-**合并后的 WAL schema**：
+**Merged WAL schema**:
 
 ```
 _op:        utf8          "INSERT" | "DELETE"
 _seq:       uint64
 _partition: utf8
 {pk_field}: ...
-{vec_field}: list<f32>    (DELETE 行填 null)
-{其他字段}: ...            (DELETE 行填 null)
-$meta:      utf8          (DELETE 行填 null)
+{vec_field}: list<f32>    (DELETE rows filled with null)
+{other fields}: ...       (DELETE rows filled with null)
+$meta:      utf8          (DELETE rows filled with null)
 ```
 
-**Upsert 写入一个 RecordBatch**，包含两行：
+**Upsert writes one RecordBatch** containing two rows:
 
 ```
-一次 write_batch() 调用，两行在同一个 RecordBatch 中：
+One write_batch() call, two rows in the same RecordBatch:
 
   Row 0: _op="DELETE", _seq=499, pk="doc_1", vec=null,       ...
   Row 1: _op="INSERT", _seq=500, pk="doc_1", vec=[0.9,...],  ...
 ```
 
-**原子性保证**：
+**Atomicity guarantee**:
 
 ```
-Arrow IPC write_batch() 要么完整写入一个 RecordBatch，要么截断丢弃。
-两行在同一个 RecordBatch 中 → 同生共死：
-  写入成功 → delete + insert 都在
-  写入中崩溃 → recovery 丢弃不完整的 batch → 都不在
-  ✅ RecordBatch 级原子
+Arrow IPC write_batch() either writes a complete RecordBatch, or truncates and discards it.
+Two rows in the same RecordBatch → live and die together:
+  Write succeeds → both delete + insert are present
+  Crash during write → recovery discards incomplete batch → neither is present
+  ✅ RecordBatch-level atomicity
 ```
 
-Recovery 时按 `_op` 列分流：
+During Recovery, split by `_op` column:
 
 ```python
 for batch in wal_batches:
@@ -1920,343 +1925,345 @@ for batch in wal_batches:
             memtable.put(seq, partition, **fields)
         elif op == "DELETE":
             memtable.delete(pk, seq, partition)
-            # + 通过 Bloom Filter 更新相关 Segment 的 bitset
+            # + Update related Segment bitsets via Bloom Filter
 ```
 
-### 21.3 方案 B：保持双文件 + 写入顺序 + _seq 兜底（渐进方案）
+### 21.3 Approach B: Keep Dual Files + Write Order + _seq Fallback (Incremental Approach)
 
-保持双文件结构不变，利用 _seq 作为最终正确性保证：
+Keep the dual-file structure unchanged, use _seq as the ultimate correctness guarantee:
 
 ```
-写入顺序：先 insert，后 delete
+Write order: insert first, delete second
 
 upsert("doc_1", new_vec):
-  ├─ Step A: wal_data.write_insert(doc_1, _seq=500)    ← 先写 insert
-  └─ Step B: wal_delta.write_delete(doc_1, _seq=499)   ← 再写 delete
+  ├─ Step A: wal_data.write_insert(doc_1, _seq=500)    ← Write insert first
+  └─ Step B: wal_delta.write_delete(doc_1, _seq=499)   ← Then write delete
 
-崩溃在 A 和 B 之间：
-  insert 在，delete 不在
-  → 旧版本 (_seq=100) 没被显式删除
-  → 新版本 (_seq=500) 存在
-  → 但 _seq 去重仍然生效：同 PK 保留 max_seq → 500 > 100 → 新版本胜出 ✅
+Crash between A and B:
+  insert exists, delete doesn't
+  → Old version (_seq=100) not explicitly deleted
+  → New version (_seq=500) exists
+  → But _seq dedup still works: same PK keeps max_seq → 500 > 100 → new version wins ✅
 ```
 
-**本质**：Bloom Filter + per-segment bitset 是**性能优化层**，_seq 去重是**正确性保证层**。两层配合：
+**Essence**: Bloom Filter + per-segment bitset is the **performance optimization layer**, _seq dedup is the **correctness guarantee layer**. The two layers work together:
 
 ```
-正常情况（99.9%）：
-  bitset 快速过滤（O(1) per row） → 不需要全局扫描
+Normal case (99.9%):
+  bitset fast filtering (O(1) per row) → no global scan needed
 
-异常情况（崩溃导致 bitset 不完整）：
-  _seq 去重兜底 → 正确性不受影响
-  Compaction 时修复 bitset → 最终恢复到正常状态
+Abnormal case (crash causes incomplete bitset):
+  _seq dedup as fallback → correctness unaffected
+  Compaction repairs bitset → eventually returns to normal state
 ```
 
-### 21.4 方案 C：Recovery 补偿（方案 B 的增强）
+### 21.4 Approach C: Recovery Compensation (Enhancement of Approach B)
 
-在方案 B 基础上，Recovery 时主动检测并补全不完整的 upsert：
+On top of Approach B, Recovery proactively detects and completes incomplete upserts:
 
 ```python
 def _fix_incomplete_upserts(wal_data_batches, wal_delta_batches, segments):
-    """检测 insert 有但对应 delete 缺失的情况，补发 delete。"""
+    """Detect cases where insert exists but corresponding delete is missing, issue compensating delete."""
 
-    # 收集 WAL 中 insert 的 PK
+    # Collect PKs inserted via WAL
     inserted_pks = set()
     for batch in wal_data_batches:
         for row in range(batch.num_rows):
             inserted_pks.add(batch.column(pk_field)[row].as_py())
 
-    # 收集 WAL 中 delete 的 PK
+    # Collect PKs deleted via WAL
     deleted_pks = set()
     for batch in wal_delta_batches:
         for row in range(batch.num_rows):
             deleted_pks.add(batch.column(pk_field)[row].as_py())
 
-    # insert 了但没 delete 的 PK → 可能是崩溃导致的不完整 upsert
+    # PKs that were inserted but not deleted → possibly incomplete upsert due to crash
     missing_deletes = inserted_pks - deleted_pks
 
     for pk in missing_deletes:
         for seg in segments:
             if seg.bloom_filter.might_contain(pk):
-                seg.mark_deleted(pk)    # 补全 per-segment bitset
+                seg.mark_deleted(pk)    # Complete the per-segment bitset
 ```
 
-### 21.5 三种方案对比
+### 21.5 Three Approaches Comparison
 
-| | 方案 A：单 WAL 文件 | 方案 B：双文件 + _seq 兜底 | 方案 C：Recovery 补偿 |
+| | Approach A: Single WAL File | Approach B: Dual Files + _seq Fallback | Approach C: Recovery Compensation |
 |--|-------------------|------------------------|-------------------|
-| 原子性 | RecordBatch 级原子 | 不原子，靠 _seq 兜底 | 不原子，靠 Recovery 修复 |
-| WAL 改动 | 大（合并为单文件，schema 加 _op + nullable） | 无 | 无 |
-| 搜索正确性 | 完美 | _seq 兜底保证（偶尔需全局去重） | Recovery 后完美 |
-| 复杂度 | schema 改动 | 搜索需保留 _seq 去重路径 | Recovery 加检测逻辑 |
-| 性能 | DELETE 行的 null 字段浪费少量空间 | 异常时搜索退化 | 无额外搜索开销 |
+| Atomicity | RecordBatch-level atomic | Not atomic, relies on _seq fallback | Not atomic, relies on Recovery repair |
+| WAL changes | Large (merge to single file, schema adds _op + nullable) | None | None |
+| Search correctness | Perfect | _seq fallback guarantee (occasionally needs global dedup) | Perfect after Recovery |
+| Complexity | Schema changes | Search must retain _seq dedup path | Recovery adds detection logic |
+| Performance | DELETE rows' null fields waste minimal space | Search degrades in abnormal cases | No extra search overhead |
 
-### 21.6 推荐演进路径
-
-```
-MVP（当前设计）
-  upsert = 纯 insert，_seq 隐式去重
-  双 WAL 文件，没有原子性问题（每个 API 只写单文件）
-  搜索时全局扫描去重，O(N)
-  ✅ 简单正确
-
-Phase 2（加 Bloom Filter + bitset 优化搜索性能）
-  采用方案 B：upsert = 先 insert 后 delete，_seq 兜底
-  正常情况 bitset 快速过滤，异常情况 _seq 兜底
-  可选方案 C 在 Recovery 时补偿
-  ✅ 渐进优化，不破坏已有正确性
-
-Phase 3（追求完美原子性）
-  采用方案 A：合并为单 WAL 文件 + _op 列
-  RecordBatch 级原子，彻底消除不一致窗口
-  可以安全降低 _seq 全局去重的权重（仍保留作为防御性检查）
-  ✅ 最终形态
-```
-
-### 21.7 _seq 去重的定位
-
-**_seq 去重是系统的安全网，贯穿所有演进阶段，不应被移除。**
+### 21.6 Recommended Evolution Path
 
 ```
-即使 Phase 3 实现了完美的单 WAL 原子性 + Bloom Filter + per-segment bitset：
-  → 仍保留 _seq 去重作为防御性检查
-  → 防止 Bloom Filter 误报 + 代码 bug + 未预见的边界情况
-  → 代价极低（已经有 _seq 列，比较操作 O(1)）
-  → 收益极高（最后一道正确性防线）
+MVP (current design)
+  upsert = pure insert, _seq implicit dedup
+  Dual WAL files, no atomicity issue (each API only writes single file)
+  Global scan dedup at search time, O(N)
+  ✅ Simple and correct
+
+Phase 2 (add Bloom Filter + bitset to optimize search performance)
+  Adopt Approach B: upsert = insert first then delete, _seq fallback
+  Normal case: bitset fast filtering; abnormal case: _seq fallback
+  Optional Approach C for Recovery compensation
+  ✅ Gradual optimization, doesn't break existing correctness
+
+Phase 3 (pursue perfect atomicity)
+  Adopt Approach A: merge into single WAL file + _op column
+  RecordBatch-level atomicity, completely eliminates inconsistency window
+  Can safely reduce weight of _seq global dedup (still retained as defensive check)
+  ✅ Final form
+```
+
+### 21.7 Role of _seq Dedup
+
+**_seq dedup is the system's safety net, present across all evolution stages, and should not be removed.**
+
+```
+Even when Phase 3 achieves perfect single WAL atomicity + Bloom Filter + per-segment bitset:
+  → Still retain _seq dedup as a defensive check
+  → Guards against Bloom Filter false positives + code bugs + unforeseen edge cases
+  → Very low cost (already have _seq column, comparison operation is O(1))
+  → Very high benefit (last line of defense for correctness)
 ```
 
 ---
 
-## 22. 前置去重 vs 后置去重
+## 22. Pre-Dedup vs Post-Dedup
 
-### 22.1 后置去重的思路
+### 22.1 Post-Dedup Approach
 
-不在搜索前做全局去重，而是搜索后再过滤：
-
-```
-前置去重（当前方案）：
-  全局扫描 PK+_seq → 生成 mask → 只搜有效行 → 合并
-
-后置去重（替代方案）：
-  每个 Segment 独立搜索（含过期数据）→ 合并 → 去重 → 取 top-k
-```
-
-后置去重更简单——每个 Segment 完全独立，不需要搜索前的全局扫描。
-
-### 22.2 问题：过期数据挤占 local top-k 名额
+Instead of doing global dedup before search, filter after search:
 
 ```
-场景：top_k = 3
+Pre-dedup (current approach):
+  Global scan PK+_seq → generate mask → only search valid rows → merge
 
-Segment A (旧):
-  doc_1  _seq=100  vec=[0.1,...]  dist=0.05  ← 过期版本，离 query 很近
+Post-dedup (alternative approach):
+  Each Segment searches independently (including expired data) → merge → dedup → take top-k
+```
+
+Post-dedup is simpler -- each Segment is completely independent, no global scan needed before search.
+
+### 22.2 Problem: Expired Data Occupies Local Top-k Slots
+
+```
+Scenario: top_k = 3
+
+Segment A (old):
+  doc_1  _seq=100  vec=[0.1,...]  dist=0.05  ← Expired version, very close to query
   doc_2                           dist=0.30
   doc_7                           dist=0.31
-  doc_4                           dist=0.32  ← 第 4 名
+  doc_4                           dist=0.32  ← 4th place
   ...
 
-Segment B (新):
-  doc_1  _seq=500  vec=[0.9,...]  dist=0.80  ← 最新版本，离 query 远
+Segment B (new):
+  doc_1  _seq=500  vec=[0.9,...]  dist=0.80  ← Latest version, far from query
   doc_3                           dist=0.40
 ```
 
-**前置去重（正确结果）**：
+**Pre-dedup (correct result)**:
 
 ```
-去重：doc_1 → Segment B 胜 (_seq=500)
-Segment A 有效行搜索：doc_2(0.30), doc_7(0.31), doc_4(0.32) → local top-3
-Segment B 有效行搜索：doc_1(0.80), doc_3(0.40) → local top-2
+Dedup: doc_1 → Segment B wins (_seq=500)
+Segment A valid row search: doc_2(0.30), doc_7(0.31), doc_4(0.32) → local top-3
+Segment B valid row search: doc_1(0.80), doc_3(0.40) → local top-2
 
-合并 top-3: [doc_2(0.30), doc_7(0.31), doc_4(0.32)]  ✅
+Merge top-3: [doc_2(0.30), doc_7(0.31), doc_4(0.32)]  ✅
 ```
 
-**后置去重（丢结果）**：
+**Post-dedup (missing results)**:
 
 ```
-Segment A 搜索全部（含过期 doc_1）：
+Segment A searches all (including expired doc_1):
   local top-3: [doc_1(0.05), doc_2(0.30), doc_7(0.31)]
-                  ↑ 过期数据占了名额，doc_4(0.32) 排第 4 被截断
+                  ↑ Expired data took a slot, doc_4(0.32) ranked 4th and was truncated
 
-Segment B：
+Segment B:
   local top-3: [doc_3(0.40), doc_1(0.80)]
 
-合并: [doc_1(A,0.05), doc_2(0.30), doc_7(0.31), doc_3(0.40), doc_1(B,0.80)]
-去重: doc_1 保留 B 版本(0.80)，丢弃 A 版本(0.05)
-结果: [doc_2(0.30), doc_7(0.31), doc_3(0.40)]
+Merge: [doc_1(A,0.05), doc_2(0.30), doc_7(0.31), doc_3(0.40), doc_1(B,0.80)]
+Dedup: doc_1 retains B version(0.80), discards A version(0.05)
+Result: [doc_2(0.30), doc_7(0.31), doc_3(0.40)]
 
-正确答案: [doc_2(0.30), doc_7(0.31), doc_4(0.32)]
-                                       ↑ doc_4 丢了！
+Correct answer: [doc_2(0.30), doc_7(0.31), doc_4(0.32)]
+                                       ↑ doc_4 is missing!
 ```
 
-**根因**：过期的 doc_1（dist=0.05）在 Segment A 的 local top-3 中挤掉了 doc_4（dist=0.32）。
-去重后 doc_1 被丢弃，但 doc_4 已经在 local top-k 截断时消失了，无法找回。
+**Root cause**: The expired doc_1 (dist=0.05) displaced doc_4 (dist=0.32) in Segment A's local top-3.
+After dedup, doc_1 is discarded, but doc_4 was already lost during local top-k truncation and cannot be recovered.
 
-### 22.3 缓解方案：Over-fetch
+### 22.3 Mitigation: Over-Fetch
 
-每个 Segment 取 `top_k × factor` 而不是 `top_k`，给去重留出裕量：
+Each Segment takes `top_k × factor` instead of `top_k`, leaving headroom for dedup:
 
 ```
-factor = 2：Segment A 取 top-6 而不是 top-3
+factor = 2: Segment A takes top-6 instead of top-3
   → [doc_1(0.05), doc_2(0.30), doc_7(0.31), doc_4(0.32), ...]
-  → doc_4 保住了 ✅
+  → doc_4 is preserved ✅
 
-合并 → 去重 → 取 top-3
+Merge → dedup → take top-3
   → [doc_2(0.30), doc_7(0.31), doc_4(0.32)] ✅
 ```
 
-**但 factor 多大才够？**
+**But how large should the factor be?**
 
 ```
-取决于"有多少 PK 跨 Segment 重复"：
-  刚 flush，几乎无重复         → factor=1.1 够了
-  大量 upsert，很多重复        → 需要 factor=3, 5, 甚至更大
-  极端情况：所有 PK 都 upsert 过 → 需要 factor≥2
-  无法提前知道 → 只能猜，猜错就丢结果
+Depends on "how many PKs are duplicated across Segments":
+  Just flushed, almost no duplicates        → factor=1.1 is enough
+  Many upserts, lots of duplicates          → Need factor=3, 5, or even larger
+  Extreme case: all PKs have been upserted  → Need factor≥2
+  Cannot know in advance → can only guess, wrong guess means missing results
 ```
 
-### 22.4 两种方案对比
+### 22.4 Two Approaches Comparison
 
-| | 前置去重 | 后置去重 + over-fetch |
+| | Pre-dedup | Post-dedup + over-fetch |
 |--|--------|---------------------|
-| 正确性 | 精确（不丢结果） | 可能丢结果（factor 不够大时） |
-| 实现复杂度 | 需要全局扫描 PK+_seq | 每段独立，更简单 |
-| 距离计算量 | 只算有效行 | 过期行也要算（浪费） |
-| 适用场景 | 暴力搜索（要求精确） | ANN 近似搜索（本身就不精确） |
-| 分布式友好度 | 差（需全局协调） | 好（每段独立） |
+| Correctness | Precise (no missing results) | May miss results (when factor isn't large enough) |
+| Implementation complexity | Requires global scan of PK+_seq | Each segment independent, simpler |
+| Distance computation volume | Only compute for valid rows | Expired rows also computed (waste) |
+| Applicable scenario | Brute-force search (requires precision) | ANN approximate search (inherently imprecise) |
+| Distributed friendliness | Poor (requires global coordination) | Good (each segment independent) |
 
-### 22.5 结论：取决于搜索精度要求
-
-```
-暴力搜索（MVP）→ 必须前置去重
-  用户期望精确的 top-k，丢结果不可接受
-  数据全在内存中，O(N) 全局扫描代价可接受
-
-FAISS ANN（未来）→ 后置去重可接受
-  ANN 本身就是近似的，丢一个边界结果影响不大
-  每段有独立 FAISS 索引，前置去重收益更小
-    （FAISS 搜索复杂度不随数据量线性增长，过滤几条过期数据省不了多少）
-  over-fetch factor=2 在大多数场景够用
-  分布式搜索时更自然（segment 可在不同节点上）
-```
-
-### 22.6 与演进路径的关系
+### 22.5 Conclusion: Depends on Search Precision Requirements
 
 ```
-MVP:     前置去重（精确） + 暴力搜索
-Phase 2: 前置去重（精确） + Bloom Filter 优化写入端
-Phase 3: 可选切换到后置去重 + FAISS ANN
-         此时 _seq 去重仍作为安全网：
-         即使后置去重丢了边界结果（精度问题），
-         _seq 机制至少保证不会返回过期数据的错误内容
+Brute-force search (MVP) → must use pre-dedup
+  Users expect precise top-k, missing results is unacceptable
+  All data is in memory, O(N) global scan cost is acceptable
+
+FAISS ANN (future) → post-dedup is acceptable
+  ANN is inherently approximate, missing one borderline result has little impact
+  Each segment has an independent FAISS index, pre-dedup provides less benefit
+    (FAISS search complexity doesn't grow linearly with data volume, filtering a few expired records saves little)
+  over-fetch factor=2 is sufficient for most scenarios
+  More natural for distributed search (segments can be on different nodes)
+```
+
+### 22.6 Relationship with Evolution Path
+
+```
+MVP:     Pre-dedup (precise) + brute-force search
+Phase 2: Pre-dedup (precise) + Bloom Filter optimization on write side
+Phase 3: Can optionally switch to post-dedup + FAISS ANN
+         _seq dedup still serves as safety net at this point:
+         Even if post-dedup misses borderline results (precision issue),
+         _seq mechanism at least guarantees no incorrect content from expired data is returned
 ```
 
 ---
 
-## 23. Milvus 跨 Partition 重复 PK 调研
+## 23. Milvus Cross-Partition Duplicate PK Investigation
 
-### 23.1 Milvus 的行为：不做任何 PK 唯一性检查
+### 23.1 Milvus's Behavior: No PK Uniqueness Check at All
 
-Milvus 官方文档明确声明：
+Milvus official documentation clearly states:
 
 > "Milvus does not support primary key de-duplication for now. Therefore, there can be duplicate primary keys in the same collection."
 
-同一个 PK 写入两个不同 Partition，**两条记录都会被保存**，不报错、不覆盖。
+Writing the same PK to two different Partitions, **both records will be saved**, no error, no overwrite.
 
-### 23.2 读取时的行为（不一致）
+### 23.2 Read Behavior (Inconsistent)
 
-| 操作 | 行为 | 问题 |
+| Operation | Behavior | Issue |
 |------|------|------|
-| query(pk=X) | 返回**最早插入的那条**（post-reduce 去重，保留第一条找到的） | 不一定是最新版本 |
-| search(ANN) | **可能返回多条同 PK 结果**，取向量最相似的那条 | 语义不明确 |
-| count(\*) | **包含所有重复**，PK 插入 2 次则 count=2 | 计数不准 |
-| Limit=10 | 先取 10 条再去重 → 实际返回可能 **< 10 条** | 分页不可靠 |
+| query(pk=X) | Returns **the earliest inserted one** (post-reduce dedup, retains first found) | Not necessarily the latest version |
+| search(ANN) | **May return multiple results with the same PK**, takes the most vector-similar one | Semantics unclear |
+| count(\*) | **Includes all duplicates**, inserting a PK twice means count=2 | Inaccurate count |
+| Limit=10 | Takes 10 first then dedup → actual return may be **< 10** | Unreliable pagination |
 
-### 23.3 Upsert 也不跨 Partition
+### 23.3 Upsert Also Doesn't Cross Partitions
 
-Milvus 的 `upsert()` 是 **Partition 级别的** delete + insert：
+Milvus's `upsert()` is **Partition-level** delete + insert:
 
 ```
-Partition A 有 PK=1
-调用 upsert(PK=1, partition=B)
+Partition A has PK=1
+Call upsert(PK=1, partition=B)
 
-→ Partition A 的记录 不会被删除
-→ 结果：Partition A 和 B 各有一条 PK=1
+→ The record in Partition A will NOT be deleted
+→ Result: Both Partition A and B each have one record with PK=1
 ```
 
-要跨 Partition 清理，必须手动 `delete(pk=1, partition_name=None)`（None 表示全 Partition 扫描）。
+To clean across Partitions, you must manually `delete(pk=1, partition_name=None)` (None means scan all Partitions).
 
-### 23.4 Compaction 也不跨 Partition
+### 23.4 Compaction Also Doesn't Cross Partitions
 
-Compaction 在 Partition 内部的 Segment 间合并，**不处理跨 Partition 的重复 PK**。
+Compaction merges Segments within a Partition, **does not handle duplicate PKs across Partitions**.
 
-### 23.5 Milvus 的官方态度
+### 23.5 Milvus's Official Stance
 
-- Issue #36199 标记为 **"resolution/by-design"** — 承认这是已知行为，不视为 bug
-- **Global PK Dedup** 列入 Roadmap，目标 v2.6 / v3.0（尚未实现）
-- 当前官方建议：用 `auto_id=True` 避免问题，或应用层自行去重
+- Issue #36199 marked as **"resolution/by-design"** -- acknowledged as known behavior, not considered a bug
+- **Global PK Dedup** added to Roadmap, targeting v2.6 / v3.0 (not yet implemented)
+- Current official recommendation: Use `auto_id=True` to avoid the problem, or deduplicate at the application layer
 
-相关 Issue 汇总：
+Related Issue Summary:
 
-| Issue / PR | 标题 | 要点 |
+| Issue / PR | Title | Key Points |
 |------------|------|------|
-| Issue #36199 | Duplicate primary key values leads to inconsistent query results | 标记 by-design；query 返回最早版本，search 返回最相似版本 |
-| Issue #28615 | Enhance constraints for inserting duplicate primary key data | Limit 参数因去重后变少 |
-| Issue #31552 | Support primary key dedup and vector dedup when insert | 特性请求，分配到 milestone 3.0 |
-| Issue #37389 | Does Milvus actually perform deduplication? | 仅 upsert 去重，insert 不去重 |
-| Issue #33353 | Insert data with duplicate primary key | 默默接受重复 PK |
-| Discussion #18202 | The Scope of Primary Key | PK 范围是 Collection 级，但唯一性不保证 |
-| Discussion #18201 | What happens if I insert data with the same id several times? | query 返回第一个；search 可能返回多个同 PK |
-| PR #10967 | Remove primary key duplicated query result on proxy | Proxy 层 post-reduce 去重实现 |
+| Issue #36199 | Duplicate primary key values leads to inconsistent query results | Marked by-design; query returns earliest version, search returns most similar version |
+| Issue #28615 | Enhance constraints for inserting duplicate primary key data | Limit parameter gets fewer results after dedup |
+| Issue #31552 | Support primary key dedup and vector dedup when insert | Feature request, assigned to milestone 3.0 |
+| Issue #37389 | Does Milvus actually perform deduplication? | Only upsert deduplicates, insert does not |
+| Issue #33353 | Insert data with duplicate primary key | Silently accepts duplicate PKs |
+| Discussion #18202 | The Scope of Primary Key | PK scope is Collection-level, but uniqueness not guaranteed |
+| Discussion #18201 | What happens if I insert data with the same id several times? | query returns the first one; search may return multiple with same PK |
+| PR #10967 | Remove primary key duplicated query result on proxy | Proxy-layer post-reduce dedup implementation |
 
-### 23.6 对 MilvusLite 的设计启示
+### 23.6 Design Implications for MilvusLite
 
-**PK 唯一性范围有三种选择**：
+**Three choices for PK uniqueness scope**:
 
-| 方案 | PK 唯一性范围 | 优点 | 缺点 |
+| Approach | PK Uniqueness Scope | Pros | Cons |
 |------|-------------|------|------|
-| A: Collection 级唯一 | 跨所有 Partition | 语义清晰，search/query 结果一致 | insert 时需要全局检查（或靠 _seq 去重兜底） |
-| B: Partition 级唯一 | 仅 Partition 内 | 实现简单，Partition 间完全隔离 | 同 Milvus 问题：跨 Partition 查询出现重复 |
-| C: 不保证唯一（同 Milvus） | 无 | 最简单 | 结果不可预测，count 不准 |
+| A: Collection-level unique | Across all Partitions | Clear semantics, consistent search/query results | Requires global check during insert (or _seq dedup fallback) |
+| B: Partition-level unique | Within Partition only | Simple implementation, Partitions fully isolated | Same problems as Milvus: duplicates in cross-Partition queries |
+| C: No guarantee (same as Milvus) | None | Simplest | Unpredictable results, inaccurate counts |
 
-**我们选择方案 A，且已经天然实现了**：
+**We choose Approach A, and it's already naturally implemented**:
 
 ```
-MilvusLite 的 _seq 全局去重机制天然提供 Collection 级 PK 唯一性：
+MilvusLite's _seq global dedup mechanism naturally provides Collection-level PK uniqueness:
 
-1. insert 时不需要额外检查
-   → 直接写入，不查旧 Partition
+1. No extra check needed during insert
+   → Write directly, don't query old Partitions
 
-2. search 时 build_segment_masks 全局扫描所有 Partition 的 Segment
-   → 遍历所有 seg.pks + seg.seqs
-   → 只保留 max_seq → 同 PK 跨 Partition 自动取最新版本
-   → 过期版本自动被过滤，不管在哪个 Partition
+2. During search, build_segment_masks globally scans Segments across all Partitions
+   → Traverses all seg.pks + seg.seqs
+   → Only retains max_seq → same PK across Partitions automatically takes latest version
+   → Expired versions automatically filtered, regardless of which Partition they're in
 
-3. delete(partition_name=None) 已设计为全 Partition 扫描
-   → 跨 Partition 删除也是原生支持的
+3. delete(partition_name=None) is already designed for all-Partition scan
+   → Cross-Partition deletion is natively supported
 
-4. get(pks, partition_names=None) 同理
-   → 全局 _seq 去重，返回最新版本
+4. get(pks, partition_names=None) similarly
+   → Global _seq dedup, returns latest version
 ```
 
-**这是比 Milvus 更强的语义保证，且不需要额外开销**：
+**This is a stronger semantic guarantee than Milvus, with no extra overhead**:
 
 ```
                         Milvus                     MilvusLite
                         ────────                   ──────────
-PK 唯一性范围            不保证                      Collection 级（跨 Partition）
-upsert 跨 Partition     不处理（只在目标 Partition    _seq 去重自动处理
-                        内 delete+insert）
-search 跨 Partition     可能返回重复 PK              全局去重，每个 PK 只返回最新版本
-                        query/search 行为不一致
-count 准确性            不准（含重复）                准确（去重后计数）
-额外实现开销            需要 Global PK Dedup          无（_seq 天然支持）
-                        (Roadmap v3.0)
+PK uniqueness scope     Not guaranteed              Collection-level (cross-Partition)
+upsert across Partitions Does not handle (only      _seq dedup handles automatically
+                        delete+insert within
+                        target Partition)
+search across Partitions May return duplicate PKs    Global dedup, only returns latest version per PK
+                        query/search behavior
+                        inconsistent
+count accuracy          Inaccurate (includes dupes)  Accurate (counts after dedup)
+Extra implementation    Needs Global PK Dedup        None (_seq naturally supports)
+overhead                (Roadmap v3.0)
 ```
 
-**但也有 trade-off**：
+**But there is a trade-off**:
 
 ```
-代价：搜索时全局扫描 O(N) 做去重
-     → MVP 可接受（全量暴力搜索本身就 O(N)，去重扫描相比之下微不足道）
-     → Phase 2 引入 Bloom Filter + bitset 后，可把去重从搜索热路径移到写入端
+Cost: Global scan O(N) for dedup during search
+     → Acceptable for MVP (brute-force search is already O(N), dedup scan is negligible in comparison)
+     → After Phase 2 introduces Bloom Filter + bitset, dedup can be moved from search hot path to write side
 ```

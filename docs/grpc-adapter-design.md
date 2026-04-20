@@ -1,52 +1,52 @@
-# 深入设计：gRPC 适配层（Phase 10）
+# Deep Dive Design: gRPC Adapter Layer (Phase 10)
 
-## 1. 概述
+## 1. Overview
 
-MilvusLite Phase 10 在内部 engine 之上构造一个 gRPC 服务层，让 **pymilvus 客户端无需修改代码即可连接 MilvusLite**。这是项目作为"本地版 Milvus"在协议兼容性上的最终一公里。
+MilvusLite Phase 10 builds a gRPC service layer on top of the internal engine, enabling **pymilvus clients to connect to MilvusLite without any code changes**. This is the final mile of protocol compatibility for the project as a "local version of Milvus."
 
-**核心定位**：协议翻译，不增加任何 engine 能力。能跑的 RPC 完全等于 engine 已实现的方法集。这一层的工作量集中在：
-1. 协议到 engine API 的字段映射 + 数据结构转换（最大头）
-2. Milvus FieldData 列式 → engine records 行式 list[dict] 的转置
-3. 错误码翻译
-4. 实现下的 RPC stub + 友好的 UNIMPLEMENTED 消息
+**Core positioning**: Protocol translation only — no additional engine capabilities. The set of working RPCs is exactly equal to the set of methods already implemented in the engine. The work in this layer is concentrated on:
+1. Field mapping + data structure conversion from protocol to engine API (the bulk of the work)
+2. Transposition between Milvus FieldData columnar format and engine records row-wise list[dict]
+3. Error code translation
+4. RPC stubs for implemented RPCs + friendly UNIMPLEMENTED messages for the rest
 
-**前置依赖**：Phase 9 必须先完成 — Phase 10 的 `CreateIndex / LoadCollection / Search` RPC 直接映射到 Phase 9 的 `Collection.create_index / load / search`，两阶段顺序倒过来会让 Phase 10 的 servicer 失去稳定的下层 API 可对接。
+**Prerequisites**: Phase 9 must be completed first — Phase 10's `CreateIndex / LoadCollection / Search` RPCs map directly to Phase 9's `Collection.create_index / load / search`. Reversing the order of these two phases would leave Phase 10's servicer without a stable lower-layer API to interface with.
 
 ---
 
-## 2. 服务定义来源决策
+## 2. Service Definition Source Decision
 
-### 2.1 三个候选方案
+### 2.1 Three Candidate Approaches
 
-| 方案 | 优点 | 缺点 |
+| Approach | Pros | Cons |
 |---|---|---|
-| **A. 直接拷 milvus 官方 proto** | pymilvus 开箱即连；行为一致性最强；future Milvus 版本升级时跟着拉新 proto | proto 量大（~100 个 RPC，几百 KB），实现 stub 工作量大；某些 RPC 的 server-side 行为依赖 Milvus 内部状态机 |
-| **B. 手写最小 proto 子集** | proto 简单，实现量小 | pymilvus 不认识，失去最大卖点 |
-| **C. 拷 milvus proto，但只实现 quickstart 子集，其他返回 UNIMPLEMENTED** | 兼顾 A 的 pymilvus 兼容性 + B 的可控工作量 | 用户调到未实现 RPC 时需要友好错误消息 |
+| **A. Copy official Milvus proto directly** | pymilvus connects out of the box; strongest behavioral consistency; can pull new proto when future Milvus versions upgrade | Proto volume is large (~100 RPCs, hundreds of KB); large stub implementation workload; some RPCs' server-side behavior depends on Milvus internal state machines |
+| **B. Hand-write a minimal proto subset** | Simple proto, small implementation effort | pymilvus won't recognize it — loses the biggest selling point |
+| **C. Copy Milvus proto but only implement a quickstart subset; return UNIMPLEMENTED for everything else** | Combines pymilvus compatibility from A + manageable workload from B | Users hitting unimplemented RPCs need friendly error messages |
 
-### 2.2 决定：方案 C
+### 2.2 Decision: Approach C
 
-**理由**：
-1. **pymilvus 必须能连**是项目的核心目标，方案 B 一票否决
-2. 方案 A 实现所有 RPC 是不必要的浪费 — Milvus 的 backup / RBAC / replica / resource group 等大量 RPC 对本地嵌入式数据库没有意义
-3. 方案 C 等于"protocol surface = Milvus，functional surface = MilvusLite"，pymilvus 能 connect + 大部分 quickstart 调用能跑通，少数 RPC 返回明确的"MilvusLite 不支持 X"
+**Rationale**:
+1. **pymilvus must be able to connect** is a core project goal — Approach B is vetoed outright
+2. Approach A implementing all RPCs is unnecessary waste — Milvus's backup / RBAC / replica / resource group and many other RPCs have no meaning for a local embedded database
+3. Approach C equals "protocol surface = Milvus, functional surface = MilvusLite" — pymilvus can connect + most quickstart calls work, while a few RPCs return clear "MilvusLite does not support X" messages
 
-**前例参考**：Zilliz 官方的 `milvus-lite` 项目（SQLite 后端）走的就是这条路。我们本质上是"用 LSM Parquet + FAISS 替换 milvus-lite 的 SQLite"。
+**Prior art**: Zilliz's official `milvus-lite` project (SQLite backend) takes exactly this approach. We are essentially "replacing milvus-lite's SQLite with LSM Parquet + FAISS."
 
-### 2.3 Proto 文件来源
+### 2.3 Proto File Source
 
-从 [milvus-io/milvus-proto](https://github.com/milvus-io/milvus-proto) 拉以下文件：
-- `proto/milvus.proto` — 主 RPC 定义
-- `proto/schema.proto` — schema / FieldData 类型
-- `proto/common.proto` — 公共类型（Status, KeyValuePair, MsgBase 等）
+Pull the following files from [milvus-io/milvus-proto](https://github.com/milvus-io/milvus-proto):
+- `proto/milvus.proto` — main RPC definitions
+- `proto/schema.proto` — schema / FieldData types
+- `proto/common.proto` — common types (Status, KeyValuePair, MsgBase, etc.)
 
-放到 `milvus_lite/adapter/grpc/proto/`，用 `grpcio-tools` 生成 `_pb2.py` / `_pb2_grpc.py`，**生成结果 commit 到 repo**（不 runtime 生成，避免 build 时依赖 grpcio-tools）。
+Place them in `milvus_lite/adapter/grpc/proto/`, generate `_pb2.py` / `_pb2_grpc.py` with `grpcio-tools`, and **commit the generated output to the repo** (no runtime generation, to avoid build-time dependency on grpcio-tools).
 
-`proto/README.md` 记录"从哪个 milvus-proto commit 生成"，便于追溯和升级。
+`proto/README.md` records "which milvus-proto commit was used for generation" for traceability and upgrades.
 
 ---
 
-## 3. 模块结构
+## 3. Module Structure
 
 ```
 milvus_lite/
@@ -54,16 +54,16 @@ milvus_lite/
     └── grpc/
         ├── __init__.py
         ├── server.py                   # run_server(data_dir, host, port)
-        ├── servicer.py                 # MilvusServicer — 所有 RPC 实现
+        ├── servicer.py                 # MilvusServicer — all RPC implementations
         ├── translators/
         │   ├── __init__.py
         │   ├── schema.py               # Milvus FieldSchema ↔ milvus_lite FieldSchema
-        │   ├── records.py              # FieldData (列式) ↔ list[dict] (行式)
-        │   ├── search.py               # SearchRequest 解析
-        │   ├── result.py               # engine 结果 → SearchResults proto
+        │   ├── records.py              # FieldData (columnar) ↔ list[dict] (row-wise)
+        │   ├── search.py               # SearchRequest parsing
+        │   ├── result.py               # engine results → SearchResults proto
         │   ├── expr.py                 # Milvus filter expr ↔ MilvusLite filter
         │   └── index.py                # IndexParams ↔ IndexSpec
-        ├── proto/                      # 生成的 stub
+        ├── proto/                      # generated stubs
         │   ├── __init__.py
         │   ├── milvus_pb2.py
         │   ├── milvus_pb2_grpc.py
@@ -71,125 +71,125 @@ milvus_lite/
         │   ├── common_pb2.py
         │   └── README.md               # source commit reference
         ├── errors.py                   # MilvusLiteError → grpc Status mapping
-        └── cli.py                      # python -m milvus_lite.adapter.grpc 入口
+        └── cli.py                      # python -m milvus_lite.adapter.grpc entry point
 ```
 
-**依赖**：
+**Dependencies**:
 ```toml
 # pyproject.toml
 [project.optional-dependencies]
 grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 ```
 
-`grpcio-tools` 只在 dev / build 阶段需要（生成 stub），不进 runtime 依赖。
+`grpcio-tools` is only needed during dev / build (for generating stubs) — it is not a runtime dependency.
 
 ---
 
-## 4. pymilvus → engine API 完整映射表
+## 4. Full Mapping Table: pymilvus → engine API
 
-### 4.1 Collection 生命周期
+### 4.1 Collection Lifecycle
 
-| pymilvus | Milvus RPC | engine API | 说明 |
+| pymilvus | Milvus RPC | engine API | Notes |
 |---|---|---|---|
-| `MilvusClient(uri="...")` | (TCP connect) | `MilvusLite(data_dir)` 在 server 启动时持有 | server 模式只服务一个 data_dir |
-| `create_collection(name, dim, ...)` 快速模式 | `CreateCollection` | `db.create_collection(name, schema)` | translator 把 quickstart 参数生成默认 schema (id INT64 + vector FLOAT_VECTOR) |
-| `create_collection(name, schema)` 完整 schema | `CreateCollection` | 同上 | translator 解析 `CollectionSchema` proto，逐字段转 `FieldSchema` |
-| `drop_collection(name)` | `DropCollection` | `db.drop_collection(name)` | 直接映射 |
-| `has_collection(name)` | `HasCollection` | `db.has_collection(name)` | bool 包成 `BoolResponse` |
-| `describe_collection(name)` | `DescribeCollection` | `db.get_collection(name).describe()` + schema 序列化 | translator 把 MilvusLite schema 转回 Milvus proto schema |
-| `list_collections()` | `ShowCollections` | `db.list_collections()` | 直接映射 |
-| `get_collection_stats(name)` | `GetCollectionStatistics` | `col.num_entities` | 包成 `KeyValuePair[("row_count", str(n))]` |
-| `rename_collection(old, new)` | `RenameCollection` | `db.rename_collection(old, new)` | ✅ 直接映射 |
-| `alter_collection_properties` | `AlterCollection` | ❌ schema 不可变 | UNIMPLEMENTED |
+| `MilvusClient(uri="...")` | (TCP connect) | `MilvusLite(data_dir)` held at server startup | Server mode serves a single data_dir |
+| `create_collection(name, dim, ...)` quick mode | `CreateCollection` | `db.create_collection(name, schema)` | Translator generates a default schema from quickstart params (id INT64 + vector FLOAT_VECTOR) |
+| `create_collection(name, schema)` full schema | `CreateCollection` | Same as above | Translator parses the `CollectionSchema` proto, converting each field to `FieldSchema` |
+| `drop_collection(name)` | `DropCollection` | `db.drop_collection(name)` | Direct mapping |
+| `has_collection(name)` | `HasCollection` | `db.has_collection(name)` | bool wrapped in `BoolResponse` |
+| `describe_collection(name)` | `DescribeCollection` | `db.get_collection(name).describe()` + schema serialization | Translator converts MilvusLite schema back to Milvus proto schema |
+| `list_collections()` | `ShowCollections` | `db.list_collections()` | Direct mapping |
+| `get_collection_stats(name)` | `GetCollectionStatistics` | `col.num_entities` | Wrapped as `KeyValuePair[("row_count", str(n))]` |
+| `rename_collection(old, new)` | `RenameCollection` | `db.rename_collection(old, new)` | Direct mapping |
+| `alter_collection_properties` | `AlterCollection` | Schema is immutable | UNIMPLEMENTED |
 
 ### 4.2 Partition
 
-| pymilvus | Milvus RPC | engine API | 说明 |
+| pymilvus | Milvus RPC | engine API | Notes |
 |---|---|---|---|
-| `create_partition(collection, partition)` | `CreatePartition` | `col.create_partition(name)` | Phase 9.1 补的 API |
-| `drop_partition(collection, partition)` | `DropPartition` | `col.drop_partition(name)` | Phase 9.1 补的 API |
-| `has_partition(collection, partition)` | `HasPartition` | `partition in col.list_partitions()` | bool 包装 |
-| `list_partitions(collection)` | `ShowPartitions` | `col.list_partitions()` | 直接映射 |
-| `get_partition_stats` | `GetPartitionStatistics` | `col.partition_num_entities(name)` | Phase 9.1 可选补 |
-| `load_partitions` / `release_partitions` | `LoadPartitions` / `ReleasePartitions` | ❌ engine load/release 是 Collection 级别 | UNIMPLEMENTED 或映射到 collection load/release |
+| `create_partition(collection, partition)` | `CreatePartition` | `col.create_partition(name)` | API added in Phase 9.1 |
+| `drop_partition(collection, partition)` | `DropPartition` | `col.drop_partition(name)` | API added in Phase 9.1 |
+| `has_partition(collection, partition)` | `HasPartition` | `partition in col.list_partitions()` | bool wrapper |
+| `list_partitions(collection)` | `ShowPartitions` | `col.list_partitions()` | Direct mapping |
+| `get_partition_stats` | `GetPartitionStatistics` | `col.partition_num_entities(name)` | Optionally added in Phase 9.1 |
+| `load_partitions` / `release_partitions` | `LoadPartitions` / `ReleasePartitions` | Engine load/release is at Collection level | UNIMPLEMENTED or mapped to collection load/release |
 
-### 4.3 数据 CRUD
+### 4.3 Data CRUD
 
-| pymilvus | Milvus RPC | engine API | 说明 |
+| pymilvus | Milvus RPC | engine API | Notes |
 |---|---|---|---|
-| `insert(collection, data, partition_name=None)` | `Insert` | `col.insert(records, partition_name)` | **最复杂转换** — InsertRequest.fields_data 是 FieldData 列式结构，需要转置为 records list |
-| `upsert(collection, data, partition_name=None)` | `Upsert` | `col.insert(records, partition_name)` | engine insert 已是 upsert 语义；两个 RPC 共享同一个 servicer 方法 |
-| `delete(collection, ids=, partition_name=None)` | `Delete` | `col.delete(pks, partition_name)` | DeleteRequest 的 expr 字段为 `id in [...]` 形式时走 pk 路径 |
-| `delete(collection, filter=, partition_name=None)` | `Delete` | `col.query(filter) → 提取 pk → col.delete(pks)` | 表达式删除：先 query 找 pk 再 delete |
-| `get(collection, ids=, partition_names=, output_fields=)` | `Query`(`id in [...]` expr) | `col.get(pks, partition_names, expr)` | pymilvus get 实际走 Query RPC |
-| `query(collection, filter, output_fields, limit, partition_names)` | `Query` | `col.query(expr, output_fields, partition_names, limit)` | 直接映射 |
+| `insert(collection, data, partition_name=None)` | `Insert` | `col.insert(records, partition_name)` | **Most complex conversion** — InsertRequest.fields_data is a columnar FieldData structure that needs to be transposed into a records list |
+| `upsert(collection, data, partition_name=None)` | `Upsert` | `col.insert(records, partition_name)` | Engine insert already has upsert semantics; both RPCs share the same servicer method |
+| `delete(collection, ids=, partition_name=None)` | `Delete` | `col.delete(pks, partition_name)` | When DeleteRequest's expr field is in `id in [...]` form, take the pk path |
+| `delete(collection, filter=, partition_name=None)` | `Delete` | `col.query(filter) → extract pk → col.delete(pks)` | Expression-based delete: query to find pks first, then delete |
+| `get(collection, ids=, partition_names=, output_fields=)` | `Query`(`id in [...]` expr) | `col.get(pks, partition_names, expr)` | pymilvus get actually goes through the Query RPC |
+| `query(collection, filter, output_fields, limit, partition_names)` | `Query` | `col.query(expr, output_fields, partition_names, limit)` | Direct mapping |
 
-### 4.4 搜索
+### 4.4 Search
 
-| pymilvus | Milvus RPC | engine API | 说明 |
+| pymilvus | Milvus RPC | engine API | Notes |
 |---|---|---|---|
-| `search(collection, data, anns_field, limit, filter, output_fields, search_params, partition_names)` | `Search` | `col.search(query_vectors, top_k, metric_type, partition_names, expr, output_fields)` | translator 解析 SearchParams 提取 metric / topk / search_params；返回值结构转换最复杂 |
-| `hybrid_search(collection, reqs, ...)` | `HybridSearch` | 多路 `col.search()` + `reranker.rerank()` | ✅ Phase 12：解析每个子 SearchRequest 独立搜索，通过 WeightedRanker / RRFRanker 融合结果 |
-| `search_iterator(...)` | (client-side wrapper) | engine 加 offset 支持 | 可选；MVP UNIMPLEMENTED |
+| `search(collection, data, anns_field, limit, filter, output_fields, search_params, partition_names)` | `Search` | `col.search(query_vectors, top_k, metric_type, partition_names, expr, output_fields)` | Translator parses SearchParams to extract metric / topk / search_params; return value structure conversion is the most complex |
+| `hybrid_search(collection, reqs, ...)` | `HybridSearch` | Multiple `col.search()` + `reranker.rerank()` | Phase 12: Parse each sub-SearchRequest for independent search, merge results via WeightedRanker / RRFRanker |
+| `search_iterator(...)` | (client-side wrapper) | Engine adds offset support | Optional; MVP UNIMPLEMENTED |
 
-### 4.5 索引
+### 4.5 Index
 
-| pymilvus | Milvus RPC | engine API | 说明 |
+| pymilvus | Milvus RPC | engine API | Notes |
 |---|---|---|---|
-| `create_index(collection, index_params)` | `CreateIndex` | `col.create_index(field, params)` | translator 把 IndexParams 的 KeyValuePair list 转 IndexSpec |
-| `drop_index(collection, field_name, index_name)` | `DropIndex` | `col.drop_index(field)` | index_name 忽略（engine 一个 field 只支持一个 index） |
+| `create_index(collection, index_params)` | `CreateIndex` | `col.create_index(field, params)` | Translator converts IndexParams' KeyValuePair list to IndexSpec |
+| `drop_index(collection, field_name, index_name)` | `DropIndex` | `col.drop_index(field)` | index_name is ignored (engine only supports one index per field) |
 | `describe_index(collection, field_name)` | `DescribeIndex` | `col.get_index_info()` | IndexSpec → IndexDescription proto |
-| `list_indexes(collection)` | `ListIndexedField`（Milvus 内部 RPC，pymilvus 客户端有封装） | `col.list_indexes()` | engine 加一个 helper 方法 |
-| `get_index_state` / `get_index_build_progress` | `GetIndexState` / `GetIndexBuildProgress` | engine 是同步 build，永远返回 `Finished` / `100%` | trivial 实现 |
+| `list_indexes(collection)` | `ListIndexedField` (Milvus internal RPC, pymilvus client has a wrapper) | `col.list_indexes()` | Engine adds a helper method |
+| `get_index_state` / `get_index_build_progress` | `GetIndexState` / `GetIndexBuildProgress` | Engine build is synchronous, always returns `Finished` / `100%` | Trivial implementation |
 
 ### 4.6 Load / Release
 
-| pymilvus | Milvus RPC | engine API | 说明 |
+| pymilvus | Milvus RPC | engine API | Notes |
 |---|---|---|---|
-| `load_collection(collection, replica_number=1)` | `LoadCollection` | `col.load()` | replica_number 忽略 |
-| `release_collection(collection)` | `ReleaseCollection` | `col.release()` | 直接映射 |
-| `get_load_state(collection)` | `GetLoadState` | `col._load_state` | 枚举映射：released → NotLoad，loading → Loading，loaded → Loaded |
-| `get_loading_progress(collection)` | `GetLoadingProgress` | engine load 是同步，永远 100% | trivial |
+| `load_collection(collection, replica_number=1)` | `LoadCollection` | `col.load()` | replica_number is ignored |
+| `release_collection(collection)` | `ReleaseCollection` | `col.release()` | Direct mapping |
+| `get_load_state(collection)` | `GetLoadState` | `col._load_state` | Enum mapping: released → NotLoad, loading → Loading, loaded → Loaded |
+| `get_loading_progress(collection)` | `GetLoadingProgress` | Engine load is synchronous, always 100% | Trivial |
 
-### 4.7 其他
+### 4.7 Others
 
-| pymilvus | Milvus RPC | engine API | 说明 |
+| pymilvus | Milvus RPC | engine API | Notes |
 |---|---|---|---|
-| `flush(collection)` | `Flush` | `col.flush()` | 直接映射 |
-| `compact(collection)` | `ManualCompaction` | `col.compact()` | engine 加一个手动 compact 触发方法 |
-| `list_databases()` | `ListDatabases` | stub 返回 `["default"]` | MilvusLite 没有 database 多实例 |
-| `using_database(name)` | `UseDatabase` | 仅接受 "default"，其他报错 | trivial |
-| Aliases (`create_alias` 等) | `CreateAlias` 等 | ❌ engine 不支持 | UNIMPLEMENTED |
-| User / Role / Privilege | `CreateCredential` 等 | ❌ 嵌入式无 RBAC | 一律返回 OK 空结果（pymilvus 不会因此 crash） |
-| Backup / Restore | 各种 | ❌ | UNIMPLEMENTED |
-| Resource Group | `CreateResourceGroup` 等 | ❌ | UNIMPLEMENTED |
-| Replica | `GetReplicas` 等 | ❌ 单进程 | UNIMPLEMENTED |
-| QueryNode / DataNode 等内部 RPC | 各种 | — | 这些是 Milvus 内部组件间通信，pymilvus 不调，不实现 |
+| `flush(collection)` | `Flush` | `col.flush()` | Direct mapping |
+| `compact(collection)` | `ManualCompaction` | `col.compact()` | Engine adds a manual compact trigger method |
+| `list_databases()` | `ListDatabases` | Stub returns `["default"]` | MilvusLite has no multi-database instances |
+| `using_database(name)` | `UseDatabase` | Only accepts "default", returns error otherwise | Trivial |
+| Aliases (`create_alias`, etc.) | `CreateAlias`, etc. | Engine does not support | UNIMPLEMENTED |
+| User / Role / Privilege | `CreateCredential`, etc. | Embedded mode has no RBAC | Always returns OK with empty results (so pymilvus won't crash) |
+| Backup / Restore | Various | Not supported | UNIMPLEMENTED |
+| Resource Group | `CreateResourceGroup`, etc. | Not supported | UNIMPLEMENTED |
+| Replica | `GetReplicas`, etc. | Single process | UNIMPLEMENTED |
+| QueryNode / DataNode and other internal RPCs | Various | — | These are Milvus internal inter-component communication; pymilvus doesn't call them, so they are not implemented |
 
-### 4.8 未支持 RPC 的处理策略
+### 4.8 Handling Strategy for Unsupported RPCs
 
-**三档策略**：
+**Three-tier strategy**:
 
-1. **明确 UNIMPLEMENTED**（推荐默认）：返回 `grpc.StatusCode.UNIMPLEMENTED` + 友好消息
-   - 应用于：bulk_insert 等"功能缺失"的 RPC
-   - 错误消息格式：`"MilvusLite does not support X. Reason: <one-line reason>. See https://...”`
+1. **Explicit UNIMPLEMENTED** (recommended default): Return `grpc.StatusCode.UNIMPLEMENTED` + friendly message
+   - Applied to: RPCs with missing functionality such as bulk_insert
+   - Error message format: `"MilvusLite does not support X. Reason: <one-line reason>. See https://..."`
 
-2. **静默成功**（少数情况）：返回 `Success` + 空结果
-   - 应用于：RBAC 系列（嵌入式没有用户概念，pymilvus 调用时不应该 crash）
-   - 应用于：多 database（永远是 "default"）
-   - **决策原则**：只有当"假装成功"对用户体验完全无害时才用，一旦有误导性立即改回 UNIMPLEMENTED
+2. **Silent success** (rare cases): Return `Success` + empty result
+   - Applied to: RBAC series (embedded mode has no user concept; pymilvus calls should not crash)
+   - Applied to: Multi-database (always "default")
+   - **Decision principle**: Only use this when "pretending to succeed" is completely harmless to user experience; switch back to UNIMPLEMENTED immediately if there is any risk of misleading
 
-3. **忽略可选参数**（向前兼容）：知道的字段处理，未知字段忽略
-   - 应用于：SearchRequest 的 consistency_level、travel_timestamp 等
-   - **不算"假装支持"**，是合理的 forward compatibility
+3. **Ignore optional parameters** (forward compatibility): Process known fields, ignore unknown fields
+   - Applied to: SearchRequest's consistency_level, travel_timestamp, etc.
+   - **This is not "pretending to support"** — it is reasonable forward compatibility
 
 ---
 
-## 5. 关键转换：FieldData ↔ records
+## 5. Key Conversion: FieldData ↔ records
 
-### 5.1 Milvus FieldData 结构
+### 5.1 Milvus FieldData Structure
 
-Milvus InsertRequest 是按字段的列式结构：
+Milvus InsertRequest uses a per-field columnar structure:
 
 ```protobuf
 message InsertRequest {
@@ -236,13 +236,13 @@ message VectorField {
 }
 ```
 
-**关键差异点**：
-- Milvus 是列式 — 每个字段一个 array，所有字段长度相同 = `num_rows`
-- MilvusLite engine 是行式 — `List[Dict[field_name, value]]`
-- Vector 字段在 Milvus 里是 flat float array（长度 = `num_rows * dim`），需要按 dim 切片
-- 类型多 — 每个 oneof 分支对应一组转换逻辑
+**Key differences**:
+- Milvus is columnar — one array per field, all fields have the same length = `num_rows`
+- MilvusLite engine is row-wise — `List[Dict[field_name, value]]`
+- Vector fields in Milvus are flat float arrays (length = `num_rows * dim`), requiring slicing by dim
+- Many types — each oneof branch corresponds to a set of conversion logic
 
-### 5.2 转置算法
+### 5.2 Transposition Algorithm
 
 ```python
 # milvus_lite/adapter/grpc/translators/records.py
@@ -323,9 +323,9 @@ def _extract_column(fd: "FieldData", num_rows: int) -> List[Any]:
     return data
 ```
 
-### 5.3 反向转换：records → FieldData
+### 5.3 Reverse Conversion: records → FieldData
 
-仅在 `Query` / `Get` / `Search` RPC 的返回值中需要 — 把 engine 返回的 list[dict] 转回 Milvus FieldData 列式结构。算法对称：
+Only needed in the return values of `Query` / `Get` / `Search` RPCs — converting engine-returned list[dict] back to Milvus FieldData columnar structure. The algorithm is symmetric:
 
 ```python
 def records_to_fields_data(
@@ -353,50 +353,50 @@ def records_to_fields_data(
     return fields_data
 ```
 
-### 5.4 测试覆盖
+### 5.4 Test Coverage
 
-`tests/adapter/test_grpc_translators_records.py`：
-- 每种类型一个 round-trip 测试：build FieldData → fields_data_to_records → records_to_fields_data → 应等价
+`tests/adapter/test_grpc_translators_records.py`:
+- One round-trip test per type: build FieldData → fields_data_to_records → records_to_fields_data → should be equivalent
 - num_rows mismatch → ValueError
-- 不支持的类型 → UnsupportedFieldTypeError
-- vector dim 切片正确性
-- 空 fields_data → 空 records list
-- 部分字段 nullable → None 值的处理
+- Unsupported type → UnsupportedFieldTypeError
+- Vector dim slicing correctness
+- Empty fields_data → empty records list
+- Partially nullable fields → handling of None values
 
 ---
 
-## 6. Filter 表达式翻译
+## 6. Filter Expression Translation
 
-### 6.1 大部分情况：透传
+### 6.1 Most Cases: Pass-through
 
-MilvusLite Phase 8 的 filter grammar 就是抄的 Milvus，**绝大多数表达式直接透传**：
+MilvusLite Phase 8's filter grammar is modeled after Milvus, so **the vast majority of expressions are passed through directly**:
 
 ```
-"age > 18 and category in ['tech', 'news']"   # 完全兼容，原样传给 col.search(expr=...)
+"age > 18 and category in ['tech', 'news']"   # Fully compatible, passed as-is to col.search(expr=...)
 ```
 
-### 6.2 需要 rewrite 的少数场景
+### 6.2 Few Scenarios Requiring Rewrite
 
-| Milvus 写法 | MilvusLite 是否支持 | 处理策略 |
+| Milvus Syntax | MilvusLite Support | Handling Strategy |
 |---|---|---|
-| `field == value` 等比较 | ✅ | 透传 |
-| `field in [...]` | ✅ | 透传 |
-| `field like "pattern"` | ✅ (Phase F2a) | 透传 |
-| `$meta["key"] == value` | ✅ (Phase F2b) | 透传 |
-| 算术 + - * / | ✅ (Phase F2a) | 透传 |
-| `is null` / `is not null` | ✅ (Phase F2a) | 透传 |
-| `json_contains(json_field, value)` | ✅ | 透传（parser 原生支持） |
-| `array_contains(array_field, value)` | ✅ | 透传（parser 原生支持 array_contains / array_contains_all / array_contains_any） |
-| `text_match(text_field, query)` | ✅ (Phase 11) | 透传（engine 内置 BM25 全文索引 + analyzer） |
-| `phrase_match` | ❌ | UNIMPLEMENTED |
+| `field == value` and other comparisons | Supported | Pass-through |
+| `field in [...]` | Supported | Pass-through |
+| `field like "pattern"` | Supported (Phase F2a) | Pass-through |
+| `$meta["key"] == value` | Supported (Phase F2b) | Pass-through |
+| Arithmetic + - * / | Supported (Phase F2a) | Pass-through |
+| `is null` / `is not null` | Supported (Phase F2a) | Pass-through |
+| `json_contains(json_field, value)` | Supported | Pass-through (parser natively supports it) |
+| `array_contains(array_field, value)` | Supported | Pass-through (parser natively supports array_contains / array_contains_all / array_contains_any) |
+| `text_match(text_field, query)` | Supported (Phase 11) | Pass-through (engine has built-in BM25 full-text index + analyzer) |
+| `phrase_match` | Not supported | UNIMPLEMENTED |
 
-### 6.3 实现方式
+### 6.3 Implementation Approach
 
-**当前状态**：Phase 11 之后，MilvusLite parser 原生支持 `text_match`、`json_contains`、`array_contains` 等函数，表达式全部透传给 engine parser 处理，无需适配层做 rewrite 或拦截。仅 `phrase_match` 仍不支持（parser 遇到未知函数会抛 `FilterParseError`）。独立的 `translators/expr.py` 文件未创建 — 表达式直接透传。
+**Current state**: After Phase 11, the MilvusLite parser natively supports `text_match`, `json_contains`, `array_contains`, and other functions. All expressions are passed through directly to the engine parser for processing, with no rewriting or interception needed at the adapter layer. Only `phrase_match` remains unsupported (the parser throws `FilterParseError` on unknown functions). A separate `translators/expr.py` file was not created — expressions are passed through directly.
 
 ---
 
-## 7. Servicer 实现骨架
+## 7. Servicer Implementation Skeleton
 
 ```python
 # milvus_lite/adapter/grpc/servicer.py
@@ -522,17 +522,17 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         return self._unimplemented(context, "CreateAlias", "aliases are not in MVP scope")
 
     def HybridSearch(self, request, context):
-        # ✅ Phase 12: 多路搜索 + WeightedRanker/RRFRanker 融合
-        # 解析每个 sub-SearchRequest → col.search() → reranker.rerank()
-        # 实现见 servicer.py + reranker.py
+        # Phase 12: Multi-route search + WeightedRanker/RRFRanker fusion
+        # Parse each sub-SearchRequest → col.search() → reranker.rerank()
+        # Implementation in servicer.py + reranker.py
         ...
 
-    # ... (其他 UNIMPLEMENTED stub)
+    # ... (other UNIMPLEMENTED stubs)
 ```
 
 ---
 
-## 8. 错误码映射
+## 8. Error Code Mapping
 
 ```python
 # milvus_lite/adapter/grpc/errors.py
@@ -552,7 +552,7 @@ from milvus_lite.exceptions import (
     IndexBackendUnavailableError,
 )
 
-# Milvus 标准 ErrorCode
+# Milvus standard ErrorCode
 # 0  Success
 # 1  UnexpectedError
 # 4  CollectionNotExists
@@ -585,7 +585,7 @@ def to_grpc_status(exc: MilvusLiteError) -> dict:
     }
 ```
 
-**注意**：Milvus 的 ErrorCode 在 2.3 → 2.4 之间做过较大调整（从 numeric code 转向 string-based 错误）。Phase 10 MVP 对齐 2.3 风格的 numeric code，pymilvus 客户端两个版本都能识别。
+**Note**: Milvus's ErrorCode underwent significant changes between 2.3 and 2.4 (from numeric codes to string-based errors). Phase 10 MVP aligns with the 2.3-style numeric codes, which pymilvus clients of both versions can recognize.
 
 ---
 
@@ -640,48 +640,48 @@ if __name__ == "__main__":
     main()
 ```
 
-启动方式：
+How to start:
 ```bash
 python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530
 ```
 
 ---
 
-## 10. Phase 10 子阶段拆分
+## 10. Phase 10 Sub-phase Breakdown
 
-| 子阶段 | 内容 | 完成标志 | 工作量 |
+| Sub-phase | Content | Completion Criteria | Effort |
 |---|---|---|---|
-| **10.1** | proto 拉取 + stub 生成 + 空 servicer + `run_server` + CLI | `python -m milvus_lite.adapter.grpc --data-dir /tmp/x --port 19530` 起 server，pymilvus.connect() 不报错；所有 RPC 返回 UNIMPLEMENTED | M |
-| **10.2** | Collection 生命周期 RPC + `translators/schema.py`（最小类型集：INT64 / VARCHAR / FLOAT_VECTOR / BOOL / FLOAT / DOUBLE） | pymilvus 跑 `create / list / has / describe / drop` 全通；非支持类型报 UnsupportedFieldTypeError | M |
-| **10.3** | insert/get/delete/query RPC + `translators/records.py` 双向转置 + 单测覆盖每种支持类型 | pymilvus 灌入 100 条数据 → query 出来等价；delete by id 通；delete by filter 通 | L |
-| **10.4** | search + create_index + load + release RPC + `translators/search.py` + `translators/result.py` + `translators/expr.py` + `translators/index.py` | pymilvus quickstart 全流程跑通：create_collection → insert → create_index(HNSW) → load → search(filter) → release → drop | L |
-| **10.5** | Partition RPC + flush + stats RPC + `examples/m10_demo.py` + `tests/adapter/test_grpc_quickstart.py` 作为 L3 冒烟 | m10 demo 通；冒烟测试在 CI 跑通 | M |
-| **10.6** | 错误码映射 + 异常 wrapping 中间件 + UNIMPLEMENTED 友好消息 | 每种 MilvusLiteError 都有对应的 grpc status code 测试 | S |
+| **10.1** | Proto fetching + stub generation + empty servicer + `run_server` + CLI | `python -m milvus_lite.adapter.grpc --data-dir /tmp/x --port 19530` starts the server, pymilvus.connect() does not error; all RPCs return UNIMPLEMENTED | M |
+| **10.2** | Collection lifecycle RPCs + `translators/schema.py` (minimal type set: INT64 / VARCHAR / FLOAT_VECTOR / BOOL / FLOAT / DOUBLE) | pymilvus runs `create / list / has / describe / drop` all passing; unsupported types raise UnsupportedFieldTypeError | M |
+| **10.3** | insert/get/delete/query RPCs + `translators/records.py` bidirectional transposition + unit tests covering every supported type | pymilvus inserts 100 records → query returns equivalent data; delete by id works; delete by filter works | L |
+| **10.4** | search + create_index + load + release RPCs + `translators/search.py` + `translators/result.py` + `translators/expr.py` + `translators/index.py` | pymilvus quickstart full flow passes: create_collection → insert → create_index(HNSW) → load → search(filter) → release → drop | L |
+| **10.5** | Partition RPCs + flush + stats RPCs + `examples/m10_demo.py` + `tests/adapter/test_grpc_quickstart.py` as L3 smoke test | m10 demo passes; smoke test passes in CI | M |
+| **10.6** | Error code mapping + exception wrapping middleware + UNIMPLEMENTED friendly messages | Every MilvusLiteError has a corresponding grpc status code test | S |
 
-合计：1S + 3M + 2L
+Total: 1S + 3M + 2L
 
 ---
 
-## 11. 验证策略
+## 11. Validation Strategy
 
-### 11.1 单元测试
+### 11.1 Unit Tests
 
-| 测试文件 | 覆盖 |
+| Test File | Coverage |
 |---|---|
-| `tests/adapter/test_grpc_server_startup.py` | server 启动、shutdown、port binding |
-| `tests/adapter/test_grpc_translators_schema.py` | Milvus FieldSchema ↔ MilvusLite FieldSchema 双向 |
-| `tests/adapter/test_grpc_translators_records.py` | FieldData ↔ records 每种类型 round-trip |
-| `tests/adapter/test_grpc_translators_expr.py` | 透传 + UNIMPLEMENTED 函数检测 |
+| `tests/adapter/test_grpc_server_startup.py` | Server startup, shutdown, port binding |
+| `tests/adapter/test_grpc_translators_schema.py` | Milvus FieldSchema ↔ MilvusLite FieldSchema bidirectional |
+| `tests/adapter/test_grpc_translators_records.py` | FieldData ↔ records round-trip for every type |
+| `tests/adapter/test_grpc_translators_expr.py` | Pass-through + UNIMPLEMENTED function detection |
 | `tests/adapter/test_grpc_translators_index.py` | IndexParams ↔ IndexSpec |
 | `tests/adapter/test_grpc_collection_lifecycle.py` | create / list / has / describe / drop |
 | `tests/adapter/test_grpc_crud.py` | insert / upsert / delete / query / get |
-| `tests/adapter/test_grpc_search.py` | search 全参数（filter / top_k / output_fields / partition_names） |
+| `tests/adapter/test_grpc_search.py` | search with all parameters (filter / top_k / output_fields / partition_names) |
 | `tests/adapter/test_grpc_index.py` | create_index / load / release / drop_index |
-| `tests/adapter/test_grpc_error_mapping.py` | 每种异常 → grpc status code |
+| `tests/adapter/test_grpc_error_mapping.py` | Every exception → grpc status code |
 
-### 11.2 集成测试 — pymilvus 冒烟
+### 11.2 Integration Test — pymilvus Smoke Test
 
-`tests/adapter/test_grpc_quickstart.py`：
+`tests/adapter/test_grpc_quickstart.py`:
 
 ```python
 import pytest
@@ -747,11 +747,11 @@ def test_pymilvus_quickstart(grpc_server):
     assert not client.has_collection("demo")
 ```
 
-这是 Phase 10 的**完成标志测试** — 必须绿。
+This is Phase 10's **completion criteria test** — it must pass.
 
-### 11.3 recall 一致性测试
+### 11.3 Recall Consistency Test
 
-`tests/adapter/test_grpc_search_parity.py`：
+`tests/adapter/test_grpc_search_parity.py`:
 
 ```python
 def test_grpc_search_returns_same_topk_as_engine_directly(grpc_server, tmp_path):
@@ -777,7 +777,7 @@ def test_grpc_search_returns_same_topk_as_engine_directly(grpc_server, tmp_path)
 
 ---
 
-## 12. 依赖与构建
+## 12. Dependencies and Build
 
 ```toml
 # pyproject.toml additions
@@ -797,35 +797,35 @@ all = ["milvus_lite[faiss,grpc]"]
 milvus_lite-grpc = "milvus_lite.adapter.grpc.cli:main"
 ```
 
-`pip install -e ".[dev,faiss,grpc]"` 安装完整开发环境。
+`pip install -e ".[dev,faiss,grpc]"` installs the complete development environment.
 
 ---
 
-## 13. 不在 Phase 10 范围
+## 13. Out of Phase 10 Scope
 
-| 功能 | 推迟到 |
+| Feature | Deferred To |
 |---|---|
-| TLS / mTLS 加密 | Future |
-| Token / Username-Password 认证 | Future |
-| RBAC / 多租户 | Future（嵌入式不必） |
-| Backup / Restore RPC | Future |
+| TLS / mTLS encryption | Future |
+| Token / Username-Password authentication | Future |
+| RBAC / Multi-tenancy | Future (unnecessary for embedded mode) |
+| Backup / Restore RPCs | Future |
 | Bulk insert / Import | Future |
-| Replica / Resource Group | Future（单进程不需要） |
+| Replica / Resource Group | Future (not needed for single process) |
 | Aliases | Future |
-| Hybrid search（多向量） | Future |
-| Search iterator / pagination | Future（offset 参数加在 engine 即可） |
-| Database 概念（多 db 实例） | Future |
-| Async stream RPC（如 grpc client streaming） | Future |
-| Sparse / Binary vector 类型 | Future |
+| Hybrid search (multi-vector) | Future |
+| Search iterator / pagination | Future (just need to add offset parameter to engine) |
+| Database concept (multiple db instances) | Future |
+| Async stream RPC (e.g., grpc client streaming) | Future |
+| Sparse / Binary vector types | Future |
 
 ---
 
-## 14. 完成标志
+## 14. Completion Criteria
 
-- `python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530` 能起 server
-- pymilvus quickstart（第 11.2 节的脚本）从 `connect → create → insert → create_index → load → search → query → delete → release → drop` 一遍跑通
-- recall parity 测试通过：grpc search 和直接 engine search 的 top-k 完全一致
-- 错误码映射测试覆盖所有 MilvusLiteError 子类
-- `examples/m10_demo.py` 是 README quickstart 的 1:1 对应
-- 不支持的 RPC 返回 `UNIMPLEMENTED` + 友好消息（不 silent fail，不假装成功）
-- 跑 `pytest tests/adapter/` 全绿
+- `python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530` can start the server
+- pymilvus quickstart (the script in Section 11.2) runs through the entire flow from `connect → create → insert → create_index → load → search → query → delete → release → drop`
+- Recall parity test passes: gRPC search and direct engine search return exactly the same top-k
+- Error code mapping tests cover all MilvusLiteError subclasses
+- `examples/m10_demo.py` is a 1:1 counterpart to the README quickstart
+- Unsupported RPCs return `UNIMPLEMENTED` + friendly messages (no silent fail, no pretending to succeed)
+- Running `pytest tests/adapter/` is all green

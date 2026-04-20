@@ -1,110 +1,110 @@
-# 深入设计：向量索引子系统（Phase 9）
+# Deep Design: Vector Index Subsystem (Phase 9)
 
-## 1. 概述
+## 1. Overview
 
-MilvusLite Phase 9 引入向量索引（vector index），把 `Collection.search` 的检索路径从 NumPy 暴力扫描升级为 ANN（Approximate Nearest Neighbor）检索。**默认实现是 FAISS HNSW**，同时保留 BruteForceIndex 作为差分基准 + 无依赖兜底。
+MilvusLite Phase 9 introduces vector indexing, upgrading the retrieval path of `Collection.search` from NumPy brute-force scanning to ANN (Approximate Nearest Neighbor) retrieval. **The default implementation is FAISS HNSW**, while BruteForceIndex is retained as a differential baseline + dependency-free fallback.
 
-**为什么现在做**：
-- Phase 8 标量过滤系统建立了 `bitmap pipeline + filter_mask` 抽象，FAISS 的 `IDSelectorBitmap` 与之天然同构 — Phase 9 一次性把这条管线接通
-- 项目定位是"本地版 Milvus"，pymilvus 用户的核心诉求是"快速 top-k"，没有 ANN 索引的"本地 Milvus"对早期用户是错误的第一印象
-- 存储层（MVP.md §10）从一开始就为索引接入预留了不变量：**数据文件不可变 + 不含删除标记**，使索引可以"一次构建、永不修改"
+**Why now**:
+- Phase 8's scalar filter system established the `bitmap pipeline + filter_mask` abstraction, and FAISS's `IDSelectorBitmap` is naturally isomorphic to it — Phase 9 connects this entire pipeline in one shot
+- The project is positioned as a "local version of Milvus," and the core demand from pymilvus users is "fast top-k." A "local Milvus" without ANN indexing gives early users the wrong first impression
+- The storage layer (MVP.md §10) reserved invariants for index integration from the start: **data files are immutable + contain no delete markers**, enabling indexes to be "built once, never modified"
 
-**为什么选 FAISS 而不是 hnswlib / USearch**：
-- `IDSelectorBitmap` 与 Phase 8 的 `valid_mask` 天然对齐，pre-filter（不是后验）可以原生支持
-- 索引家族对齐 Milvus（HNSW / IVF_FLAT / IVF_SQ8 / IVF_PQ 都是 FAISS 名字），用户从 pymilvus 迁移时 `index_params` 不用改
-- 后续扩展性最好（量化索引、混合索引、GPU 路径）
-- 风险：macOS arm64 wheel 历史上有坑（faiss-cpu 1.7.4+ 已稳定），通过"FAISS 是 optional extra + BruteForce fallback"的方式隔离
+**Why FAISS instead of hnswlib / USearch**:
+- `IDSelectorBitmap` naturally aligns with Phase 8's `valid_mask`, natively supporting pre-filter (not post-filter)
+- The index family aligns with Milvus (HNSW / IVF_FLAT / IVF_SQ8 / IVF_PQ are all FAISS names), so users migrating from pymilvus don't need to change `index_params`
+- Best extensibility for the future (quantized indexes, hybrid indexes, GPU paths)
+- Risk: macOS arm64 wheel has historically had issues (faiss-cpu 1.7.4+ is stable now), mitigated via "FAISS is an optional extra + BruteForce fallback"
 
 ---
 
-## 2. 架构决策
+## 2. Architecture Decisions
 
-### 2.1 索引绑定层级：Segment-level（决定）
+### 2.1 Index Binding Level: Segment-level (Decided)
 
-**决定：每个 data Parquet 文件对应一个独立的 VectorIndex 文件，1:1 绑定。**
+**Decision: Each data Parquet file corresponds to an independent VectorIndex file, bound 1:1.**
 
-候选方案对比：
+Candidate approach comparison:
 
-| 维度 | Segment-level（选定） | Collection-level |
+| Dimension | Segment-level (Selected) | Collection-level |
 |---|---|---|
-| 与 LSM 不可变架构匹配度 | 完美 — segment 不可变 → index 也不可变 → 永远不需要"删除某个向量" | 差 — 全局图必须"增量更新 + 删除"，而 FAISS HNSW 不支持真删除 |
-| 增量更新成本 | 极低 — 新 segment flush 后只需建一份新 index | 中 — 每次 flush 要 add_items，HNSW 支持但要锁 + 可能 resize |
-| 与 compaction 协同 | 自然 — 旧 segment 删 → 旧 index 文件删；新 segment 写 → 新 index 构建。1:1 对应 | 痛苦 — 删 N 个 segment 后要从全局图里删 N 批 pk，HNSW 只能 mark-deleted，空间不回收，recall 漂移；最终被迫周期性"全量重建全局 index" |
-| recall | 多 segment 时略低于全局图（"per-segment top-k 后合并"），实际损失 < 5% | 理论最优 |
-| 内存占用 | 略高（每段图重复一些辅助数据） | 略省 |
-| 与 brute-force fallback 共存 | 自然 — 小 segment 不建 index，search 时直接 brute-force；其他段走 index | 不自然 — memtable 永远旁路全局图 |
-| 与 Milvus 实际架构一致性 | ✅ Milvus 本身就是 per-segment 建索引 | ✗ |
+| Alignment with LSM immutable architecture | Perfect — segment is immutable → index is also immutable → never need to "delete a vector" | Poor — global graph must "incrementally update + delete," but FAISS HNSW doesn't support true deletion |
+| Incremental update cost | Very low — only need to build one new index after a new segment flush | Medium — each flush requires add_items; HNSW supports it but requires locks + possible resize |
+| Coordination with compaction | Natural — old segment deleted → old index file deleted; new segment written → new index built. 1:1 correspondence | Painful — after deleting N segments, must remove N batches of pks from the global graph; HNSW can only mark-deleted, space isn't reclaimed, recall drifts; ultimately forced to periodically "fully rebuild the global index" |
+| Recall | Slightly lower than global graph with many segments ("per-segment top-k then merge"), actual loss < 5% | Theoretically optimal |
+| Memory usage | Slightly higher (each segment's graph duplicates some auxiliary data) | Slightly lower |
+| Coexistence with brute-force fallback | Natural — small segments don't build an index, search uses brute-force directly; other segments use the index | Unnatural — memtable always bypasses the global graph |
+| Consistency with actual Milvus architecture | ✅ Milvus itself builds indexes per-segment | ✗ |
 
-**决定理由**：
-1. LSM-Tree 的 immutable segment 不变量是项目的根本架构红利；segment-level index 让 Phase 9 不引入任何新的可变状态
-2. FAISS HNSW 不支持真删除，全局 index 方案会被这个约束反制；segment-level 完美回避
-3. "本地版 Milvus" 的定位倾向抄 Milvus 本身的架构决策
+**Decision rationale**:
+1. The LSM-Tree's immutable segment invariant is the project's fundamental architectural advantage; segment-level index means Phase 9 introduces no new mutable state
+2. FAISS HNSW doesn't support true deletion, so the global index approach would be constrained by this limitation; segment-level perfectly avoids it
+3. The "local version of Milvus" positioning favors mirroring Milvus's own architectural decisions
 
-### 2.2 索引库选型：FAISS-cpu（决定）
+### 2.2 Index Library Selection: FAISS-cpu (Decided)
 
-| 维度 | hnswlib | **FAISS-cpu**（选定） | USearch |
+| Dimension | hnswlib | **FAISS-cpu** (Selected) | USearch |
 |---|---|---|---|
-| 依赖体积 | ~2 MB | ~30-80 MB（macOS arm64 wheel 已成熟） | ~3 MB |
-| 索引类型 | HNSW only | HNSW / IVF_FLAT / IVF_SQ8 / IVF_PQ / OPQ / Flat / ... | HNSW only |
-| Pre-filter（IDSelector） | 不支持 callback | **`IDSelectorBitmap` 原生支持，与 bitmap pipeline 同构** | 支持但不如 FAISS 成熟 |
-| Metric | cosine / l2 / ip | 齐全 | 齐全 |
-| 维护活跃度 | 低（作者 2023 后较少响应） | 高（Meta 官方） | 高（unum-cloud） |
-| 与 Milvus 的语义对齐 | 部分 | **完全 — Milvus index_params 直接复用** | 部分 |
-| Phase 9 MVP 选 | ❌ | ✅ | ❌ |
+| Dependency size | ~2 MB | ~30-80 MB (macOS arm64 wheel is mature) | ~3 MB |
+| Index types | HNSW only | HNSW / IVF_FLAT / IVF_SQ8 / IVF_PQ / OPQ / Flat / ... | HNSW only |
+| Pre-filter (IDSelector) | No callback support | **`IDSelectorBitmap` natively supported, isomorphic with bitmap pipeline** | Supported but less mature than FAISS |
+| Metric | cosine / l2 / ip | Complete | Complete |
+| Maintenance activity | Low (author has been less responsive since 2023) | High (Meta official) | High (unum-cloud) |
+| Semantic alignment with Milvus | Partial | **Complete — Milvus index_params directly reusable** | Partial |
+| Phase 9 MVP pick | ❌ | ✅ | ❌ |
 
-**风险与缓解**：
-- **macOS arm64 wheel**：截至 2024 末已稳定，但安装失败要降级 — `try: import faiss` 失败时自动 fallback 到 BruteForceIndex
-- **HNSW 不支持真删除**：架构上由 segment-level + immutable 规避
-- **小 segment 上 FAISS 比 brute-force 慢**：对 < `INDEX_BUILD_THRESHOLD`（默认 10000 行）的 segment 不建索引，search 时走 brute-force
+**Risks and mitigations**:
+- **macOS arm64 wheel**: Stable as of late 2024, but installation failure requires downgrade — `try: import faiss` failure auto-falls back to BruteForceIndex
+- **HNSW doesn't support true deletion**: Architecturally avoided via segment-level + immutable design
+- **FAISS is slower than brute-force on small segments**: Segments below `INDEX_BUILD_THRESHOLD` (default 10000 rows) don't build an index; search uses brute-force
 
-### 2.3 BruteForceIndex 的双重定位（决定）
+### 2.3 Dual Role of BruteForceIndex (Decided)
 
-`BruteForceIndex` 不是临时的占位实现，而是一个**长期保留**的一等公民：
+`BruteForceIndex` is not a temporary placeholder implementation, but a **long-term retained** first-class citizen:
 
-1. **零依赖兜底**：用户不装 faiss-cpu 时仍能用 MilvusLite（性能受限但功能完整）
-2. **差分测试基准**：`tests/index/test_index_differential.py` 用 BruteForceIndex 作为 groundtruth，验证 FaissHnswIndex 的 recall@10 ≥ 0.95
-3. **小 segment 实际选择**：低于阈值的 segment 实际就用它
+1. **Zero-dependency fallback**: Users who don't install faiss-cpu can still use MilvusLite (limited performance but full functionality)
+2. **Differential test baseline**: `tests/index/test_index_differential.py` uses BruteForceIndex as ground truth to verify FaissHnswIndex recall@10 ≥ 0.95
+3. **Actual choice for small segments**: Segments below the threshold actually use it
 
-这个决策的设计代价：必须保证 `VectorIndex` protocol 足够通用，能同时容纳 brute-force 和 ANN 两种范式的实现。protocol 设计要先满足 brute-force（最简单），ANN 实现"撑大"接口。
+The design cost of this decision: the `VectorIndex` protocol must be generic enough to accommodate both brute-force and ANN paradigms. The protocol design should first satisfy brute-force (simplest), then let the ANN implementation "stretch" the interface.
 
-### 2.4 load / release 状态机（决定在 Phase 9.3 引入）
+### 2.4 load / release State Machine (Decided to Introduce in Phase 9.3)
 
-**决定：在 Phase 9.3 引入显式的 `_load_state` 状态机**，而不是等到 Phase 10 gRPC 适配层。
+**Decision: Introduce an explicit `_load_state` state machine in Phase 9.3**, rather than waiting for the Phase 10 gRPC adapter layer.
 
-状态：
+States:
 
 ```
                   ┌──────────┐
-                  │ released │  ◄── 初始 / Collection 刚 open / 显式 release()
+                  │ released │  ◄── initial / Collection just opened / explicit release()
                   └─────┬────┘
                         │ load()
                         ▼
                   ┌──────────┐
-                  │ loading  │  ◄── 正在构建/加载 index 文件
+                  │ loading  │  ◄── building/loading index files in progress
                   └─────┬────┘
-                        │ 全部 segment 就绪
+                        │ all segments ready
                         ▼
                   ┌──────────┐
-                  │  loaded  │  ◄── search 可用
+                  │  loaded  │  ◄── search available
                   └──────────┘
 ```
 
-**行为**：
-- `Collection.search` / `query` / `get` 在非 `loaded` 态抛 `CollectionNotLoadedError`
-- `Collection.insert` / `delete` 不需要 loaded 态（写入路径不依赖索引）
-- 重启后默认 `released`，必须显式 `load()`（与 Milvus 行为对齐）
-- 无 IndexSpec 的 Collection 也允许 `load()` —— `load_state` 仍然进入 `loaded`，但 segment 不构建任何索引，search 走 brute-force（与 Milvus "无 index 的 collection 也可以 load + search" 行为对齐）
+**Behavior**:
+- `Collection.search` / `query` / `get` raise `CollectionNotLoadedError` when not in `loaded` state
+- `Collection.insert` / `delete` don't require loaded state (write path doesn't depend on indexes)
+- After restart, defaults to `released`; must explicitly call `load()` (aligned with Milvus behavior)
+- Collections without IndexSpec are also allowed to `load()` — `load_state` still enters `loaded`, but segments don't build any index; search uses brute-force (aligned with Milvus's "collection without index can still load + search" behavior)
 
-**为什么不延后到 Phase 10**：
-- pymilvus 用户已经习惯 `load_collection / release_collection`，Phase 10 必须有东西可映射
-- 状态机本身只有几十行代码，但语义早期定下来对 Phase 10 的 servicer 写法有决定性影响
-- Phase 9.4 的 index 持久化和 load 机制有强耦合，分两阶段做反而麻烦
+**Why not defer to Phase 10**:
+- pymilvus users are already accustomed to `load_collection / release_collection`; Phase 10 must have something to map to
+- The state machine itself is only a few dozen lines of code, but defining the semantics early has a decisive impact on how the Phase 10 servicer is written
+- Phase 9.4's index persistence and load mechanism are tightly coupled; splitting into two phases would actually be more trouble
 
 ---
 
-## 3. VectorIndex 抽象
+## 3. VectorIndex Abstraction
 
-### 3.1 protocol 定义
+### 3.1 Protocol Definition
 
 ```python
 # milvus_lite/index/protocol.py
@@ -179,12 +179,12 @@ class VectorIndex(ABC):
         """A string tag like 'BRUTE_FORCE' / 'HNSW' / 'IVF_FLAT'."""
 ```
 
-**关键设计点**：
+**Key design points**:
 
-1. **local_id 只在 segment 内有效**：Index 不知道也不关心 pk 是什么。Segment 通过自己的 `pks` 数组把 local_id 翻译回 pk。这保证 index 实现完全 schema-agnostic、pk-type-agnostic。
-2. **distance 归一化在 index 内部完成**：FAISS L2 返回 squared L2、IP 返回越大越相似，与我们的 `compute_distances` 约定不符。归一化在 `FaissHnswIndex.search` 内部做，确保上层看到的距离语义与 brute-force 一致 —— 这是差分测试能跑的前提。
-3. **valid_mask 是 search 参数，不是 build 参数**：因为 mask 取决于运行时的 delta_index 和 filter_mask。FAISS 通过 `IDSelectorBitmap` 在 search 路径上吃下 mask，brute-force 通过 `vectors[mask]` 取子集后再算距离。
-4. **没有 add / remove 接口**：immutable 是契约的一部分。任何"修改 index"的需求都通过"丢弃旧 segment + 建新 segment + 建新 index"完成。
+1. **local_id is only valid within a segment**: The Index doesn't know or care what the pk is. The Segment translates local_id back to pk via its own `pks` array. This ensures the index implementation is completely schema-agnostic and pk-type-agnostic.
+2. **Distance normalization is done inside the index**: FAISS L2 returns squared L2, IP returns larger-is-more-similar, which doesn't match our `compute_distances` convention. Normalization is done inside `FaissHnswIndex.search`, ensuring the upper layer sees distance semantics identical to brute-force — this is a prerequisite for differential tests to work.
+3. **valid_mask is a search parameter, not a build parameter**: Because the mask depends on runtime delta_index and filter_mask. FAISS consumes the mask during the search path via `IDSelectorBitmap`; brute-force takes a subset via `vectors[mask]` before computing distances.
+4. **No add / remove interface**: Immutability is part of the contract. Any need to "modify an index" is fulfilled by "discard old segment + build new segment + build new index."
 
 ### 3.2 IndexSpec
 
@@ -212,22 +212,22 @@ class IndexSpec:
     def from_dict(cls, d: dict) -> "IndexSpec": ...
 ```
 
-**为什么 frozen**：和 `CompiledExpr` / `FieldSchema` 一致 — Manifest 持久化 + 跨 segment 共享 + hash 安全。
+**Why frozen**: Consistent with `CompiledExpr` / `FieldSchema` — Manifest persistence + cross-segment sharing + hash safety.
 
-**为什么 build_params 是 dict 而不是 typed**：不同 index_type 的参数差异巨大（HNSW 有 M / efConstruction，IVF 有 nlist），typed 会导致 `Union[HnswParams, IvfParams, ...]` 的类型膨胀。dict + impl 内部校验是更轻的选择，与 Milvus proto 的 `KeyValuePair` 表达直接对齐。
+**Why build_params is dict rather than typed**: Different index_types have vastly different parameters (HNSW has M / efConstruction, IVF has nlist); typed would cause `Union[HnswParams, IvfParams, ...]` type bloat. dict + internal validation within each impl is a lighter choice, directly aligned with Milvus proto's `KeyValuePair` representation.
 
 ---
 
-## 4. 与现有代码的接入点
+## 4. Integration Points with Existing Code
 
-### 4.1 Segment 改动
+### 4.1 Segment Changes
 
 ```python
 # milvus_lite/storage/segment.py
 
 class Segment:
     __slots__ = (
-        ..., "index",   # 新增
+        ..., "index",   # new
     )
 
     def __init__(self, ...):
@@ -270,9 +270,9 @@ class Segment:
         return os.path.join(index_dir, f"{stem}.{index_type.lower()}.idx")
 ```
 
-**关键不变量**：`Segment.file_path` 和 `Segment.index 的存盘路径`是 1:1 对应的。任何 segment 删除都必须同步删除对应的 index 文件，反之亦然。
+**Key invariant**: `Segment.file_path` and `Segment.index's on-disk path` have a 1:1 correspondence. Any segment deletion must synchronously delete the corresponding index file, and vice versa.
 
-### 4.2 Collection 改动
+### 4.2 Collection Changes
 
 ```python
 # milvus_lite/engine/collection.py
@@ -360,12 +360,12 @@ class Collection:
         ...
 ```
 
-### 4.3 search executor 改动
+### 4.3 Search Executor Changes
 
-新增 `execute_search_with_index` 函数，**与原 `execute_search` 并存**。Collection.search 根据 `_load_state` 选择路径：
+A new `execute_search_with_index` function is added, **coexisting with the original `execute_search`**. Collection.search selects the path based on `_load_state`:
 
-- 始终走新路径 `execute_search_with_index`
-- 新路径内部按 segment 分别召回，每个 segment 看自己有没有 index：有就用 index，没有就走 brute-force
+- Always uses the new path `execute_search_with_index`
+- Inside the new path, recall is done per-segment; each segment checks whether it has an index: if yes, use the index; if no, use brute-force
 
 ```python
 # milvus_lite/search/executor_indexed.py  (or extend executor.py)
@@ -401,12 +401,12 @@ def execute_search_with_index(
     ...
 ```
 
-**关键复杂度点**：
-- **per-segment top-k 后的全局合并**：每个 segment 召回 `top_k` 个，最后从 `N_segments * top_k + memtable_topk` 个候选里再取全局 top-k。理论上"per-segment 取 k"会丢失部分召回（如果某个 segment 实际有 k+1 个该 query 的近邻），实践上 N_segments 较小时影响很小。要不要"per-segment 取 2k"是 Phase 9.5 的可调参数。
-- **跨 segment dedup**：upsert 场景下同一个 pk 可能在多个 segment 出现，要按 max-seq 去重。这一步在原 `execute_search` 里由 `bitmap.build_valid_mask` 处理，新路径要在合并阶段重做。
-- **valid_mask 的 per-segment 切分**：原来的 `filter_mask` 是全局拼接的；新路径下要按 segment 切回去（assembler 可以提供"分 segment 的 filter mask 列表"而不是合并版本）。
+**Key complexity points**:
+- **Global merge after per-segment top-k**: Each segment recalls `top_k` results, then global top-k is selected from `N_segments * top_k + memtable_topk` candidates. Theoretically, "taking k per segment" may lose some recall (if a segment actually has k+1 nearest neighbors for the query); in practice, the impact is very small when N_segments is small. Whether to "take 2k per segment" is a tunable parameter for Phase 9.5.
+- **Cross-segment dedup**: In upsert scenarios, the same pk may appear in multiple segments, requiring dedup by max-seq. This step is handled by `bitmap.build_valid_mask` in the original `execute_search`; the new path needs to redo this during the merge phase.
+- **Per-segment slicing of valid_mask**: The original `filter_mask` was globally concatenated; the new path needs to slice it back per-segment (the assembler can provide "per-segment filter mask list" instead of the merged version).
 
-### 4.4 flush / compaction 钩子
+### 4.4 Flush / Compaction Hooks
 
 ```python
 # milvus_lite/engine/flush.py — Step 8 (new)
@@ -439,7 +439,7 @@ def run_compaction(collection, ...):
         merged_segment.build_or_load_index(collection._index_spec, index_dir)
 ```
 
-### 4.5 recovery 改动
+### 4.5 Recovery Changes
 
 ```python
 # milvus_lite/engine/recovery.py
@@ -457,7 +457,7 @@ def recover(collection):
     _cleanup_orphan_index_files(collection)
 ```
 
-### 4.6 Manifest schema bump
+### 4.6 Manifest Schema Bump
 
 ```python
 # milvus_lite/storage/manifest.py
@@ -487,18 +487,18 @@ def from_dict(cls, d: dict) -> "ManifestState":
     return cls(..., index_spec=spec, format_version=2)
 ```
 
-**兼容策略**：旧 v1 manifest 加载时 `index_spec` 字段缺失 → 默认 None，下一次 save 时升级到 v2。无需迁移工具。
+**Compatibility strategy**: When loading an old v1 manifest, the `index_spec` field is missing → defaults to None; next save upgrades to v2. No migration tool needed.
 
 ---
 
-## 5. 目录布局
+## 5. Directory Layout
 
 ```
 data_dir/
 └── collections/
     └── <collection_name>/
         ├── schema.json
-        ├── manifest.json          # 含 index_spec
+        ├── manifest.json          # contains index_spec
         ├── manifest.json.prev
         ├── wal/
         │   ├── data_*.arrow
@@ -510,39 +510,39 @@ data_dir/
                 │   └── data_000501_001000.parquet
                 ├── delta/
                 │   └── delta_000501_000503.parquet
-                └── indexes/                                  ← Phase 9 新增
+                └── indexes/                                  ← Added in Phase 9
                     ├── data_000001_000500.brute_force.idx
                     └── data_000501_001000.hnsw.idx
 ```
 
-**命名约定**：`<data_filename_stem>.<index_type_lowercase>.idx`
+**Naming convention**: `<data_filename_stem>.<index_type_lowercase>.idx`
 
-**严格不变量**：
-1. 一个 segment 的 .idx 文件名由 segment 文件名 + 当前 IndexSpec 的 index_type 唯一确定
-2. compaction 删 segment 时同时删 .idx；写新 segment 时同时写新 .idx
-3. recovery 启动时扫 indexes/ 目录，孤儿 .idx（对应的 segment 文件已不存在）一律删除
+**Strict invariants**:
+1. A segment's .idx filename is uniquely determined by the segment filename + the current IndexSpec's index_type
+2. When compaction deletes a segment, the .idx is deleted simultaneously; when writing a new segment, the new .idx is written simultaneously
+3. At recovery startup, the indexes/ directory is scanned; orphan .idx files (whose corresponding segment file no longer exists) are unconditionally deleted
 
 ---
 
-## 6. FAISS 接入坑点
+## 6. FAISS Integration Pitfalls
 
-### 6.1 Metric 符号对齐（最大坑）
+### 6.1 Metric Sign Alignment (Biggest Pitfall)
 
-| Metric | FAISS 内部约定 | MilvusLite 上层约定 | 转换 |
+| Metric | FAISS Internal Convention | MilvusLite Upper-Layer Convention | Conversion |
 |---|---|---|---|
-| L2 | squared L2（越小越相似） | raw L2（越小越相似） | `dist = sqrt(faiss_dist)` |
-| IP | dot product（越大越相似） | -dot（越小越相似） | `dist = -faiss_dist` |
-| COSINE | 等价于"对 vector 做 L2 normalize 后的 IP" | `1 - cosine_sim` | `vectors_norm = normalize(vectors); query_norm = normalize(query); dist = 1 - faiss_ip(query_norm, vectors_norm)` |
+| L2 | squared L2 (smaller is more similar) | raw L2 (smaller is more similar) | `dist = sqrt(faiss_dist)` |
+| IP | dot product (larger is more similar) | -dot (smaller is more similar) | `dist = -faiss_dist` |
+| COSINE | Equivalent to "IP after L2-normalizing vectors" | `1 - cosine_sim` | `vectors_norm = normalize(vectors); query_norm = normalize(query); dist = 1 - faiss_ip(query_norm, vectors_norm)` |
 
-**实现位置**：`FaissHnswIndex.search` 的 distance 后处理，确保返回给 executor 的 distance 与 brute-force 完全一致。
+**Implementation location**: Distance post-processing in `FaissHnswIndex.search`, ensuring the distances returned to the executor are fully consistent with brute-force.
 
-**测试方法**：差分测试 — 同一份数据 build 两个 index（brute / faiss），对 100 个随机 query 验证 distance 误差 < 1e-3（对召回命中的 pk）。
+**Testing method**: Differential testing — build two indexes (brute / faiss) on the same data, verify distance error < 1e-3 (for recall-matched pks) across 100 random queries.
 
-### 6.2 IDSelectorBitmap 的字节对齐
+### 6.2 IDSelectorBitmap Byte Alignment
 
 ```python
-# faiss.IDSelectorBitmap 接受的是按 bit packing 的 uint8 数组
-# numpy bool array 不能直接传，需要 packbits
+# faiss.IDSelectorBitmap accepts bit-packed uint8 arrays
+# numpy bool arrays cannot be passed directly; packbits is needed
 
 import faiss
 import numpy as np
@@ -554,9 +554,9 @@ params = faiss.SearchParametersHNSW(sel=selector)
 D, I = index.search(queries, top_k, params=params)
 ```
 
-注意 `bitorder='little'` 必须显式指定（FAISS 期望 LSB-first packing）。这个细节调试要靠单测覆盖。
+Note that `bitorder='little'` must be explicitly specified (FAISS expects LSB-first packing). This detail requires unit test coverage to debug properly.
 
-### 6.3 FAISS HNSW 不需要 train，但 IVF 要
+### 6.3 FAISS HNSW Doesn't Need Training, but IVF Does
 
 ```python
 # HNSW: just add
@@ -570,9 +570,9 @@ index.train(vectors[:training_subset])
 index.add(vectors)
 ```
 
-Phase 9 MVP 以 HNSW 为主；IVF_FLAT、IVF_SQ8、HNSW_SQ 已在后续迭代中实现（见 §11 已支持索引列表）。
+Phase 9 MVP focuses on HNSW; IVF_FLAT, IVF_SQ8, and HNSW_SQ have been implemented in subsequent iterations (see §11 for the list of supported indexes).
 
-### 6.4 持久化
+### 6.4 Persistence
 
 ```python
 # Save
@@ -582,11 +582,11 @@ faiss.write_index(self._index, path)
 loaded = faiss.read_index(path)
 ```
 
-注意 FAISS 的 write_index/read_index 是 C++ 序列化格式，不是 numpy。一份 index 文件 = 一个 FAISS object。
+Note that FAISS's write_index/read_index uses a C++ serialization format, not numpy. One index file = one FAISS object.
 
-### 6.5 macOS arm64 wheel
+### 6.5 macOS arm64 Wheel
 
-最新 `faiss-cpu>=1.7.4` 在 PyPI 上有 macOS arm64 wheel。但仍然推荐：
+The latest `faiss-cpu>=1.7.4` has macOS arm64 wheels on PyPI. However, it is still recommended to:
 
 ```toml
 # pyproject.toml
@@ -594,7 +594,7 @@ loaded = faiss.read_index(path)
 faiss = ["faiss-cpu>=1.7.4"]
 ```
 
-并在 `milvus_lite/index/factory.py` 用 try-import 模式：
+And use the try-import pattern in `milvus_lite/index/factory.py`:
 
 ```python
 try:
@@ -617,16 +617,16 @@ def build_index_from_spec(spec: IndexSpec, vectors: np.ndarray) -> VectorIndex:
 
 ---
 
-## 7. 生命周期时序图
+## 7. Lifecycle Sequence Diagrams
 
-### 7.1 正常写入 + 搜索（Collection 已 loaded）
+### 7.1 Normal Write + Search (Collection Already Loaded)
 
 ```
 client                Collection           flush.py        Segment      VectorIndex
   │                       │                    │              │              │
   ├─ insert(records) ─────►                    │              │              │
   │                       ├─ memtable.append ──┤              │              │
-  │                       │  (memtable 满)     │              │              │
+  │                       │  (memtable full)   │              │              │
   │                       ├─ flush() ──────────►              │              │
   │                       │                    ├─ write data parquet ────────►
   │                       │                    ├─ load Segment ──────────────►
@@ -648,7 +648,7 @@ client                Collection           flush.py        Segment      VectorIn
   ◄───────────────────────┤                                                │
 ```
 
-### 7.2 重启 + 显式 load
+### 7.2 Restart + Explicit Load
 
 ```
 client                Collection           recovery        Manifest      Segment    VectorIndex
@@ -675,7 +675,7 @@ client                Collection           recovery        Manifest      Segment
   ◄───────────────────────┤                                                              │
 ```
 
-### 7.3 compaction 时序
+### 7.3 Compaction Sequence
 
 ```
 flush.py            compaction.py         Segment(old)    Segment(new)   VectorIndex
@@ -694,11 +694,11 @@ flush.py            compaction.py         Segment(old)    Segment(new)   VectorI
 
 ---
 
-## 8. recall 验证策略
+## 8. Recall Validation Strategy
 
-### 8.1 差分测试结构
+### 8.1 Differential Test Structure
 
-`tests/index/test_index_differential.py`：
+`tests/index/test_index_differential.py`:
 
 ```python
 @pytest.mark.parametrize("dim", [4, 32, 128])
@@ -732,15 +732,15 @@ def test_faiss_hnsw_recall_vs_brute_force(dim, n, metric):
                     f"distance mismatch for pk={pid}: faiss={fdist} brute={bdist}"
 ```
 
-**为什么这个 setup**：
-- BruteForce 是数学上的 groundtruth，FAISS 是被测对象 — 与 Phase 8 的差分测试结构对称
-- recall@10 ≥ 0.95 是 HNSW 在合理参数下的常规水平
-- distance value parity 验证 metric 符号对齐没出错（一旦 metric 转换写错，第二个断言一定挂）
-- 三个 metric × 三个 dim × 两个规模 = 18 个 case，跑得快但覆盖广
+**Why this setup**:
+- BruteForce is the mathematical ground truth, FAISS is the object under test — symmetric with Phase 8's differential test structure
+- recall@10 ≥ 0.95 is the typical level for HNSW with reasonable parameters
+- Distance value parity verifies that metric sign alignment is correct (once the metric conversion is wrong, the second assertion will definitely fail)
+- Three metrics × three dims × two scales = 18 cases, fast to run but broad coverage
 
-### 8.2 端到端 search 路径的差分
+### 8.2 End-to-End Search Path Differential
 
-`tests/engine/test_search_index_vs_brute.py`：
+`tests/engine/test_search_index_vs_brute.py`:
 
 ```python
 def test_collection_search_index_path_matches_brute_force(tmp_path):
@@ -773,70 +773,70 @@ def test_collection_search_index_path_matches_brute_force(tmp_path):
 
 ---
 
-## 9. Phase 9 子阶段拆分
+## 9. Phase 9 Sub-phase Breakdown
 
-| 子阶段 | 内容 | 完成标志 | 工作量 |
+| Sub-phase | Content | Completion Criteria | Effort |
 |---|---|---|---|
-| **9.1** | 补齐 pymilvus quickstart 前置 API：`Collection.create_partition / drop_partition / list_partitions / num_entities / describe` + `search(output_fields=...)` + `MilvusLite.get_collection_stats` | 6 个新方法 + 测试齐全；不引入任何 index 概念 | S |
-| **9.2** | `VectorIndex` protocol + `BruteForceIndex` + 接入 `Segment.index` + 新 `execute_search_with_index` 路径（仍走 brute-force 实现） | 全部老搜索测试在新路径下通过；差分测试 brute-force-via-index ≡ 老 execute_search | M |
-| **9.3** | `IndexSpec` + `Manifest` v2 升级 + `Collection.create_index / drop_index / load / release / has_index / get_index_info` + `_load_state` 状态机 + `CollectionNotLoadedError` | `col.create_index → col.load → col.search → col.release → col.search raise` 全链路通；manifest v1→v2 兼容测试通 | M |
-| **9.4** | Index 文件持久化（`indexes/<stem>.<type>.idx`）+ flush / compaction / recovery 钩子 + 孤儿 .idx 清理 | Collection 重启 → load → search 等价；compaction 后无孤儿 .idx；崩溃注入测试通 | M |
-| **9.5** | `FaissHnswIndex` + factory 路由 + `[faiss]` extras + metric 对齐 + `IDSelectorBitmap` 接入 + 差分测试 + benchmark | 100K 向量 search QPS 比 brute-force 高 ≥50x；recall@10 ≥ 0.95；macOS arm64 + Linux 双平台 CI 通 | L |
-| **9.6** | `examples/m9_demo.py` + 长跑测试 + Phase 9 文档 backfill | m9 demo 通；`@pytest.mark.slow` 100K 测试通；`plan/index-design.md` 与最终代码对齐 | S |
+| **9.1** | Fill in prerequisite APIs for pymilvus quickstart: `Collection.create_partition / drop_partition / list_partitions / num_entities / describe` + `search(output_fields=...)` + `MilvusLite.get_collection_stats` | 6 new methods + full test coverage; no index concepts introduced | S |
+| **9.2** | `VectorIndex` protocol + `BruteForceIndex` + integrate with `Segment.index` + new `execute_search_with_index` path (still using brute-force implementation) | All old search tests pass on the new path; differential test brute-force-via-index ≡ old execute_search | M |
+| **9.3** | `IndexSpec` + `Manifest` v2 upgrade + `Collection.create_index / drop_index / load / release / has_index / get_index_info` + `_load_state` state machine + `CollectionNotLoadedError` | Full chain `col.create_index → col.load → col.search → col.release → col.search raise` passes; manifest v1→v2 compatibility test passes | M |
+| **9.4** | Index file persistence (`indexes/<stem>.<type>.idx`) + flush / compaction / recovery hooks + orphan .idx cleanup | Collection restart → load → search is equivalent; no orphan .idx after compaction; crash injection test passes | M |
+| **9.5** | `FaissHnswIndex` + factory routing + `[faiss]` extras + metric alignment + `IDSelectorBitmap` integration + differential tests + benchmark | 100K vector search QPS ≥50x higher than brute-force; recall@10 ≥ 0.95; macOS arm64 + Linux dual-platform CI passes | L |
+| **9.6** | `examples/m9_demo.py` + long-running tests + Phase 9 documentation backfill | m9 demo passes; `@pytest.mark.slow` 100K test passes; `plan/index-design.md` aligned with final code | S |
 
-合计：2S + 3M + 1L
+Total: 2S + 3M + 1L
 
 ---
 
-## 10. 关键风险与缓解
+## 10. Key Risks and Mitigations
 
-| 风险 | 概率 | 影响 | 缓解 |
+| Risk | Probability | Impact | Mitigation |
 |---|---|---|---|
-| FAISS metric 符号对齐写错 | 高 | 高（搜索结果错） | 差分测试是必经关卡，metric 错一定挂 |
-| FAISS macOS arm64 wheel 装不上 | 中 | 中 | optional extra + BruteForce fallback；CI 跑双 matrix |
-| `IDSelectorBitmap` packbits 顺序错 | 中 | 高 | 单测覆盖各种 mask pattern |
-| segment-level top-k 合并丢召回 | 低 | 低 | per-segment 取 `2*top_k` 候选；可调参数 |
-| flush 末尾同步 build index 让写入变慢 | 高 | 中（UX） | 接受 MVP 行为；future 把 index build 移出 flush 同步路径 |
-| compaction 后 .idx 文件孤儿 | 中 | 低 | recovery 启动时 cleanup_orphan_index_files |
-| Manifest v1 → v2 兼容失败 | 低 | 高 | 明确测试覆盖：旧 manifest 文件 → 新代码读取 → 升级保存 |
-| 多线程 load 期间 search 调用 | 低 | 中 | `_load_state == "loading"` 时 search 抛错；load 不并发 |
+| FAISS metric sign alignment implemented incorrectly | High | High (wrong search results) | Differential test is a mandatory gate; metric error will definitely fail |
+| FAISS macOS arm64 wheel installation failure | Medium | Medium | Optional extra + BruteForce fallback; CI runs dual matrix |
+| `IDSelectorBitmap` packbits order wrong | Medium | High | Unit test coverage for various mask patterns |
+| Segment-level top-k merge loses recall | Low | Low | Per-segment takes `2*top_k` candidates; tunable parameter |
+| Synchronous index build at end of flush slows writes | High | Medium (UX) | Accept MVP behavior; future: move index build out of flush synchronous path |
+| Orphan .idx files after compaction | Medium | Low | recovery startup runs cleanup_orphan_index_files |
+| Manifest v1 → v2 compatibility failure | Low | High | Explicit test coverage: old manifest file → new code reads → upgrade and save |
+| search called during multi-threaded load | Low | Medium | search throws error when `_load_state == "loading"`; load is not concurrent |
 
 ---
 
-## 11. 已支持的索引类型与后续扩展
+## 11. Supported Index Types and Future Extensions
 
-### 已支持
+### Supported
 
-| 索引类型 | 实现文件 | 说明 |
+| Index Type | Implementation File | Description |
 |---|---|---|
-| BRUTE_FORCE | `brute_force.py` | NumPy 暴力扫描，无依赖兜底 + 差分测试基准 + 小 segment 默认 |
+| BRUTE_FORCE | `brute_force.py` | NumPy brute-force scan, zero-dependency fallback + differential test baseline + default for small segments |
 | HNSW | `faiss_hnsw.py` | FAISS HNSW + IDSelectorBitmap pre-filter |
-| IVF_FLAT | `faiss_ivf_flat.py` | FAISS IVF-Flat，需 train 步骤 |
-| IVF_SQ8 | `faiss_ivf_sq8.py` | FAISS IVF + 8-bit scalar quantization，内存更省 |
-| HNSW_SQ | `faiss_hnsw_sq.py` | FAISS HNSW + scalar quantization 变体 |
-| SPARSE_INVERTED_INDEX | `sparse_inverted.py` | per-segment BM25 倒排索引，用于全文检索（Phase 11） |
+| IVF_FLAT | `faiss_ivf_flat.py` | FAISS IVF-Flat, requires training step |
+| IVF_SQ8 | `faiss_ivf_sq8.py` | FAISS IVF + 8-bit scalar quantization, more memory efficient |
+| HNSW_SQ | `faiss_hnsw_sq.py` | FAISS HNSW + scalar quantization variant |
+| SPARSE_INVERTED_INDEX | `sparse_inverted.py` | Per-segment BM25 inverted index for full-text search (Phase 11) |
 
-### 不在当前范围
+### Not in Current Scope
 
-| 功能 | 推迟到 |
+| Feature | Deferred To |
 |---|---|
-| IVF-PQ / OPQ 等高级量化索引 | Future |
-| GPU 加速（faiss-gpu） | Future |
-| 向量 quantization（int8, fp16, bf16, binary） | Future |
-| 异步 index build（不阻塞 flush） | Future |
-| 索引 warmup / 预读 | Future |
-| 多向量字段（一个 Collection 多个 vector 列） | Future（Milvus 也是后期才加） |
-| Index 参数自动调优 | Future |
+| IVF-PQ / OPQ and other advanced quantization indexes | Future |
+| GPU acceleration (faiss-gpu) | Future |
+| Vector quantization (int8, fp16, bf16, binary) | Future |
+| Async index build (non-blocking flush) | Future |
+| Index warmup / prefetch | Future |
+| Multiple vector fields (multiple vector columns per Collection) | Future (Milvus also added this later) |
+| Index parameter auto-tuning | Future |
 
 ---
 
-## 12. 完成标志
+## 12. Completion Criteria
 
-- `col.create_index("vec", {"index_type": "HNSW", "metric_type": "COSINE", "params": {"M": 16, "efConstruction": 200}})` 可以正常 persist 到 manifest
-- `col.load()` 后 `col.search([[...]], top_k=10)` 走 FAISS 路径，性能比 brute-force 高一个数量级
-- `col.release()` 后 search 抛 `CollectionNotLoadedError`
-- 重启进程 → `col.load()` 秒级完成（直接 load .idx 文件，不重建）
-- compaction 后旧 .idx 自动清理，新 .idx 自动构建
-- 差分测试 recall@10 ≥ 0.95 全绿
-- `examples/m9_demo.py` 跑通
-- 跑 `pytest` 全部老测试 + 新测试全绿
+- `col.create_index("vec", {"index_type": "HNSW", "metric_type": "COSINE", "params": {"M": 16, "efConstruction": 200}})` can successfully persist to manifest
+- After `col.load()`, `col.search([[...]], top_k=10)` goes through the FAISS path, with performance an order of magnitude higher than brute-force
+- After `col.release()`, search raises `CollectionNotLoadedError`
+- Restart process → `col.load()` completes in seconds (directly loads .idx files, no rebuilding)
+- After compaction, old .idx files are automatically cleaned up and new .idx files are automatically built
+- Differential test recall@10 ≥ 0.95 all green
+- `examples/m9_demo.py` runs successfully
+- Running `pytest` with all old tests + new tests all green

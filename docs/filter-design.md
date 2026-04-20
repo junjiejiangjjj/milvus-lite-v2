@@ -1,24 +1,24 @@
-# 深入设计：标量过滤表达式系统（Scalar Filter）
+# Deep Design: Scalar Filter Expression System (Scalar Filter)
 
-## 1. 概述
+## 1. Overview
 
-MilvusLite Phase 8 引入 Milvus-style 标量过滤表达式系统，让 `Collection.search` /
-`get` / `query` 接受字符串形式的谓词表达式（如 `"age > 18 and category == 'tech'"`），
-打通"向量召回 + 标量过滤"的混合查询。
+MilvusLite Phase 8 introduces a Milvus-style scalar filter expression system, allowing `Collection.search` /
+`get` / `query` to accept predicate expressions in string form (e.g., `"age > 18 and category == 'tech'"`),
+enabling hybrid queries combining "vector recall + scalar filtering".
 
-**为什么自己写**：pymilvus 只是把表达式字符串透传给 Milvus 服务端，所有 lex/parse/eval
-都在服务端完成。MilvusLite 是嵌入式的，没有"服务端"，必须自己实现完整的 lexer + parser
-+ type checker + evaluator。
+**Why build it ourselves**: pymilvus only passes the expression string through to the Milvus server — all lex/parse/eval
+is done server-side. MilvusLite is embedded, with no "server", so we must implement the complete lexer + parser
++ type checker + evaluator ourselves.
 
-**为什么"Milvus-inspired"而非 binary 兼容**：
-- Milvus grammar 跨版本会变（2.3 vs 2.4 表达式有差异）
-- 完整 grammar 含 JSON 路径、array 操作、UDF 等冷门特性
-- "Milvus-like" + 文档化我们支持的子集，足以让用户从 pymilvus 迁移
-- F3+ 才考虑追严格兼容（届时可能切换到 ANTLR-generated parser）
+**Why "Milvus-inspired" rather than binary compatible**:
+- Milvus grammar changes across versions (expressions differ between 2.3 and 2.4)
+- The full grammar includes JSON paths, array operations, UDFs and other rarely-used features
+- "Milvus-like" + documenting the subset we support is sufficient for users migrating from pymilvus
+- Strict compatibility will only be considered from F3+ onward (at which point we may switch to an ANTLR-generated parser)
 
 ---
 
-## 2. 三阶段编译流水线
+## 2. Three-Stage Compilation Pipeline
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -32,7 +32,7 @@ MilvusLite Phase 8 引入 Milvus-style 标量过滤表达式系统，让 `Collec
 │                              │                               │
 │                              │  compile_expr(expr, schema)   │
 │                              ▼                               │
-│  CompiledExpr  ─── 字段绑定 + 类型检查 + backend 选择          │
+│  CompiledExpr  ─── field binding + type checking + backend selection │
 │                              │                               │
 │                              │  evaluate(compiled, table)    │
 │                              ▼                               │
@@ -40,75 +40,75 @@ MilvusLite Phase 8 引入 Milvus-style 标量过滤表达式系统，让 `Collec
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**为什么三段**：
-- **parse 与 schema 无关**：相同表达式可缓存（F2c 优化）
-- **compile 与具体数据无关**：一次绑定、多次执行
-- **evaluate 是热路径**：只走 backend dispatch，零解析开销
+**Why three stages**:
+- **parse is schema-independent**: the same expression can be cached (F2c optimization)
+- **compile is data-independent**: bind once, execute many times
+- **evaluate is the hot path**: only performs backend dispatch, zero parsing overhead
 
 ---
 
-## 3. Grammar 子集（Tier 1，对齐 Milvus Plan.g4）
+## 3. Grammar Subset (Tier 1, aligned with Milvus Plan.g4)
 
-### 3.1 操作符 + 优先级
+### 3.1 Operators + Precedence
 
 | Prec | Operator | Associativity | Notes |
 |---|---|---|---|
 | 1 | `or`, `OR`, `\|\|` | left | |
 | 2 | `and`, `AND`, `&&` | left | |
-| 3 | `not`, `NOT`, `!` | right (前缀) | |
-| 4 | `==`, `!=`, `<`, `<=`, `>`, `>=` | left | 链式比较 parse 接受、semantic 拒绝 |
-| 4 | `in [...]`, `not in [...]` | non-assoc | RHS 必须是字面量数组 |
-| 4 | `like` | non-assoc | SQL LIKE 通配符 `%` / `_`（F2a） |
-| 4 | `is null`, `is not null` | non-assoc | 空值检查（F2a） |
-| 5 | `+`, `-`, `*`, `/`, `%` | left | 算术运算（F2a） |
-| 5 | `-` (unary) | right | 仅 `Unary(SUB, expr)` |
-| 6 | `text_match(field, query)` | — | 全文搜索匹配（Phase 11） |
-| 6 | `array_contains(field, val)` | — | 数组包含单值（F3） |
-| 6 | `array_contains_all(field, [vals])` | — | 数组包含全部值（F3） |
-| 6 | `array_contains_any(field, [vals])` | — | 数组包含任一值（F3） |
-| 6 | `array_length(field)` | — | 数组长度（F3） |
+| 3 | `not`, `NOT`, `!` | right (prefix) | |
+| 4 | `==`, `!=`, `<`, `<=`, `>`, `>=` | left | Chained comparisons accepted by parser, rejected by semantic check |
+| 4 | `in [...]`, `not in [...]` | non-assoc | RHS must be a literal array |
+| 4 | `like` | non-assoc | SQL LIKE wildcards `%` / `_` (F2a) |
+| 4 | `is null`, `is not null` | non-assoc | Null check (F2a) |
+| 5 | `+`, `-`, `*`, `/`, `%` | left | Arithmetic operations (F2a) |
+| 5 | `-` (unary) | right | Only `Unary(SUB, expr)` |
+| 6 | `text_match(field, query)` | — | Full-text search match (Phase 11) |
+| 6 | `array_contains(field, val)` | — | Array contains single value (F3) |
+| 6 | `array_contains_all(field, [vals])` | — | Array contains all values (F3) |
+| 6 | `array_contains_any(field, [vals])` | — | Array contains any value (F3) |
+| 6 | `array_length(field)` | — | Array length (F3) |
 | 7 | literal / ident / `(...)` | — | |
 
-### 3.2 字面量
+### 3.2 Literals
 
-| 类型 | 语法 | 例 |
+| Type | Syntax | Examples |
 |---|---|---|
-| 整数 | 十进制 | `42`, `0`, `-7`（负号是 unary）|
-| 浮点 | 十进制 + 科学计数 | `3.14`, `1e3`, `1.5e-2`, `-0.5` |
-| 字符串 | 双/单引号 + C 风格 escape | `"hello"`, `'world'`, `"a\"b"` |
-| 布尔 | 三种形式（与 Milvus 一致） | `true`/`True`/`TRUE`, `false`/`False`/`FALSE` |
-| 数组 | `[lit, lit, ...]` 含 trailing comma | `[1, 2, 3]`, `["a", "b",]` |
+| Integer | Decimal | `42`, `0`, `-7` (negative sign is unary) |
+| Float | Decimal + scientific notation | `3.14`, `1e3`, `1.5e-2`, `-0.5` |
+| String | Double/single quotes + C-style escape | `"hello"`, `'world'`, `"a\"b"` |
+| Boolean | Three forms (consistent with Milvus) | `true`/`True`/`TRUE`, `false`/`False`/`FALSE` |
+| Array | `[lit, lit, ...]` with trailing comma | `[1, 2, 3]`, `["a", "b",]` |
 
-**注意**：Milvus 接受 `True`/`true`/`TRUE` 三种但**不接受** `tRuE`。F1 与 Milvus 一致：
-非这 6 种形式的 mixed-case 一律 lex 阶段拒绝并给 did-you-mean 提示。
+**Note**: Milvus accepts `True`/`true`/`TRUE` in three forms but **does not accept** `tRuE`. F1 is consistent with Milvus:
+mixed-case forms other than these 6 are rejected at the lex stage with a did-you-mean hint.
 
-### 3.3 字符串 escape
+### 3.3 String Escape
 
-| Escape | 含义 |
+| Escape | Meaning |
 |---|---|
-| `\"` | 双引号 |
-| `\'` | 单引号 |
-| `\\` | 反斜杠 |
-| `\n` | 换行 |
-| `\r` | CR |
-| `\t` | tab |
+| `\"` | Double quote |
+| `\'` | Single quote |
+| `\\` | Backslash |
+| `\n` | Newline |
+| `\r` | Carriage return |
+| `\t` | Tab |
 
-F1 暂不支持 `\xHH`、`\uXXXX`、`\OOO` 八进制等罕见 escape（Milvus 支持，留给 F2）。
+F1 does not yet support `\xHH`, `\uXXXX`, `\OOO` octal and other rare escapes (Milvus supports them, deferred to F2).
 
-### 3.4 标识符规则
+### 3.4 Identifier Rules
 
 - `[a-zA-Z_][a-zA-Z_0-9]*`
-- **大小写敏感**（与 Milvus 一致）
-- 关键字大小写**不**敏感（`and == AND == &&`，但不接受 `And`）
-- **保留前缀** `_seq` / `_partition`：parse 阶段允许，semantic 阶段拒绝
-- **`$meta`**：F1 完全拒绝（推迟到 F2b）
+- **Case-sensitive** (consistent with Milvus)
+- Keyword case is **not** sensitive (`and == AND == &&`, but `And` is not accepted)
+- **Reserved prefixes** `_seq` / `_partition`: allowed at parse stage, rejected at semantic stage
+- **`$meta`**: Completely rejected in F1 (deferred to F2b)
 
-### 3.5 空白与注释
+### 3.5 Whitespace and Comments
 
-- 空白：` `, `\t`, `\r`, `\n` 全部跳过
-- **没有注释**（与 Milvus 一致）
+- Whitespace: ` `, `\t`, `\r`, `\n` all skipped
+- **No comments** (consistent with Milvus)
 
-### 3.6 完整 BNF（F1 实现的子集）
+### 3.6 Complete BNF (subset implemented in F1)
 
 ```
 expr            : or_expr ;
@@ -147,9 +147,9 @@ Whitespace      : [ \t\r\n]+ -> skip ;
 
 ---
 
-## 4. AST 节点
+## 4. AST Nodes
 
-20 个 frozen dataclass，全部值语义、可哈希、自动 `__eq__`。详见 `modules.md §9.21`。
+20 frozen dataclasses, all with value semantics, hashable, automatic `__eq__`. See `modules.md §9.21` for details.
 
 ```
 Literal:    IntLit, FloatLit, StringLit, BoolLit
@@ -164,17 +164,17 @@ FTS:        TextMatchOp
 Array:      ArrayContainsOp, ArrayLengthOp, ArrayAccessOp
 ```
 
-**关键设计**：
-- 用 `tuple` 不用 `list`（frozen 友好）
-- 没有共同 base class — 用 `Union` + `isinstance` dispatch（与 Operation 抽象一致）
-- 没有方法 — 行为在 backend 里
-- 每节点带 `pos` 用于错误信息溯源
+**Key design decisions**:
+- Use `tuple` instead of `list` (frozen-friendly)
+- No common base class — use `Union` + `isinstance` dispatch (consistent with the Operation abstraction)
+- No methods — behavior lives in backends
+- Each node carries `pos` for error message traceability
 
 ---
 
-## 5. 编译期：semantic.py
+## 5. Compilation Stage: semantic.py
 
-### 5.1 编译步骤
+### 5.1 Compilation Steps
 
 ```
 1. Walk AST → collect all FieldRef
@@ -185,29 +185,29 @@ Array:      ArrayContainsOp, ArrayLengthOp, ArrayAccessOp
    - if FLOAT_VECTOR → FilterTypeError
 3. Walk AST again → infer + check types
 4. Choose backend:
-   - F1: 永远 "arrow"
-   - F2b/F3+: 含 $meta 引用 → "hybrid"（per-batch JSON 预处理后委托 arrow_backend）
-   - F3: 含 UDF → "python"
+   - F1: always "arrow"
+   - F2b/F3+: contains $meta reference → "hybrid" (per-batch JSON preprocessing then delegate to arrow_backend)
+   - F3: contains UDF → "python"
 5. Wrap in CompiledExpr
 ```
 
-### 5.2 类型推断 + 兼容性
+### 5.2 Type Inference + Compatibility
 
 ```
 int  ≈ int     ✓
-int  ≈ float   ✓ (晋升)
+int  ≈ float   ✓ (promotion)
 str  ≈ str     ✓
 bool ≈ bool    ✓
-其他           ✗
+other          ✗
 ```
 
-链式比较 `a == b == c` 在 parse 阶段**不**拒绝（与 Milvus 一致），semantic 阶段
-报类型错误："left side is bool (result of `a == b`), right side is int — comparison
-between bool and int not supported"。
+Chained comparisons `a == b == c` are **not** rejected at the parse stage (consistent with Milvus); the semantic stage
+reports a type error: "left side is bool (result of `a == b`), right side is int — comparison
+between bool and int not supported".
 
-### 5.3 错误信息要求
+### 5.3 Error Message Requirements
 
-错误信息是 parser 的脸面。F1 必须做到：
+Error messages are the face of the parser. F1 must achieve:
 
 ```
 >>> col.search([[...]], expr="age >> 18")
@@ -234,56 +234,56 @@ FilterTypeError: type mismatch at column 7
 left side is int (field 'age'), right side is string
 ```
 
-实现要点：
-- 所有异常继承 `MilvusLiteError`，user 可以一把 catch
-- 异常带 `source: str` + `pos: int`，`__str__` 自动渲染 caret
-- "did you mean" 用 `difflib.get_close_matches`（标准库）
-- 每个错误指出**字段名**和**类型**，不只是"type mismatch"
+Implementation key points:
+- All exceptions inherit from `MilvusLiteError`, allowing users to catch with a single handler
+- Exceptions carry `source: str` + `pos: int`, `__str__` automatically renders caret
+- "did you mean" uses `difflib.get_close_matches` (standard library)
+- Each error specifies **field name** and **type**, not just "type mismatch"
 
 ---
 
-## 6. Backend 设计
+## 6. Backend Design
 
-### 6.1 三 backend 决策
+### 6.1 Three-Backend Decision
 
-| Backend | 用途 | 速度（100K 行）|
+| Backend | Purpose | Speed (100K rows) |
 |---|---|---|
-| `arrow_backend` | 纯 schema 字段表达式（F1+F2a 全部） | ~5ms |
-| `hybrid_backend` | 含 `$meta` 动态字段表达式（F3+） | ~50–100ms |
-| `python_backend` | 差分测试基准 + hybrid fallback + 未来 UDF | ~500ms |
+| `arrow_backend` | Pure schema field expressions (all of F1+F2a) | ~5ms |
+| `hybrid_backend` | Expressions containing `$meta` dynamic fields (F3+) | ~50–100ms |
+| `python_backend` | Differential test baseline + hybrid fallback + future UDF | ~500ms |
 
-**Backend 在 compile 时静态决定**——不在 evaluate 热路径上 dispatch。
-- 纯 schema 字段 → `arrow`
-- 含 `$meta` → `hybrid`（per-batch JSON 预处理后委托 arrow_backend）
-- `python` 不会被 dispatcher 自动选中，仅作为：
-  1. test_e2e 差分测试的基准
-  2. hybrid_backend 在遇到异构 JSON 类型 / 不兼容 arrow kernel 时的运行时 fallback
-  3. 未来 F3 UDF / 真正动态语义的最终落点
+**Backend is statically determined at compile time** — no dispatch on the evaluate hot path.
+- Pure schema fields → `arrow`
+- Contains `$meta` → `hybrid` (per-batch JSON preprocessing then delegate to arrow_backend)
+- `python` is never automatically selected by the dispatcher, serving only as:
+  1. Differential test baseline in test_e2e
+  2. Runtime fallback for hybrid_backend when encountering heterogeneous JSON types / incompatible arrow kernels
+  3. Final destination for future F3 UDF / truly dynamic semantics
 
-### 6.2 arrow_backend 实现策略
+### 6.2 arrow_backend Implementation Strategy
 
-**AST → pyarrow.compute 调用树**。pyarrow.compute 是向量化 C++ 实现，所有比较 /
-布尔 / IN 都有现成 kernel。
+**AST → pyarrow.compute call tree**. pyarrow.compute is a vectorized C++ implementation with ready-made
+kernels for all comparisons / boolean operations / IN.
 
 | AST | pyarrow operation |
 |---|---|
-| 字面量 | `pa.scalar(value)` |
+| Literal | `pa.scalar(value)` |
 | FieldRef | `table.column(name)` |
 | CmpOp | `pc.equal / less / ...` |
-| InOp | `pc.is_in(col, value_set=values)` + 可选 `pc.invert` |
+| InOp | `pc.is_in(col, value_set=values)` + optional `pc.invert` |
 | And | `functools.reduce(pc.and_kleene, masks)` |
 | Or | `functools.reduce(pc.or_kleene, masks)` |
 | Not | `pc.invert` |
 
-**关键细节**：
-- 用 `and_kleene` / `or_kleene` 而不是 `and_` / `or_`：pyarrow 推荐对 nullable
-  数据用 Kleene 三值逻辑
-- 字面量用 `pa.scalar`，compute kernel 接受 array vs scalar 自动 broadcast
-- 顶层结果调 `pc.fill_null(False)`：null 表示"无信息"，filter 语义下当 false
+**Key details**:
+- Use `and_kleene` / `or_kleene` instead of `and_` / `or_`: pyarrow recommends Kleene
+  three-valued logic for nullable data
+- Literals use `pa.scalar`, compute kernels accept array vs scalar with automatic broadcasting
+- Top-level result calls `pc.fill_null(False)`: null means "no information", treated as false in filter semantics
 
-### 6.3 python_backend 实现策略
+### 6.3 python_backend Implementation Strategy
 
-Row-wise 解释器：把 pa.Table 转成 list of dicts，对每行调 Python eval。
+Row-wise interpreter: converts pa.Table to list of dicts, calls Python eval on each row.
 
 ```python
 def evaluate_python(compiled, data) -> pa.BooleanArray:
@@ -295,40 +295,40 @@ def evaluate_python(compiled, data) -> pa.BooleanArray:
     return pa.array(out, type=pa.bool_())
 ```
 
-NULL 三值逻辑：用 Kleene 实现 AND/OR/NOT，最终 None → False。
+NULL three-valued logic: uses Kleene implementation for AND/OR/NOT, finally None → False.
 
-**性能**：100K 行 ~500ms。慢但通用。F3+ 阶段不再被 dispatcher 自动选中，仅作为差分基准 + hybrid fallback。
+**Performance**: 100K rows ~500ms. Slow but general-purpose. From F3+ onward, no longer automatically selected by the dispatcher, serving only as differential baseline + hybrid fallback.
 
-### 6.3a hybrid_backend 实现策略 (F3+)
+### 6.3a hybrid_backend Implementation Strategy (F3+)
 
-`$meta["key"]` 在 F2b 最初实现是 `python_backend` 直接 row-wise 解释 — 每行付出
-"AST walk + JSON parse" 的双重开销，100K 行 ~500ms。F3+ 引入 hybrid_backend：
+`$meta["key"]` was initially implemented in F2b as `python_backend` doing direct row-wise interpretation — paying
+the dual cost of "AST walk + JSON parse" per row, 100K rows ~500ms. F3+ introduces hybrid_backend:
 
-**思路**：把 JSON 解析与列物化提到 per-batch 一次，让比较/算术/布尔仍走 arrow 向量化。
+**Idea**: Lift JSON parsing and column materialization to a one-time per-batch operation, letting comparisons/arithmetic/boolean logic still run through arrow vectorization.
 
-**步骤**：
-1. `collect_meta_keys(ast)` 扫一遍 AST 收集所有 `$meta["key"]` 的 key 集合
-2. `_augment_table(data, keys)`：
-   - 一次 `to_pylist()` 把 `$meta` 列拉出来
-   - 每行 `json.loads` 一次（容错 None / dict / 坏 JSON）
-   - 对每个 key 用 `pa.array([d.get(key) for d in parsed])` 物化成 Arrow 列
-   - append 到原 table，列名约定 `__meta__<key>`（双下划线前缀避免冲突）
-3. `_rewrite_meta_access(ast, keys)`：把 AST 里所有 `MetaAccess(key)` 节点替换为
-   `FieldRef("__meta__<key>")`，得到一份新 AST
-4. 用 `dataclasses.replace` 临时把 backend 改成 `"arrow"`，调 `evaluate_arrow`
+**Steps**:
+1. `collect_meta_keys(ast)` scans the AST once to collect the set of all `$meta["key"]` keys
+2. `_augment_table(data, keys)`:
+   - One `to_pylist()` call to extract the `$meta` column
+   - `json.loads` once per row (tolerating None / dict / malformed JSON)
+   - For each key, use `pa.array([d.get(key) for d in parsed])` to materialize an Arrow column
+   - Append to the original table, with column naming convention `__meta__<key>` (double underscore prefix to avoid conflicts)
+3. `_rewrite_meta_access(ast, keys)`: replaces all `MetaAccess(key)` nodes in the AST with
+   `FieldRef("__meta__<key>")`, producing a new AST
+4. Use `dataclasses.replace` to temporarily change the backend to `"arrow"`, then call `evaluate_arrow`
 
-**性能**：100K 行 ~50–100ms（瓶颈从 row-wise Python 转为 JSON 解析），约 5–10×。
+**Performance**: 100K rows ~50–100ms (bottleneck shifts from row-wise Python to JSON parsing), roughly 5–10x improvement.
 
-**Fallback**：整段 try/except 包裹 augment + arrow eval。任意失败（异构类型 / 全 null
-列没有匹配 kernel / arrow 不支持的型变换）→ 落回 `python_backend` 跑这一次 evaluate。
-fallback 是 per-evaluate 而不是 per-row，开销可控。
+**Fallback**: The entire augment + arrow eval is wrapped in try/except. Any failure (heterogeneous types / all-null
+columns without matching kernel / arrow-unsupported type conversions) → falls back to `python_backend` for this single evaluate call.
+Fallback is per-evaluate rather than per-row, keeping overhead manageable.
 
-**正确性**：差分测试 (`test_meta_hybrid_vs_python_parity`) 跑遍 14 个 `$meta` 表达式，
-逐行比对 hybrid 与 python 输出。语义源头是 `python_backend`，hybrid 偏离即测试失败。
+**Correctness**: Differential tests (`test_meta_hybrid_vs_python_parity`) run through 14 `$meta` expressions,
+comparing hybrid and python output row by row. The semantic source of truth is `python_backend`; any hybrid deviation causes test failure.
 
-### 6.4 差分测试
+### 6.4 Differential Testing
 
-`test_e2e.py` 里每个 case **同时跑两个 backend**，断言结果相等：
+In `test_e2e.py`, each case **runs both backends simultaneously**, asserting equal results:
 
 ```python
 @pytest.mark.parametrize("expr_str", [...50+ cases...])
@@ -347,16 +347,16 @@ def test_arrow_python_equivalence(expr_str, sample_table, sample_schema):
         f"backend mismatch on '{expr_str}'"
 ```
 
-**为什么差分测试是关键**：
-1. 写两份实现，互相校验 — 任何一边的 bug 都被另一边暴露
-2. NULL 三值逻辑、类型 promotion、边界值 — 这些容易写错的地方靠对称性 catch
-3. F2b 引入 `$meta` 后，差分测试自然扩展到验证"backend selection 是否选对"
+**Why differential testing is critical**:
+1. Two implementations cross-validate each other — bugs in either side are exposed by the other
+2. NULL three-valued logic, type promotion, boundary values — these error-prone areas are caught by symmetry
+3. After F2b introduces `$meta`, differential testing naturally extends to verify "whether backend selection chose correctly"
 
 ---
 
-## 7. 与现有 search pipeline 的集成
+## 7. Integration with the Existing Search Pipeline
 
-### 7.1 数据流
+### 7.1 Data Flow
 
 ```
         ┌──────────────────────────────────┐
@@ -393,7 +393,7 @@ def test_arrow_python_equivalence(expr_str, sample_table, sample_schema):
         └──────────────────────────────────┘
 ```
 
-### 7.2 bitmap.py 改动
+### 7.2 bitmap.py Changes
 
 ```python
 def build_valid_mask(
@@ -406,7 +406,7 @@ def build_valid_mask(
     return mask
 ```
 
-### 7.3 assembler.py 改动
+### 7.3 assembler.py Changes
 
 ```python
 def assemble_candidates(
@@ -430,17 +430,17 @@ def assemble_candidates(
     return all_pks, all_seqs, all_vectors, all_records, filter_mask
 ```
 
-**为什么 filter 在 assembler 而不是 bitmap**：
-- 数据已经是 pa.Table 形式（segment 持有原始 Table）
-- pyarrow.compute 需要 columnar 输入，bitmap 阶段已经 numpy 化了
-- 让 bitmap.py 保持纯 numpy（与 distance / executor 一致）
+**Why filter is in assembler rather than bitmap**:
+- Data is already in pa.Table form (segments hold the original Table)
+- pyarrow.compute needs columnar input; the bitmap stage has already been numpy-ified
+- Keeps bitmap.py as pure numpy (consistent with distance / executor)
 
-`assembler` 是 search 子系统中**唯一同时知道 storage 类型 (Segment, MemTable) 和
-filter 子系统**的模块。
+`assembler` is the **only module in the search subsystem that knows both the storage types (Segment, MemTable) and
+the filter subsystem**.
 
 ---
 
-## 8. Collection API 升级
+## 8. Collection API Upgrade
 
 ```python
 class Collection:
@@ -474,78 +474,78 @@ class Collection:
         return compile_expr(parse_expr(expr_str), self._schema)
 ```
 
-`query()` 是新方法 — 纯标量查询，相当于 `search(query=None, expr=...)` 但不需要
-query vector，也不计算距离，直接返回所有匹配行（可选 `limit`）。
+`query()` is a new method — pure scalar query, equivalent to `search(query=None, expr=...)` but does not require
+a query vector, does not compute distances, and directly returns all matching rows (with optional `limit`).
 
 ---
 
-## 9. Phase 8 子阶段拆分
+## 9. Phase 8 Sub-Phase Breakdown
 
-| Phase | 目标 grammar | Backend | Status |
+| Phase | Target Grammar | Backend | Status |
 |---|---|---|---|
-| **F1** | Tier 1：比较 + 布尔 + IN + 字面量 + 字段引用 + 括号 | 仅 arrow_backend；python_backend 仅做差分测试 | ✅ done |
-| **F2a** | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend | ✅ done |
-| **F2b** | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch | ✅ done |
-| **F2c** | filter LRU cache + `query()` 接入 | 与 backend 无关 | ✅ done |
-| **F3+** | 性能优化：per-batch JSON 预处理 → arrow_backend；hybrid 取代 python 作 $meta 默认 dispatch | 引入 hybrid_backend | ✅ done |
-| **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap | — |
+| **F1** | Tier 1: comparison + boolean + IN + literals + field reference + parentheses | arrow_backend only; python_backend only for differential testing | ✅ done |
+| **F2a** | + `like` + arithmetic (`+ - * / %`) + `is null` | Still arrow_backend | ✅ done |
+| **F2b** | + `$meta["key"]` dynamic fields | Introduces python_backend dispatch | ✅ done |
+| **F2c** | filter LRU cache + `query()` integration | Backend-independent | ✅ done |
+| **F3+** | Performance optimization: per-batch JSON preprocessing → arrow_backend; hybrid replaces python as default $meta dispatch | Introduces hybrid_backend | ✅ done |
+| **F3** | + `json_contains` / `array_contains` / UDF / strict Milvus compatibility | Extends python_backend; optional ANTLR parser swap | — |
 
 ---
 
-## 10. 关于 ANTLR
+## 10. About ANTLR
 
-Milvus 使用 ANTLR4 + Plan.g4 生成 C++ parser。我们 F1 选**手写 Pratt parser** 而
-非引入 ANTLR Python target，原因：
+Milvus uses ANTLR4 + Plan.g4 to generate a C++ parser. For F1, we chose a **hand-written Pratt parser** rather
+than introducing the ANTLR Python target, for these reasons:
 
-1. **F1 grammar 小**（10 个算子），手写 ~300 行 Python，调试友好
-2. **零依赖**（不引入 antlr4-python3-runtime + 1500 行生成代码）
-3. **错误信息可控**（手写 caret + did-you-mean 比 ANTLR override BaseErrorListener 简单）
-4. **AST 是稳定接口** — 未来 F3 切换到 ANTLR 后端时，type checker / evaluator 都不动
+1. **F1 grammar is small** (10 operators), hand-written ~300 lines of Python, debug-friendly
+2. **Zero dependencies** (no need to introduce antlr4-python3-runtime + 1500 lines of generated code)
+3. **Error messages are controllable** (hand-written caret + did-you-mean is simpler than ANTLR's override BaseErrorListener)
+4. **AST is a stable interface** — when switching to an ANTLR backend in F3, the type checker / evaluator remain unchanged
 
-但**借鉴 Milvus Plan.g4 的语法设计**：操作符优先级表、关键字大小写、字面量语法、
-AST 节点形态都对齐 Milvus（方便未来真要做 binary 兼容时切换 parser 实现）。
+However, we **borrow from Milvus Plan.g4's grammar design**: the operator precedence table, keyword casing, literal syntax,
+and AST node shapes all align with Milvus (making it easier to swap the parser implementation if true binary compatibility is ever needed).
 
-参考：[milvus-io/milvus Plan.g4](https://github.com/milvus-io/milvus/blob/master/internal/parser/planparserv2/Plan.g4)
+Reference: [milvus-io/milvus Plan.g4](https://github.com/milvus-io/milvus/blob/master/internal/parser/planparserv2/Plan.g4)
 
 ---
 
-## 11. 不在 Phase F1 范围
+## 11. Not in Phase F1 Scope
 
-| 特性 | 推迟到 |
+| Feature | Deferred to |
 |---|---|
-| `like` 算子 | F2a |
-| 算术 (`+, -, *, /, %`) | F2a |
+| `like` operator | F2a |
+| Arithmetic (`+, -, *, /, %`) | F2a |
 | `is null` / `is not null` | F2a |
-| `$meta` 动态字段 | F2b |
-| JSON / array 函数 | F3 |
+| `$meta` dynamic fields | F2b |
+| JSON / array functions | F3 |
 | UDF | F3 |
 | Expression cache | F2c |
 | ANTLR-based parser | F3+ |
-| DuckDB 后端 | F3+ |
+| DuckDB backend | F3+ |
 
-F1 grammar 之外的算子，lex/parse 阶段会 reject 并给 "Phase F2/F3 will support" 提示，
-而不是 silent error。
+Operators outside the F1 grammar are rejected at the lex/parse stage with a "Phase F2/F3 will support" hint,
+rather than failing silently.
 
 ---
 
-## 12. 完成标志
+## 12. Completion Criteria
 
-- **F1 done**：
-  - `col.search([[...]], expr="age > 18 and category in ['tech', 'news']")` 跑通
-  - 差分测试 50+ case 全绿
-  - `examples/m8_demo.py` 通过
-  - `Collection.search` / `get` / `query` 三个方法都接受 expr
-  - 错误信息含 caret + did-you-mean
+- **F1 done**:
+  - `col.search([[...]], expr="age > 18 and category in ['tech', 'news']")` runs successfully
+  - Differential testing with 50+ cases all green
+  - `examples/m8_demo.py` passes
+  - `Collection.search` / `get` / `query` — all three methods accept expr
+  - Error messages include caret + did-you-mean
 
-- **F2 done**：
-  - `col.search(expr="title like 'AI%' and $meta['priority'] > 5")` 跑通
-  - filter LRU cache + `query()` 接入
+- **F2 done**:
+  - `col.search(expr="title like 'AI%' and $meta['priority'] > 5")` runs successfully
+  - filter LRU cache + `query()` integration
 
-- **F3+ done**：
-  - hybrid_backend 取代 python_backend 作 `$meta` 默认 dispatch
-  - 差分测试 hybrid vs python 在所有 `$meta` 表达式上一致
-  - 异构 JSON 类型 / 全 null 列等异常自动 fallback 到 python_backend
+- **F3+ done**:
+  - hybrid_backend replaces python_backend as default `$meta` dispatch
+  - Differential testing hybrid vs python is consistent across all `$meta` expressions
+  - Heterogeneous JSON types / all-null columns and other anomalies automatically fall back to python_backend
 
-- **F3 done**：
-  - 跑通 pymilvus 表达式测试套件子集
-  - 可选 ANTLR backend
+- **F3 done**:
+  - Passes a subset of the pymilvus expression test suite
+  - Optional ANTLR backend

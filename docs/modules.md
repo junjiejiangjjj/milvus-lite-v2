@@ -1,26 +1,26 @@
-# MilvusLite 代码模块设计
+# MilvusLite Code Module Design
 
-## 1. 顶层 Package 划分
+## 1. Top-Level Package Layout
 
 ```
 milvus_lite/
-├── schema/          # 数据模型与类型系统
-├── storage/         # 存储层：持久化 + 内存缓冲
-├── engine/          # 引擎层：核心逻辑编排
-├── search/          # 搜索层：向量检索
-├── index/           # 索引层 (Phase 9)：VectorIndex 抽象 + BruteForce / FAISS / IVF / Sparse
-├── analyzer/        # 分析层 (Phase 11)：文本分析 (BM25 tokenizer)
-├── embedding/       # Embedding 层：向量化模型抽象 + OpenAI provider
-├── rerank/          # Rerank 层：重排序模型抽象 + Cohere provider
-├── adapter/         # 适配层 (Phase 10)：gRPC → engine 协议翻译
-├── db.py            # DB 层：多 Collection 生命周期管理 (MilvusLite)
-├── server_manager.py # pymilvus 集成入口 (后台 gRPC server 生命周期)
-├── constants.py     # 全局常量
-├── exceptions.py    # 异常层级
-└── __init__.py      # 公共 API 导出
+├── schema/          # Data model and type system
+├── storage/         # Storage layer: persistence + in-memory buffer
+├── engine/          # Engine layer: core logic orchestration
+├── search/          # Search layer: vector retrieval
+├── index/           # Index layer (Phase 9): VectorIndex abstraction + BruteForce / FAISS / IVF / Sparse
+├── analyzer/        # Analyzer layer (Phase 11): text analysis (BM25 tokenizer)
+├── embedding/       # Embedding layer: vectorization model abstraction + OpenAI provider
+├── rerank/          # Rerank layer: re-ranking model abstraction + Cohere provider
+├── adapter/         # Adapter layer (Phase 10): gRPC -> engine protocol translation
+├── db.py            # DB layer: multi-Collection lifecycle management (MilvusLite)
+├── server_manager.py # pymilvus integration entry point (background gRPC server lifecycle)
+├── constants.py     # Global constants
+├── exceptions.py    # Exception hierarchy
+└── __init__.py      # Public API exports
 ```
 
-## 2. 完整代码结构
+## 2. Complete Code Structure
 
 ```
 lite-v2/
@@ -31,160 +31,160 @@ lite-v2/
 ├── CLAUDE.md
 │
 ├── milvus_lite/
-│   ├── __init__.py                 # 公共 API 导出
-│   ├── constants.py                # 全局常量
-│   ├── exceptions.py               # 异常层级
+│   ├── __init__.py                 # Public API exports
+│   ├── constants.py                # Global constants
+│   ├── exceptions.py               # Exception hierarchy
 │   │
-│   ├── schema/                     # ══ 数据模型与类型系统 ══
-│   │   ├── __init__.py             #   导出: DataType, FieldSchema, CollectionSchema
-│   │   ├── types.py                #   DataType enum, FieldSchema, CollectionSchema 类定义
+│   ├── schema/                     # == Data model and type system ==
+│   │   ├── __init__.py             #   Exports: DataType, FieldSchema, CollectionSchema
+│   │   ├── types.py                #   DataType enum, FieldSchema, CollectionSchema class definitions
 │   │   ├── validation.py           #   validate_schema(), validate_record(), separate_dynamic_fields()
-│   │   ├── arrow_builder.py        #   4 个 Arrow Schema 构建器 (data/delta/wal_data/wal_delta)
-│   │   └── persistence.py          #   schema.json 读写 (save_schema / load_schema)
+│   │   ├── arrow_builder.py        #   4 Arrow Schema builders (data/delta/wal_data/wal_delta)
+│   │   └── persistence.py          #   schema.json read/write (save_schema / load_schema)
 │   │
-│   ├── storage/                    # ══ 存储层 ══
-│   │   ├── __init__.py             #   导出: WAL, MemTable, DataFile, DeltaFile, DeltaIndex, Manifest
-│   │   ├── wal.py                  #   WAL (Arrow IPC Streaming, 双文件, write/read_operations/close, fsync)
+│   ├── storage/                    # == Storage layer ==
+│   │   ├── __init__.py             #   Exports: WAL, MemTable, DataFile, DeltaFile, DeltaIndex, Manifest
+│   │   ├── wal.py                  #   WAL (Arrow IPC Streaming, dual-file, write/read_operations/close, fsync)
 │   │   ├── memtable.py             #   MemTable (RecordBatch list + pk_index + delete_index, seq-aware)
-│   │   ├── data_file.py            #   数据 Parquet 无状态函数 (读写, 命名, seq 范围解析)
-│   │   ├── delta_file.py           #   delta Parquet 无状态函数 (读写)
-│   │   ├── delta_index.py          #   DeltaIndex (内存 pk→max_delete_seq, gc_below)
-│   │   └── manifest.py             #   Manifest (JSON, tmp+rename 原子, .prev 备份, Partition 文件列表)
+│   │   ├── data_file.py            #   Data Parquet stateless functions (read/write, naming, seq range parsing)
+│   │   ├── delta_file.py           #   Delta Parquet stateless functions (read/write)
+│   │   ├── delta_index.py          #   DeltaIndex (in-memory pk->max_delete_seq, gc_below)
+│   │   └── manifest.py             #   Manifest (JSON, tmp+rename atomic, .prev backup, Partition file lists)
 │   │
-│   ├── engine/                     # ══ 引擎层 ══
-│   │   ├── __init__.py             #   导出: Collection
-│   │   ├── operation.py            #   InsertOp / DeleteOp / Operation Union (写编排抽象层)
-│   │   ├── collection.py           #   Collection 核心 (入口, _seq 分配, insert/delete/get/search, _apply 统一路径, Partition CRUD)
-│   │   ├── flush.py                #   Flush 管线 (7 步, 同步阻塞)
-│   │   ├── recovery.py             #   崩溃恢复 (5 步, 经 WAL.read_operations 按 seq 回放)
+│   ├── engine/                     # == Engine layer ==
+│   │   ├── __init__.py             #   Exports: Collection
+│   │   ├── operation.py            #   InsertOp / DeleteOp / Operation Union (write orchestration abstraction layer)
+│   │   ├── collection.py           #   Collection core (entry point, _seq allocation, insert/delete/get/search, _apply unified path, Partition CRUD)
+│   │   ├── flush.py                #   Flush pipeline (7 steps, synchronous blocking)
+│   │   ├── recovery.py             #   Crash recovery (5 steps, replay via WAL.read_operations by seq)
 │   │   └── compaction.py           #   Compaction Manager (Size-Tiered + tombstone GC)
 │   │
-│   ├── search/                     # ══ 搜索层 ══
-│   │   ├── __init__.py             #   导出: execute_search
-│   │   ├── bitmap.py               #   bitmap 管线 (去重 + 删除过滤 + 可选 filter_mask)
-│   │   ├── distance.py             #   距离计算 (cosine / L2 / inner product, NumPy 实现)
-│   │   ├── assembler.py            #   候选集拼装 (segments + memtable → numpy + 可选 filter_mask)
-│   │   ├── executor.py             #   搜索执行器 (收集数据 + bitmap + 向量检索 + top-k)
-│   │   └── filter/                 # ══ 标量过滤子系统 (Phase 8) ══
-│   │       ├── __init__.py         #   导出: parse_expr, compile_expr, evaluate, FilterError
+│   ├── search/                     # == Search layer ==
+│   │   ├── __init__.py             #   Exports: execute_search
+│   │   ├── bitmap.py               #   Bitmap pipeline (dedup + delete filtering + optional filter_mask)
+│   │   ├── distance.py             #   Distance computation (cosine / L2 / inner product, NumPy implementation)
+│   │   ├── assembler.py            #   Candidate assembly (segments + memtable -> numpy + optional filter_mask)
+│   │   ├── executor.py             #   Search executor (collect data + bitmap + vector retrieval + top-k)
+│   │   └── filter/                 # == Scalar filter subsystem (Phase 8) ==
+│   │       ├── __init__.py         #   Exports: parse_expr, compile_expr, evaluate, FilterError
 │   │       ├── exceptions.py       #   FilterError / FilterParseError / FilterFieldError / FilterTypeError
 │   │       ├── tokens.py           #   TokenKind enum + Token + tokenize()
-│   │       ├── ast.py              #   20 个 frozen AST 节点 + Expr Union
-│   │       ├── parser.py           #   Pratt parser (借鉴 Milvus Plan.g4)
-│   │       ├── semantic.py         #   compile_expr + 类型推断 + 字段绑定 + backend 选择
+│   │       ├── ast.py              #   20 frozen AST nodes + Expr Union
+│   │       ├── parser.py           #   Pratt parser (inspired by Milvus Plan.g4)
+│   │       ├── semantic.py         #   compile_expr + type inference + field binding + backend selection
 │   │       ├── cache.py            #   LRUCache (Phase F2c)
 │   │       └── eval/
 │   │           ├── __init__.py     #   evaluate() backend dispatcher (arrow / hybrid / python)
-│   │           ├── arrow_backend.py #   pyarrow.compute 后端 (主)
-│   │           ├── hybrid_backend.py#   per-batch JSON 预处理 → arrow (Phase F3+)
-│   │           └── python_backend.py#   row-wise Python 后端 (差分基准 + hybrid fallback)
+│   │           ├── arrow_backend.py #   pyarrow.compute backend (primary)
+│   │           ├── hybrid_backend.py#   per-batch JSON preprocessing -> arrow (Phase F3+)
+│   │           └── python_backend.py#   row-wise Python backend (differential baseline + hybrid fallback)
 │   │
-│   ├── index/                      # ══ 索引层 (Phase 9) ══
-│   │   ├── __init__.py             #   导出: VectorIndex, BruteForceIndex, FaissHnswIndex, IndexSpec, build_index_from_spec
+│   ├── index/                      # == Index layer (Phase 9) ==
+│   │   ├── __init__.py             #   Exports: VectorIndex, BruteForceIndex, FaissHnswIndex, IndexSpec, build_index_from_spec
 │   │   ├── protocol.py             #   VectorIndex ABC: build / search / save / load
 │   │   ├── spec.py                 #   IndexSpec frozen dataclass
-│   │   ├── brute_force.py          #   BruteForceIndex (NumPy, 差分基准 + fallback)
+│   │   ├── brute_force.py          #   BruteForceIndex (NumPy, differential baseline + fallback)
 │   │   ├── faiss_hnsw.py           #   FaissHnswIndex (FAISS HNSW + IDSelectorBitmap)
 │   │   ├── faiss_ivf_flat.py       #   FaissIvfFlatIndex (FAISS IVF_FLAT)
 │   │   ├── faiss_ivf_sq8.py        #   FaissIvfSq8Index (FAISS IVF_SQ8)
 │   │   ├── faiss_hnsw_sq.py        #   FaissHnswSqIndex (FAISS HNSW_SQ — HNSW + scalar quantization)
-│   │   ├── sparse_inverted.py      #   SparseInvertedIndex (稀疏向量倒排索引)
-│   │   └── factory.py              #   build_index_from_spec / load_index + try-import faiss 降级
+│   │   ├── sparse_inverted.py      #   SparseInvertedIndex (sparse vector inverted index)
+│   │   └── factory.py              #   build_index_from_spec / load_index + try-import faiss degradation
 │   │
-│   ├── analyzer/                   # ══ 分析层 (Phase 11) ══
-│   │   ├── __init__.py             #   导出: Analyzer, StandardAnalyzer, create_analyzer
+│   ├── analyzer/                   # == Analyzer layer (Phase 11) ==
+│   │   ├── __init__.py             #   Exports: Analyzer, StandardAnalyzer, create_analyzer
 │   │   ├── protocol.py             #   Analyzer ABC: tokenize
 │   │   ├── standard.py             #   StandardAnalyzer (regex tokenizer)
-│   │   ├── jieba_analyzer.py       #   JiebaAnalyzer (可选中文分词)
-│   │   ├── hash.py                 #   term_to_id hash 函数
-│   │   ├── sparse.py               #   sparse vector 工具
-│   │   └── factory.py              #   create_analyzer 工厂
+│   │   ├── jieba_analyzer.py       #   JiebaAnalyzer (optional Chinese word segmentation)
+│   │   ├── hash.py                 #   term_to_id hash function
+│   │   ├── sparse.py               #   sparse vector utilities
+│   │   └── factory.py              #   create_analyzer factory
 │   │
-│   ├── embedding/                  # ══ Embedding 层 ══
+│   ├── embedding/                  # == Embedding layer ==
 │   │   ├── __init__.py
 │   │   ├── protocol.py             #   EmbeddingProvider ABC
 │   │   ├── openai_provider.py      #   OpenAI embedding provider
-│   │   └── factory.py              #   create_embedding_provider 工厂
+│   │   └── factory.py              #   create_embedding_provider factory
 │   │
-│   ├── rerank/                     # ══ Rerank 层 ══
+│   ├── rerank/                     # == Rerank layer ==
 │   │   ├── __init__.py
 │   │   ├── protocol.py             #   RerankProvider ABC
 │   │   ├── cohere_provider.py      #   Cohere rerank provider
-│   │   ├── decay.py                #   decay 衰减函数
-│   │   └── factory.py              #   create_rerank_provider 工厂
+│   │   ├── decay.py                #   decay function
+│   │   └── factory.py              #   create_rerank_provider factory
 │   │
-│   ├── adapter/                    # ══ 适配层 (Phase 10) ══
-│   │   └── grpc/                   # ── gRPC → engine 协议翻译 ──
+│   ├── adapter/                    # == Adapter layer (Phase 10) ==
+│   │   └── grpc/                   # -- gRPC -> engine protocol translation --
 │   │       ├── __init__.py
 │   │       ├── server.py           #   run_server(data_dir, host, port)
-│   │       ├── servicer.py         #   MilvusServicer — 所有 RPC 实现
-│   │       ├── cli.py              #   python -m milvus_lite.adapter.grpc 入口
-│   │       ├── errors.py           #   MilvusLiteError → grpc Status 映射
+│   │       ├── servicer.py         #   MilvusServicer — all RPC implementations
+│   │       ├── cli.py              #   python -m milvus_lite.adapter.grpc entry point
+│   │       ├── errors.py           #   MilvusLiteError -> grpc Status mapping
 │   │       ├── translators/
-│   │       │   ├── schema.py       #   Milvus FieldSchema ↔ MilvusLite FieldSchema
-│   │       │   ├── records.py      #   FieldData (列式) ↔ list[dict] (行式) 转置
-│   │       │   ├── search.py       #   SearchRequest 解析
-│   │       │   ├── result.py       #   engine 结果 → SearchResults proto
-│   │       │   ├── expr.py         #   Milvus filter 透传 + 不支持函数检测
-│   │       │   └── index.py        #   IndexParams ↔ IndexSpec
-│   │       └── proto/              #   生成的 stub (commit 到 repo)
+│   │       │   ├── schema.py       #   Milvus FieldSchema <-> MilvusLite FieldSchema
+│   │       │   ├── records.py      #   FieldData (columnar) <-> list[dict] (row-wise) transposition
+│   │       │   ├── search.py       #   SearchRequest parsing
+│   │       │   ├── result.py       #   engine results -> SearchResults proto
+│   │       │   ├── expr.py         #   Milvus filter pass-through + unsupported function detection
+│   │       │   └── index.py        #   IndexParams <-> IndexSpec
+│   │       └── proto/              #   Generated stubs (committed to repo)
 │   │           ├── milvus_pb2.py
 │   │           ├── milvus_pb2_grpc.py
 │   │           ├── schema_pb2.py
 │   │           ├── common_pb2.py
 │   │           └── README.md       #   source commit reference
 │   │
-│   ├── db.py                       # ══ DB 层 ══
-│   │                                #   MilvusLite 类 (create/get/drop/list_collection, get_collection_stats, close)
-│   └── server_manager.py           #   pymilvus 集成入口 (ServerManager, server_manager_instance)
+│   ├── db.py                       # == DB layer ==
+│   │                                #   MilvusLite class (create/get/drop/list_collection, get_collection_stats, close)
+│   └── server_manager.py           #   pymilvus integration entry point (ServerManager, server_manager_instance)
 │
 ├── tests/
-│   ├── conftest.py                 # 共享 fixtures: 临时目录, 示例 Schema, 随机向量生成器
+│   ├── conftest.py                 # Shared fixtures: temporary directories, example Schema, random vector generators
 │   │
 │   ├── schema/
-│   │   ├── test_types.py           #   DataType / FieldSchema / CollectionSchema 定义
-│   │   ├── test_validation.py      #   Schema 校验规则, 记录校验, 动态字段分离
-│   │   ├── test_arrow_builder.py   #   4 个 Arrow Schema 构建, TYPE_MAP 映射
-│   │   └── test_persistence.py     #   schema.json 序列化/反序列化往返
+│   │   ├── test_types.py           #   DataType / FieldSchema / CollectionSchema definitions
+│   │   ├── test_validation.py      #   Schema validation rules, record validation, dynamic field separation
+│   │   ├── test_arrow_builder.py   #   4 Arrow Schema builders, TYPE_MAP mapping
+│   │   └── test_persistence.py     #   schema.json serialization/deserialization round-trip
 │   │
 │   ├── storage/
-│   │   ├── test_wal.py             #   WAL 写入/恢复往返, 双文件生命周期, 损坏处理, fsync
-│   │   ├── test_memtable.py        #   apply_insert/apply_delete/get 语义, upsert, seq-aware 乱序反例, flush Partition 拆分
-│   │   ├── test_data_file.py       #   Parquet 读写往返, 文件命名, seq 范围解析
-│   │   ├── test_delta_file.py      #   delta Parquet 读写往返
+│   │   ├── test_wal.py             #   WAL write/recover round-trip, dual-file lifecycle, corruption handling, fsync
+│   │   ├── test_memtable.py        #   apply_insert/apply_delete/get semantics, upsert, seq-aware out-of-order counterexample, flush Partition split
+│   │   ├── test_data_file.py       #   Parquet read/write round-trip, file naming, seq range parsing
+│   │   ├── test_delta_file.py      #   delta Parquet read/write round-trip
 │   │   ├── test_delta_index.py     #   add_batch / is_deleted / gc_below / rebuild_from
-│   │   └── test_manifest.py        #   加载/保存原子性, .prev 备份与 fallback, Partition 文件列表管理
+│   │   └── test_manifest.py        #   load/save atomicity, .prev backup and fallback, Partition file list management
 │   │
 │   ├── engine/
-│   │   ├── test_operation.py       #   InsertOp / DeleteOp 构造, 属性 (seq_min/seq_max/num_rows)
-│   │   ├── test_collection.py      #   Collection 级 E2E: insert/delete/get/search, Partition CRUD, upsert
-│   │   ├── test_flush.py           #   Flush 管线端到端, 7 个崩溃点 (含 fsync), 恢复正确性
-│   │   ├── test_recovery.py        #   崩溃恢复 5 步, WAL 按 seq 重放, 孤儿文件清理
-│   │   └── test_compaction.py      #   文件分桶, 合并去重, 删除过滤, Manifest 更新, tombstone GC
+│   │   ├── test_operation.py       #   InsertOp / DeleteOp construction, properties (seq_min/seq_max/num_rows)
+│   │   ├── test_collection.py      #   Collection-level E2E: insert/delete/get/search, Partition CRUD, upsert
+│   │   ├── test_flush.py           #   Flush pipeline end-to-end, 7 crash points (including fsync), recovery correctness
+│   │   ├── test_recovery.py        #   Crash recovery 5 steps, WAL replay by seq, orphan file cleanup
+│   │   └── test_compaction.py      #   File bucketing, merge dedup, delete filtering, Manifest update, tombstone GC
 │   │
 │   ├── search/
-│   │   ├── test_bitmap.py          #   bitmap 构建: 去重 + 删除过滤 + filter_mask
-│   │   ├── test_distance.py        #   cosine / L2 / IP 距离正确性
-│   │   ├── test_executor.py        #   搜索端到端, top-k, Partition Pruning
-│   │   └── filter/                 #   ── 过滤子系统单元测试 ──
-│   │       ├── test_tokens.py      #   各 literal 词法 + 关键字大小写 + 错误位置
-│   │       ├── test_parser.py      #   Pratt 优先级 + 括号 + 错误恢复
-│   │       ├── test_semantic.py    #   字段不存在 / 类型不匹配 / did-you-mean
-│   │       ├── test_arrow_backend.py    #   每个 AST 节点 → 正确 BooleanArray
-│   │       ├── test_python_backend.py   #   同上, 行级实现对照
-│   │       └── test_e2e.py         #   差分测试: arrow == python; hybrid == python
+│   │   ├── test_bitmap.py          #   Bitmap construction: dedup + delete filtering + filter_mask
+│   │   ├── test_distance.py        #   cosine / L2 / IP distance correctness
+│   │   ├── test_executor.py        #   Search end-to-end, top-k, Partition Pruning
+│   │   └── filter/                 #   -- Filter subsystem unit tests --
+│   │       ├── test_tokens.py      #   Various literal lexing + keyword case sensitivity + error positions
+│   │       ├── test_parser.py      #   Pratt precedence + parentheses + error recovery
+│   │       ├── test_semantic.py    #   Field not found / type mismatch / did-you-mean
+│   │       ├── test_arrow_backend.py    #   Each AST node -> correct BooleanArray
+│   │       ├── test_python_backend.py   #   Same as above, row-level implementation comparison
+│   │       └── test_e2e.py         #   Differential testing: arrow == python; hybrid == python
 │   │
-│   ├── index/                      #   ── Phase 9 索引子系统单元测试 ──
-│   │   ├── test_brute_force_index.py    #   BruteForceIndex 自身正确性
-│   │   ├── test_faiss_hnsw.py           #   FaissHnswIndex (skipif faiss 不可用)
-│   │   ├── test_faiss_id_selector.py    #   IDSelectorBitmap packbits 顺序 + 边界
-│   │   ├── test_index_differential.py   #   recall@10 ≥ 0.95, distance value parity
-│   │   └── test_index_persistence.py    #   .idx 文件 save/load 往返
+│   ├── index/                      #   -- Phase 9 index subsystem unit tests --
+│   │   ├── test_brute_force_index.py    #   BruteForceIndex self-correctness
+│   │   ├── test_faiss_hnsw.py           #   FaissHnswIndex (skipif faiss not available)
+│   │   ├── test_faiss_id_selector.py    #   IDSelectorBitmap packbits order + boundary
+│   │   ├── test_index_differential.py   #   recall@10 >= 0.95, distance value parity
+│   │   └── test_index_persistence.py    #   .idx file save/load round-trip
 │   │
-│   ├── adapter/                    #   ── Phase 10 gRPC 适配层测试 ──
-│   │   ├── test_grpc_server_startup.py  #   server 启动 / shutdown / pymilvus.connect
+│   ├── adapter/                    #   -- Phase 10 gRPC adapter layer tests --
+│   │   ├── test_grpc_server_startup.py  #   server startup / shutdown / pymilvus.connect
 │   │   ├── test_grpc_translators_schema.py
-│   │   ├── test_grpc_translators_records.py  #   FieldData ↔ records 双向 round-trip
+│   │   ├── test_grpc_translators_records.py  #   FieldData <-> records bidirectional round-trip
 │   │   ├── test_grpc_translators_expr.py
 │   │   ├── test_grpc_translators_index.py
 │   │   ├── test_grpc_collection_lifecycle.py
@@ -193,86 +193,86 @@ lite-v2/
 │   │   ├── test_grpc_index.py           #   create_index / load / release
 │   │   ├── test_grpc_partition.py
 │   │   ├── test_grpc_error_mapping.py
-│   │   └── test_grpc_quickstart.py      #   L3 冒烟: pymilvus quickstart 全流程
+│   │   └── test_grpc_quickstart.py      #   L3 smoke test: pymilvus quickstart full flow
 │   │
-│   ├── test_db.py                  #   多 Collection 生命周期, close/cleanup
-│   └── test_smoke_e2e.py           #   走公开 API 的端到端冒烟
+│   ├── test_db.py                  #   Multi-Collection lifecycle, close/cleanup
+│   └── test_smoke_e2e.py           #   End-to-end smoke test via public API
 │
 ├── pyproject.toml
 └── requirements.txt
 ```
 
-## 架构不变量（核心约束）
+## Architecture Invariants (Core Constraints)
 
-下列约束贯穿所有模块，是设计共识，不在每个 §9.x 接口里重复。任何模块的实现违反这里任一条都视为 bug。
+The following constraints apply across all modules and represent design consensus. They are not repeated in each section interface description. Any module implementation violating any of these is considered a bug.
 
-**正确性 / 数据一致性：**
+**Correctness / Data Consistency:**
 
-1. **`_seq` 是操作的全序**。所有"覆盖 / 丢弃 / 去重"判断必须比较 `_seq`，不依赖调用顺序或文件物理顺序。这条让 recovery 乱序回放、compaction 重排、未来引入并发都不会破坏正确性。
-2. **MemTable cross-clear 必须 seq-aware**。put 与 delete 互相清除对方 buffer 同 pk 条目前，**必须**先比较 `_seq`，只有当前操作 `_seq` 更大时才覆盖；否则当前操作直接丢弃。详见 §9.7。
-3. **Tombstone GC 规则**：`delta_index` 中 `pk → delete_seq` 条目可以丢弃，当且仅当不存在 `seq_min ≤ delete_seq` 且包含该 pk 的 data 文件。MVP 用保守版本：全局 `min_active_data_seq` 之下的所有 tombstone 均可丢。详见 §9.9 / §9.16。
-4. **文件不可变**。所有磁盘文件（data Parquet、delta Parquet、WAL Arrow、Manifest）一旦写完只能整体删除，不允许就地修改。这是 LSM 路线的基础。
-5. **Manifest 是单一真相源**，原子更新（write-tmp + rename），且保留 `manifest.json.prev` 兜底一次序列化事故。详见 §9.10。
+1. **`_seq` is the total order of operations**. All "override / discard / dedup" decisions must compare `_seq` and must not depend on call order or file physical order. This ensures that recovery out-of-order replay, compaction reordering, and future concurrency introduction will not break correctness.
+2. **MemTable cross-clear must be seq-aware**. When put and delete clear each other's buffer entries for the same pk, they **must** first compare `_seq`; only when the current operation's `_seq` is larger does it override; otherwise the current operation is discarded. See section 9.7.
+3. **Tombstone GC rule**: A `delta_index` entry `pk -> delete_seq` can be discarded if and only if there is no data file with `seq_min <= delete_seq` that contains that pk. MVP uses the conservative version: all tombstones below the global `min_active_data_seq` can be dropped. See sections 9.9 / 9.16.
+4. **Files are immutable**. All disk files (data Parquet, delta Parquet, WAL Arrow, Manifest) can only be deleted as a whole once written; in-place modification is not allowed. This is the foundation of the LSM approach.
+5. **Manifest is the single source of truth**, atomically updated (write-tmp + rename), with `manifest.json.prev` as a fallback against one serialization failure. See section 9.10.
 
-**并发模型：**
+**Concurrency Model:**
 
-6. **MVP 同步 flush**。`Collection.insert/delete` 检测到 MemTable 满后**阻塞执行** flush，flush 完成才返回。异步/后台 flush 列入 future，不进 MVP。
-   - 这条决定影响 MemTable / Collection / Search 三层接口形态。要改成异步必须先开新文档讨论锁/快照/RCU 边界。
-7. **单 writer per Collection**。Collection 不做内部加锁；同一进程多线程并发写同一 Collection 是 undefined behavior。
-8. **单进程 per data_dir**。`db.py` 启动时用 `fcntl.flock(data_dir/LOCK)` 抢占；被占用直接报错退出，不等待。
+6. **MVP synchronous flush**. When `Collection.insert/delete` detects MemTable is full, it **blocks to execute** flush and returns only after flush completes. Async/background flush is deferred to the future and not included in MVP.
+   - This decision affects the interface shape of MemTable / Collection / Search. Switching to async requires opening a new document to discuss lock/snapshot/RCU boundaries.
+7. **Single writer per Collection**. Collection does not do internal locking; multi-threaded concurrent writes to the same Collection within one process is undefined behavior.
+8. **Single process per data_dir**. `db.py` acquires `fcntl.flock(data_dir/LOCK)` at startup; if already held, it errors out immediately without waiting.
 
-**Schema / 演化：**
+**Schema / Evolution:**
 
-9. **Schema 不可变**。MVP 不支持 alter table；schema 变更只能通过新建 Collection + reindex。这是简化设计的关键前提：4 套 Arrow Schema、所有历史 Parquet 文件都不需要考虑兼容。
+9. **Schema is immutable**. MVP does not support alter table; schema changes can only be done by creating a new Collection + reindex. This is the key simplification premise: the 4 Arrow Schemas and all historical Parquet files never need to consider compatibility.
 
-**WAL / 持久性：**
+**WAL / Durability:**
 
-10. **WAL 默认 `sync_mode="close"`**：在 `close_and_delete` 前对 sink 做一次 `os.fsync`。覆盖容器 OOM-kill 后立即接管的崩溃场景。详见 wal-design.md §8。
+10. **WAL defaults to `sync_mode="close"`**: performs one `os.fsync` on the sink before `close_and_delete`. This covers the crash scenario of container OOM-kill followed by immediate takeover. See wal-design.md section 8.
 
-**Index / 检索（Phase 9）：**
+**Index / Retrieval (Phase 9):**
 
-11. **Index 与 data 文件 1:1 绑定，生命周期严格对齐**。一个 segment 的 .idx 文件名由 segment 文件名 + IndexSpec.index_type 唯一确定。compaction 删 segment 时同步删 .idx；写新 segment 时同步写新 .idx。recovery 启动时 cleanup_orphan_index_files。详见 §10 / index-design.md。
-12. **Index 不可变**：与 data 文件不可变同源。VectorIndex protocol 没有 add / remove 接口，任何"修改 index"通过"丢弃旧 segment + 建新 segment + 建新 index"完成。
-13. **Search 路径默认禁止访问未 loaded 的 Collection**：`Collection.search / get / query` 在 `_load_state != "loaded"` 时抛 `CollectionNotLoadedError`。`insert / delete` 不受此约束。Collection 重启后默认 `released` 态。详见 index-design.md §2.4。
-14. **distance 归一化在 VectorIndex 内部完成**：FAISS L2 / IP / cosine 的内部约定与上层 `compute_distances` 的约定不同（FAISS L2 是 squared、IP 是越大越相似），归一化在 `FaissHnswIndex.search` 完成，确保上层看到的 distance 与 BruteForceIndex 完全一致。差分测试是这条不变量的强制检查。
+11. **Index is bound 1:1 to data files, with strictly aligned lifecycles**. A segment's .idx file name is uniquely determined by the segment file name + IndexSpec.index_type. When compaction deletes a segment, the corresponding .idx must be deleted simultaneously; when writing a new segment, a new .idx is written simultaneously. Recovery runs cleanup_orphan_index_files at startup. See section 10 / index-design.md.
+12. **Index is immutable**: follows from data file immutability. The VectorIndex protocol has no add / remove interface; any "modify index" is done through "discard old segment + build new segment + build new index".
+13. **Search path prohibits access to unloaded Collections by default**: `Collection.search / get / query` throws `CollectionNotLoadedError` when `_load_state != "loaded"`. `insert / delete` are not affected by this constraint. After restart, Collection defaults to `released` state. See index-design.md section 2.4.
+14. **Distance normalization happens inside VectorIndex**: FAISS L2 / IP / cosine internal conventions differ from the upper-layer `compute_distances` convention (FAISS L2 is squared, IP is larger-is-more-similar). Normalization in `FaissHnswIndex.search` ensures the upper layer sees distances identical to `BruteForceIndex`. Differential tests are the mandatory check for this invariant.
 
-**协议层（Phase 10）：**
+**Protocol Layer (Phase 10):**
 
-15. **gRPC 适配层只翻译，不增加能力**。`adapter/grpc/servicer.py` 的所有方法都是 engine API 的薄包装；任何"engine 不支持但 servicer 假装支持"的实现都禁止。不支持的 RPC 返回 `UNIMPLEMENTED` + 友好消息，**不 silent fail**。详见 §11 / grpc-adapter-design.md。
-16. **proto stub commit 到 repo**，不 runtime 生成。`proto/README.md` 记录 source commit。
+15. **gRPC adapter layer only translates, never adds capability**. All methods in `adapter/grpc/servicer.py` are thin wrappers around engine API; any implementation that "the engine doesn't support but the servicer pretends to support" is prohibited. Unsupported RPCs return `UNIMPLEMENTED` + friendly message, **never silent fail**. See section 11 / grpc-adapter-design.md.
+16. **proto stubs are committed to the repo**, not generated at runtime. `proto/README.md` records the source commit.
 
 ---
 
-## 3. 六大 Package 详解
+## 3. Six Package Detailed Descriptions
 
-### 3.1 schema/ — 数据模型与类型系统
+### 3.1 schema/ — Data Model and Type System
 
-**职责边界**：定义数据是什么样的，不关心数据存在哪里、怎么流转。
+**Responsibility boundary**: Defines what data looks like; does not concern itself with where data is stored or how it flows.
 
-| 子模块 | 职责 | 核心类/函数 |
+| Submodule | Responsibility | Core Classes/Functions |
 |--------|------|------------|
-| `types.py` | 类型定义 | `DataType` enum, `FieldSchema` dataclass, `CollectionSchema` dataclass, `TYPE_MAP` (DataType→Arrow) |
-| `validation.py` | 校验逻辑 | `validate_schema(schema)` — 主键/向量约束; `validate_record(record, schema)` — 字段类型/非空/维度; `separate_dynamic_fields(record, schema)` — Schema 内外字段分离→$meta |
-| `arrow_builder.py` | Arrow Schema 构建 | `build_data_schema()`, `build_delta_schema()`, `build_wal_data_schema()`, `build_wal_delta_schema()`, `get_primary_field()`, `get_vector_field()` |
-| `persistence.py` | 持久化 | `save_schema_json(schema, collection_name, path)`, `load_schema_json(path)` |
+| `types.py` | Type definitions | `DataType` enum, `FieldSchema` dataclass, `CollectionSchema` dataclass, `TYPE_MAP` (DataType->Arrow) |
+| `validation.py` | Validation logic | `validate_schema(schema)` — primary key/vector constraints; `validate_record(record, schema)` — field type/non-null/dimension; `separate_dynamic_fields(record, schema)` — schema in/out field separation->$meta |
+| `arrow_builder.py` | Arrow Schema construction | `build_data_schema()`, `build_delta_schema()`, `build_wal_data_schema()`, `build_wal_delta_schema()`, `get_primary_field()`, `get_vector_field()` |
+| `persistence.py` | Persistence | `save_schema_json(schema, collection_name, path)`, `load_schema_json(path)` |
 
 ```python
 # schema/__init__.py
 from milvus_lite.schema.types import DataType, FieldSchema, CollectionSchema
 ```
 
-### 3.2 storage/ — 存储层
+### 3.2 storage/ — Storage Layer
 
-**职责边界**：管理数据的物理存储（磁盘文件 + 内存缓冲），提供读写原语。不理解业务流程（flush 编排、recovery 编排由 engine 负责）。
+**Responsibility boundary**: Manages the physical storage of data (disk files + in-memory buffers), providing read/write primitives. Does not understand business flows (flush orchestration, recovery orchestration are handled by engine).
 
-| 子模块 | 职责 | 核心类/方法 |
+| Submodule | Responsibility | Core Classes/Methods |
 |--------|------|------------|
-| `wal.py` | WAL 持久化 | `WAL(wal_dir, wal_data_schema, wal_delta_schema, wal_number, sync_mode="close")` — `write(op)`, `read_operations(...)→Iterator[Operation]`, `close_and_delete()`（含 fsync） |
-| `memtable.py` | 内存缓冲 | `MemTable(schema)` — `apply_insert(batch)`, `apply_delete(batch)`, `get(pk)`, `flush()→Dict[partition, (data_table, delta_table)]`, `size()`。**内部表示：append-only RecordBatch list + pk_index + delete_index；cross-clear 必须 seq-aware**。 |
-| `data_file.py` | 数据 Parquet（无状态） | `write_data_file(table, partition_dir, seq_min, seq_max)→path`, `read_data_file(path)→pa.Table`, `parse_seq_range(filename)→(min, max)`, `get_file_size(path)→int` |
-| `delta_file.py` | delta Parquet（无状态） | `write_delta_file(...)→path`, `read_delta_file(path)→pa.Table` |
-| `delta_index.py` | 内存删除索引 | `DeltaIndex(pk_name)` — `add_batch(batch)`, `is_deleted(pk, seq)→bool`, `gc_below(min_active_seq)→int`, `rebuild_from(...)` |
-| `manifest.py` | 全局状态 | `Manifest(data_dir)` — `load()`, `save()` (原子+`.prev`), `add/remove_data_file(partition, file)`, `add/remove_delta_file(partition, file)`, `add/remove_partition(name)` |
+| `wal.py` | WAL persistence | `WAL(wal_dir, wal_data_schema, wal_delta_schema, wal_number, sync_mode="close")` — `write(op)`, `read_operations(...)→Iterator[Operation]`, `close_and_delete()` (includes fsync) |
+| `memtable.py` | In-memory buffer | `MemTable(schema)` — `apply_insert(batch)`, `apply_delete(batch)`, `get(pk)`, `flush()→Dict[partition, (data_table, delta_table)]`, `size()`. **Internal representation: append-only RecordBatch list + pk_index + delete_index; cross-clear must be seq-aware**. |
+| `data_file.py` | Data Parquet (stateless) | `write_data_file(table, partition_dir, seq_min, seq_max)→path`, `read_data_file(path)→pa.Table`, `parse_seq_range(filename)→(min, max)`, `get_file_size(path)→int` |
+| `delta_file.py` | Delta Parquet (stateless) | `write_delta_file(...)→path`, `read_delta_file(path)→pa.Table` |
+| `delta_index.py` | In-memory delete index | `DeltaIndex(pk_name)` — `add_batch(batch)`, `is_deleted(pk, seq)→bool`, `gc_below(min_active_seq)→int`, `rebuild_from(...)` |
+| `manifest.py` | Global state | `Manifest(data_dir)` — `load()`, `save()` (atomic+`.prev`), `add/remove_data_file(partition, file)`, `add/remove_delta_file(partition, file)`, `add/remove_partition(name)` |
 
 ```python
 # storage/__init__.py
@@ -284,44 +284,44 @@ from milvus_lite.storage.delta_index import DeltaIndex
 from milvus_lite.storage.manifest import Manifest
 ```
 
-### 3.3 engine/ — 引擎层
+### 3.3 engine/ — Engine Layer
 
-**职责边界**：编排 storage 组件，实现业务流程（写入→flush→落盘、崩溃恢复、compaction）。是 storage 和 search 的上层调用者。
+**Responsibility boundary**: Orchestrates storage components, implementing business flows (write->flush->persist, crash recovery, compaction). Is the upper-layer caller of storage and search.
 
-| 子模块 | 职责 | 核心内容 |
+| Submodule | Responsibility | Core Content |
 |--------|------|---------|
-| `operation.py` | 写编排抽象 | `InsertOp`, `DeleteOp`, `Operation = Union[InsertOp, DeleteOp]` — frozen dataclass + Arrow batch，纯描述无行为 |
-| `collection.py` | 引擎核心 | `Collection(name, data_dir, schema)` — `insert()`, `delete()`, `get()`, `search()`, `_apply(op)`（统一写入路径），`create/drop/list_partitions()`, `flush()`, `close()`, `_alloc_seq()` |
-| `flush.py` | Flush 管线 | `execute_flush(frozen_memtable, frozen_wal, manifest, delta_index, compaction_mgr)` — 7 步流程，**同步阻塞** |
-| `recovery.py` | 崩溃恢复 | `execute_recovery(data_dir, manifest)` — 5 步流程，经由 `WAL.read_operations()` 按 seq 回放 |
-| `compaction.py` | Compaction | `CompactionManager(data_dir, schema)` — `maybe_compact(partition, manifest, delta_index)`，含 tombstone GC |
+| `operation.py` | Write orchestration abstraction | `InsertOp`, `DeleteOp`, `Operation = Union[InsertOp, DeleteOp]` — frozen dataclass + Arrow batch, pure description with no behavior |
+| `collection.py` | Engine core | `Collection(name, data_dir, schema)` — `insert()`, `delete()`, `get()`, `search()`, `_apply(op)` (unified write path), `create/drop/list_partitions()`, `flush()`, `close()`, `_alloc_seq()` |
+| `flush.py` | Flush pipeline | `execute_flush(frozen_memtable, frozen_wal, manifest, delta_index, compaction_mgr)` — 7-step flow, **synchronous blocking** |
+| `recovery.py` | Crash recovery | `execute_recovery(data_dir, manifest)` — 5-step flow, replayed via `WAL.read_operations()` by seq |
+| `compaction.py` | Compaction | `CompactionManager(data_dir, schema)` — `maybe_compact(partition, manifest, delta_index)`, includes tombstone GC |
 
 ```python
 # engine/__init__.py
 from milvus_lite.engine.collection import Collection
 ```
 
-**flush.py 与 collection.py 的关系**：
-- `collection.py` 在 `insert()`/`delete()` 中检测 MemTable 满了时，调用 `flush.execute_flush()`
-- `flush.py` 接收冻结的 MemTable/WAL + 各 storage 组件引用，执行 7 步管线
-- flush 不持有 Collection 引用，只操作传入的 storage 组件 → **无循环依赖**
+**Relationship between flush.py and collection.py**:
+- `collection.py` calls `flush.execute_flush()` when `insert()`/`delete()` detects MemTable is full
+- `flush.py` receives the frozen MemTable/WAL + storage component references and executes the 7-step pipeline
+- flush does not hold a Collection reference, only operates on the passed storage components -> **no circular dependency**
 
-**recovery.py 与 collection.py 的关系**：
-- `collection.py` 在 `__init__()` 中调用 `recovery.execute_recovery()`
-- recovery 接收 data_dir + storage 组件引用，返回恢复后的状态
-- 同样无循环依赖
+**Relationship between recovery.py and collection.py**:
+- `collection.py` calls `recovery.execute_recovery()` in `__init__()`
+- recovery receives data_dir + storage component references and returns the recovered state
+- Likewise no circular dependency
 
-### 3.4 search/ — 搜索层
+### 3.4 search/ — Search Layer
 
-**职责边界**：向量检索，输入是数据 + 查询，输出是 top-k 结果。不关心数据从哪来。**含可选的标量过滤子系统** `search/filter/`（Phase 8 新增），见 §9.19-9.25。
+**Responsibility boundary**: Vector retrieval; input is data + query, output is top-k results. Does not concern itself with where data comes from. **Includes the optional scalar filter subsystem** `search/filter/` (added in Phase 8), see sections 9.19-9.25.
 
-| 子模块 | 职责 | 核心函数 |
+| Submodule | Responsibility | Core Functions |
 |--------|------|---------|
-| `bitmap.py` | 有效性过滤 | `build_valid_mask(all_pks, all_seqs, delta_index, filter_mask=None)→np.ndarray[bool]` — 去重 + 删除过滤 + 可选标量过滤 mask |
-| `distance.py` | 距离计算 | `cosine_distance(q, candidates)→np.ndarray`, `l2_distance(...)`, `ip_distance(...)`, `compute_distances(q, candidates, metric_type)` — 纯数学，无状态 |
-| `assembler.py` | 候选拼装 | `assemble_candidates(segments, memtable, vector_field, partition_names=None, filter_compiled=None)` — 把各源数据拼成统一 numpy + 可选 filter mask |
-| `executor.py` | 搜索编排 | `execute_search(query_vectors, all_pks, all_seqs, all_vectors, all_records, delta_index, top_k, metric_type, ...)→List[List[dict]]` — bitmap + distance + top-k 选择 |
-| `filter/` | 标量过滤子系统 | `parse_expr(s) → compile_expr(expr, schema) → evaluate(compiled, table) → BooleanArray`，详见 §9.19-9.25 |
+| `bitmap.py` | Validity filtering | `build_valid_mask(all_pks, all_seqs, delta_index, filter_mask=None)→np.ndarray[bool]` — dedup + delete filtering + optional scalar filter mask |
+| `distance.py` | Distance computation | `cosine_distance(q, candidates)→np.ndarray`, `l2_distance(...)`, `ip_distance(...)`, `compute_distances(q, candidates, metric_type)` — pure math, stateless |
+| `assembler.py` | Candidate assembly | `assemble_candidates(segments, memtable, vector_field, partition_names=None, filter_compiled=None)` — assembles data from various sources into unified numpy + optional filter mask |
+| `executor.py` | Search orchestration | `execute_search(query_vectors, all_pks, all_seqs, all_vectors, all_records, delta_index, top_k, metric_type, ...)→List[List[dict]]` — bitmap + distance + top-k selection |
+| `filter/` | Scalar filter subsystem | `parse_expr(s) → compile_expr(expr, schema) → evaluate(compiled, table) → BooleanArray`, see sections 9.19-9.25 |
 
 ```python
 # search/__init__.py
@@ -333,25 +333,25 @@ from milvus_lite.search.filter import (
 )
 ```
 
-**为什么 search 独立为 package**：
-- bitmap 管线扩展标量过滤后逻辑增长（filter_mask）
-- distance 是纯数学模块，将来替换 FAISS 时只需替换 executor.py
-- filter 子包是相对独立的"小型 DSL"，单独成 package 便于测试和未来切换 parser 实现
-- 与 engine 解耦：engine.collection 调用 `search.execute_search()`，传入收集好的数据
+**Why search is a separate package**:
+- The bitmap pipeline grows in logic after adding scalar filtering (filter_mask)
+- distance is a pure math module; replacing with FAISS in the future only requires replacing executor.py
+- The filter subpackage is a relatively independent "small DSL"; making it a separate package facilitates testing and future parser implementation swaps
+- Decoupled from engine: engine.collection calls `search.execute_search()`, passing in collected data
 
-### 3.5 index/ — 索引层（Phase 9）
+### 3.5 index/ — Index Layer (Phase 9)
 
-**职责边界**：定义"向量索引"的抽象，提供 BruteForce 和 FAISS HNSW 实现。
-和 segment 1:1 绑定（每个 data parquet 一个 .idx 文件），不持有任何业务状态。
-可被 search/executor 直接使用。详见 `plan/index-design.md`。
+**Responsibility boundary**: Defines the "vector index" abstraction, provides BruteForce and FAISS HNSW implementations.
+Bound 1:1 to segments (one .idx file per data parquet), does not hold any business state.
+Can be used directly by search/executor. See `plan/index-design.md`.
 
-| 子模块 | 职责 | 核心类/函数 |
+| Submodule | Responsibility | Core Classes/Functions |
 |--------|------|------------|
-| `protocol.py` | VectorIndex 抽象 | `VectorIndex` ABC — `build(vectors, metric, params) → VectorIndex`, `search(queries, top_k, valid_mask, params) → (local_ids, distances)`, `save(path)`, `load(path, metric, dim) → VectorIndex`, `index_type` property |
-| `spec.py` | 索引参数 | `IndexSpec` frozen dataclass — `field_name / index_type / metric_type / build_params / search_params`，`to_dict / from_dict` 支持 manifest 序列化 |
-| `brute_force.py` | NumPy 兜底 | `BruteForceIndex(VectorIndex)` — 直接复用 `search/distance.py` 的距离函数；零外部依赖；保留为差分测试基准 + 无 faiss 时 fallback |
-| `faiss_hnsw.py` | FAISS HNSW | `FaissHnswIndex(VectorIndex)` — `IndexHNSWFlat`，`IDSelectorBitmap` 接受 bitmap 管线产物，metric 符号在内部归一化，`faiss.write_index / read_index` 持久化 |
-| `factory.py` | 工厂 + 路由 | `build_index_from_spec(spec, vectors) → VectorIndex`，`load_index(path, spec, dim) → VectorIndex`；`try: import faiss` 失败时对 `index_type ∈ {HNSW, IVF_*}` 抛 `IndexBackendUnavailableError` |
+| `protocol.py` | VectorIndex abstraction | `VectorIndex` ABC — `build(vectors, metric, params) → VectorIndex`, `search(queries, top_k, valid_mask, params) → (local_ids, distances)`, `save(path)`, `load(path, metric, dim) → VectorIndex`, `index_type` property |
+| `spec.py` | Index parameters | `IndexSpec` frozen dataclass — `field_name / index_type / metric_type / build_params / search_params`, `to_dict / from_dict` supports manifest serialization |
+| `brute_force.py` | NumPy fallback | `BruteForceIndex(VectorIndex)` — directly reuses distance functions from `search/distance.py`; zero external dependencies; retained as differential test baseline + fallback when faiss is unavailable |
+| `faiss_hnsw.py` | FAISS HNSW | `FaissHnswIndex(VectorIndex)` — `IndexHNSWFlat`, `IDSelectorBitmap` accepts bitmap pipeline output, metric sign is normalized internally, `faiss.write_index / read_index` for persistence |
+| `factory.py` | Factory + routing | `build_index_from_spec(spec, vectors) → VectorIndex`, `load_index(path, spec, dim) → VectorIndex`; `try: import faiss` failure for `index_type ∈ {HNSW, IVF_*}` raises `IndexBackendUnavailableError` |
 
 ```python
 # index/__init__.py
@@ -368,35 +368,35 @@ except ImportError:
                "build_index_from_spec", "load_index"]
 ```
 
-**与其他模块的关系**：
-- `storage/segment.py` 持有 `index: Optional[VectorIndex]`，由 `Segment.build_or_load_index(spec, dir)` 注入
-- `engine/collection.py` 通过 `_index_spec` + `_load_state` 状态机管理 Collection 级别的索引生命周期
-- `engine/flush.py` / `compaction.py` 钩子在写新 segment 后立即触发 build_or_load_index（loaded 态时）
-- `search/executor.py` 的 `execute_search_with_index` 路径在 segment.index 存在时调用 `index.search(query, top_k, valid_mask)`
+**Relationship with other modules**:
+- `storage/segment.py` holds `index: Optional[VectorIndex]`, injected by `Segment.build_or_load_index(spec, dir)`
+- `engine/collection.py` manages Collection-level index lifecycle through `_index_spec` + `_load_state` state machine
+- `engine/flush.py` / `compaction.py` hooks trigger build_or_load_index immediately after writing new segments (when in loaded state)
+- `search/executor.py`'s `execute_search_with_index` path calls `index.search(query, top_k, valid_mask)` when segment.index exists
 
-**为什么 index 独立为 package（不放在 search/ 下）**：
-- 职责对称于 search 而非 search 的子模块 —— search 是"在已有候选上跑距离 + top-k"的逻辑，index 是"用空间数据结构加速找最近邻"的逻辑
-- index 实现可能依赖外部库（FAISS / hnswlib / USearch），单独 package 便于 optional extras 隔离
-- 未来可能引入 Sparse / Binary / 多向量等扩展类型，独立 package 便于演进
+**Why index is a separate package (not placed under search/)**:
+- Its responsibility is symmetric to search rather than being a submodule of search — search is the logic for "running distance + top-k on existing candidates", index is the logic for "using spatial data structures to accelerate nearest neighbor finding"
+- Index implementations may depend on external libraries (FAISS / hnswlib / USearch); a separate package facilitates optional extras isolation
+- Future extensions may include Sparse / Binary / multi-vector types; a separate package facilitates evolution
 
-### 3.6 adapter/ — 适配层（Phase 10）
+### 3.6 adapter/ — Adapter Layer (Phase 10)
 
-**职责边界**：把外部协议（gRPC / HTTP / ...）翻译成 engine API 调用。
-**只做翻译，不增加能力**。每个 RPC 都映射到一个 engine 方法；不支持的 RPC 返回 UNIMPLEMENTED。详见 `plan/grpc-adapter-design.md`。
+**Responsibility boundary**: Translates external protocols (gRPC / HTTP / ...) into engine API calls.
+**Only translates, never adds capability**. Each RPC maps to one engine method; unsupported RPCs return UNIMPLEMENTED. See `plan/grpc-adapter-design.md`.
 
-| 子模块 | 职责 | 核心内容 |
+| Submodule | Responsibility | Core Content |
 |--------|------|---------|
-| `grpc/server.py` | gRPC server 生命周期 | `run_server(data_dir, host, port, max_workers)` |
-| `grpc/servicer.py` | RPC dispatcher | `MilvusServicer(MilvusServiceServicer)` — 实现 quickstart 子集 RPC，未实现的返回 UNIMPLEMENTED |
-| `grpc/cli.py` | CLI 入口 | `python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530` |
-| `grpc/errors.py` | 错误码翻译 | `to_grpc_status(MilvusLiteError) → grpc Status code + reason` |
-| `grpc/translators/schema.py` | schema 翻译 | `milvus_to_milvus_lite_schema(milvus.CollectionSchema) → CollectionSchema`，反向同 |
-| `grpc/translators/records.py` | 列行转置 | `fields_data_to_records(fields_data, num_rows) → List[dict]`，反向 `records_to_fields_data(records, schema, output_fields)` |
-| `grpc/translators/search.py` | 搜索请求解析 | `parse_search_params(search_params_kv)`，`decode_search_query(request)` |
-| `grpc/translators/result.py` | 搜索结果生成 | engine `List[List[dict]]` → milvus `SearchResults` proto |
-| `grpc/translators/expr.py` | filter 翻译 | 大部分透传 + UNIMPLEMENTED 函数检测（json_contains 等） |
-| `grpc/translators/index.py` | 索引参数翻译 | `IndexParams (KeyValuePair list) ↔ IndexSpec` |
-| `grpc/proto/` | 生成的 stub | 从 milvus-io/milvus-proto 生成；commit 到 repo |
+| `grpc/server.py` | gRPC server lifecycle | `run_server(data_dir, host, port, max_workers)` |
+| `grpc/servicer.py` | RPC dispatcher | `MilvusServicer(MilvusServiceServicer)` — implements quickstart subset RPCs, unimplemented ones return UNIMPLEMENTED |
+| `grpc/cli.py` | CLI entry point | `python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530` |
+| `grpc/errors.py` | Error code translation | `to_grpc_status(MilvusLiteError) → grpc Status code + reason` |
+| `grpc/translators/schema.py` | Schema translation | `milvus_to_milvus_lite_schema(milvus.CollectionSchema) → CollectionSchema`, reverse likewise |
+| `grpc/translators/records.py` | Column-row transposition | `fields_data_to_records(fields_data, num_rows) → List[dict]`, reverse `records_to_fields_data(records, schema, output_fields)` |
+| `grpc/translators/search.py` | Search request parsing | `parse_search_params(search_params_kv)`, `decode_search_query(request)` |
+| `grpc/translators/result.py` | Search result generation | engine `List[List[dict]]` -> milvus `SearchResults` proto |
+| `grpc/translators/expr.py` | Filter translation | Mostly pass-through + UNIMPLEMENTED function detection (json_contains, etc.) |
+| `grpc/translators/index.py` | Index parameter translation | `IndexParams (KeyValuePair list) ↔ IndexSpec` |
+| `grpc/proto/` | Generated stubs | Generated from milvus-io/milvus-proto; committed to repo |
 
 ```python
 # adapter/grpc/__init__.py
@@ -404,17 +404,17 @@ from milvus_lite.adapter.grpc.server import run_server
 from milvus_lite.adapter.grpc.servicer import MilvusServicer
 ```
 
-**与其他模块的关系**：
-- `servicer.py` 持有 `MilvusLite` 实例，所有 RPC 通过 `self._db.get_collection(name)` 拿到 `Collection` 对象后调用 engine 方法
-- 不直接依赖 `storage/` / `search/` / `index/`（这些是 engine 内部实现细节）
-- `errors.py` 依赖 `milvus_lite.exceptions`
+**Relationship with other modules**:
+- `servicer.py` holds a `MilvusLite` instance; all RPCs obtain a `Collection` object via `self._db.get_collection(name)` then call engine methods
+- Does not directly depend on `storage/` / `search/` / `index/` (these are engine implementation details)
+- `errors.py` depends on `milvus_lite.exceptions`
 
-**为什么 adapter 独立为顶层 package**：
-- 概念上是协议层，与 engine / storage / search / index 是垂直关系
-- 未来可能引入 HTTP 适配层 / OpenAPI 适配层 / Python 直接 API 等不同的 adapter，每个一个子目录
-- 所有外部依赖（grpcio / protobuf）通过 adapter 隔离，engine 核心保持纯净
+**Why adapter is a top-level package**:
+- Conceptually it is the protocol layer, having a vertical relationship with engine / storage / search / index
+- Future may introduce HTTP adapter / OpenAPI adapter / Python direct API and other adapters, each in its own subdirectory
+- All external dependencies (grpcio / protobuf) are isolated through adapter, keeping the engine core clean
 
-## 4. 依赖图
+## 4. Dependency Graph
 
 ```
                         milvus_lite.__init__
@@ -443,27 +443,27 @@ from milvus_lite.adapter.grpc.servicer import MilvusServicer
                          constants.py + exceptions.py
 ```
 
-**依赖方向**（严格向下，无循环）：
+**Dependency direction** (strictly downward, no cycles):
 
 ```
-Level 0:  constants.py, exceptions.py           ← 无内部依赖
-Level 1:  schema/*                              ← 依赖 L0
-Level 2:  storage/*                             ← 依赖 L0, L1
-Level 3:  search/bitmap.py, search/distance.py  ← 依赖 L0, L2(delta_log)
-          search/filter/*                       ← 依赖 L0, L1
-          index/*                               ← 依赖 L0, L1, search/distance (BruteForce)
-Level 4:  search/executor.py, search/assembler.py ← 依赖 L3
-Level 5:  engine/flush.py, recovery.py, compaction.py ← 依赖 L0-L4 + index (Phase 9)
-Level 6:  engine/collection.py                  ← 依赖 L0-L5
-Level 7:  db.py                                 ← 依赖 L6
-Level 8:  adapter/grpc/*                        ← 依赖 L7 (db.py) — Phase 10
+Level 0:  constants.py, exceptions.py           <- no internal dependencies
+Level 1:  schema/*                              <- depends on L0
+Level 2:  storage/*                             <- depends on L0, L1
+Level 3:  search/bitmap.py, search/distance.py  <- depends on L0, L2(delta_log)
+          search/filter/*                       <- depends on L0, L1
+          index/*                               <- depends on L0, L1, search/distance (BruteForce)
+Level 4:  search/executor.py, search/assembler.py <- depends on L3
+Level 5:  engine/flush.py, recovery.py, compaction.py <- depends on L0-L4 + index (Phase 9)
+Level 6:  engine/collection.py                  <- depends on L0-L5
+Level 7:  db.py                                 <- depends on L6
+Level 8:  adapter/grpc/*                        <- depends on L7 (db.py) — Phase 10
 ```
 
-**说明**：
-- `index/` 是新增的 L3，与 search/filter 并列，被 storage/segment 持有 + search/executor 调用
-- `adapter/` 是新增的 L8，是项目最外层，所有外部协议依赖（grpcio / protobuf）都在此隔离
+**Notes**:
+- `index/` is the newly added L3, alongside search/filter, held by storage/segment + called by search/executor
+- `adapter/` is the newly added L8, the outermost layer of the project; all external protocol dependencies (grpcio / protobuf) are isolated here
 
-## 5. 公共 API 导出
+## 5. Public API Exports
 
 ```python
 # milvus_lite/__init__.py
@@ -474,32 +474,32 @@ from milvus_lite.exceptions import MilvusLiteError
 __all__ = ["MilvusLite", "CollectionSchema", "FieldSchema", "DataType", "MilvusLiteError"]
 ```
 
-用户只需 `from milvus_lite import MilvusLite, CollectionSchema, FieldSchema, DataType`。Collection 通过 `db.get_collection()` 获得，不直接导出。
+Users only need `from milvus_lite import MilvusLite, CollectionSchema, FieldSchema, DataType`. Collection is obtained through `db.get_collection()` and is not directly exported.
 
-## 6. constants.py 内容
+## 6. constants.py Contents
 
 ```python
-# ── MemTable ──
+# -- MemTable --
 MEMTABLE_SIZE_LIMIT = 10_000
 
-# ── Compaction ──
+# -- Compaction --
 MAX_DATA_FILES = 32
 COMPACTION_MIN_FILES_PER_BUCKET = 4
 COMPACTION_BUCKET_BOUNDARIES = [1_000_000, 10_000_000, 100_000_000]  # bytes
 
-# ── 文件命名 ──
+# -- File naming --
 SEQ_FORMAT_WIDTH = 6
 DATA_FILE_TEMPLATE = "data_{min:0{w}d}_{max:0{w}d}.parquet"
 DELTA_FILE_TEMPLATE = "delta_{min:0{w}d}_{max:0{w}d}.parquet"
 WAL_DATA_TEMPLATE = "wal_data_{n:0{w}d}.arrow"
 WAL_DELTA_TEMPLATE = "wal_delta_{n:0{w}d}.arrow"
 
-# ── Partition ──
+# -- Partition --
 DEFAULT_PARTITION = "_default"
 ALL_PARTITIONS = "_all"
 ```
 
-## 7. exceptions.py 内容
+## 7. exceptions.py Contents
 
 ```python
 class MilvusLiteError(Exception): ...
@@ -513,78 +513,78 @@ class DefaultPartitionError(MilvusLiteError): ...
 class WALCorruptedError(MilvusLiteError): ...
 ```
 
-## 8. 与实现优先级对齐
+## 8. Alignment with Implementation Priority
 
-| P# | 实现模块 | 测试 |
+| P# | Implementation Module | Tests |
 |----|---------|------|
-| P0 | `constants`, `exceptions`, `schema/*` (全部) | `tests/schema/*` |
+| P0 | `constants`, `exceptions`, `schema/*` (all) | `tests/schema/*` |
 | P1 | `storage/manifest` | `tests/storage/test_manifest` |
 | P2 | `storage/memtable`, `storage/wal` | `tests/storage/test_memtable`, `test_wal` |
 | P3 | `storage/data_file`, `storage/delta_log`, `engine/flush` | `tests/storage/test_data_file`, `test_delta_log`, `tests/engine/test_flush` |
-| P4 | `engine/collection` (partition 方法) | `tests/engine/test_collection` (部分) |
+| P4 | `engine/collection` (partition methods) | `tests/engine/test_collection` (partial) |
 | P5 | `engine/collection` (insert/delete/get E2E) | `tests/engine/test_collection` |
-| P6 | `search/*` (全部) | `tests/search/*` |
+| P6 | `search/*` (all) | `tests/search/*` |
 | P7 | `engine/compaction` | `tests/engine/test_compaction` |
 | P8 | `db.py` | `tests/test_db` |
 | P9 | `engine/recovery` | `tests/engine/test_recovery` |
 | P10 | `engine/collection` (add_field) | `tests/engine/test_collection` |
-| P11 | 端到端测试 | 全部 |
+| P11 | End-to-end tests | All |
 
-## 9. 模块接口详解
+## 9. Module Interface Detailed Descriptions
 
-按依赖层级自底向上设计，每个模块只列对外接口（public），不列内部实现细节。
+Designed bottom-up by dependency level; each module only lists external interfaces (public), not internal implementation details.
 
 ---
 
 ### 9.0 constants.py
 
 ```python
-# ── MemTable ──
-MEMTABLE_SIZE_LIMIT: int = 10_000          # insert_buf + delete_buf 合计阈值
+# -- MemTable --
+MEMTABLE_SIZE_LIMIT: int = 10_000          # Combined threshold for insert_buf + delete_buf
 
-# ── Compaction ──
-MAX_DATA_FILES: int = 32                    # 单 Partition 最大数据文件数
-COMPACTION_MIN_FILES_PER_BUCKET: int = 4    # 同一桶内文件数触发阈值
+# -- Compaction --
+MAX_DATA_FILES: int = 32                    # Max data files per Partition
+COMPACTION_MIN_FILES_PER_BUCKET: int = 4    # Trigger threshold for file count within same bucket
 COMPACTION_BUCKET_BOUNDARIES: List[int] = [1_000_000, 10_000_000, 100_000_000]  # bytes
 
-# ── 文件命名 ──
+# -- File naming --
 SEQ_FORMAT_WIDTH: int = 6
 DATA_FILE_TEMPLATE: str = "data_{min:0{w}d}_{max:0{w}d}.parquet"
 DELTA_FILE_TEMPLATE: str = "delta_{min:0{w}d}_{max:0{w}d}.parquet"
 WAL_DATA_TEMPLATE: str = "wal_data_{n:0{w}d}.arrow"
 WAL_DELTA_TEMPLATE: str = "wal_delta_{n:0{w}d}.arrow"
 
-# ── Partition ──
+# -- Partition --
 DEFAULT_PARTITION: str = "_default"
-ALL_PARTITIONS: str = "_all"               # 跨 Partition 删除时的内部标记
+ALL_PARTITIONS: str = "_all"               # Internal marker for cross-Partition delete
 ```
 
 ### 9.1 exceptions.py
 
 ```python
 class MilvusLiteError(Exception):
-    """所有 MilvusLite 异常的基类"""
+    """Base class for all MilvusLite exceptions"""
 
 class SchemaValidationError(MilvusLiteError):
-    """Schema 定义不合法 或 记录不符合 Schema"""
+    """Schema definition is invalid or record does not conform to Schema"""
 
 class CollectionNotFoundError(MilvusLiteError):
-    """Collection 不存在"""
+    """Collection does not exist"""
 
 class CollectionAlreadyExistsError(MilvusLiteError):
-    """Collection 已存在"""
+    """Collection already exists"""
 
 class PartitionNotFoundError(MilvusLiteError):
-    """Partition 不存在"""
+    """Partition does not exist"""
 
 class PartitionAlreadyExistsError(MilvusLiteError):
-    """Partition 已存在"""
+    """Partition already exists"""
 
 class DefaultPartitionError(MilvusLiteError):
-    """试图删除 _default Partition"""
+    """Attempted to delete the _default Partition"""
 
 class WALCorruptedError(MilvusLiteError):
-    """WAL 文件损坏，无法恢复"""
+    """WAL file is corrupted and cannot be recovered"""
 ```
 
 ---
@@ -610,8 +610,8 @@ class FieldSchema:
     name: str
     dtype: DataType
     is_primary: bool = False
-    dim: Optional[int] = None           # 仅 FLOAT_VECTOR 需要
-    max_length: Optional[int] = None    # 仅 VARCHAR 需要
+    dim: Optional[int] = None           # Only needed for FLOAT_VECTOR
+    max_length: Optional[int] = None    # Only needed for VARCHAR
     nullable: bool = False
     default_value: Any = None
 
@@ -619,11 +619,11 @@ class FieldSchema:
 @dataclass
 class CollectionSchema:
     fields: List[FieldSchema]
-    version: int = 1                    # Schema 版本号，每次变更 +1
-    enable_dynamic_field: bool = False  # 是否启用 $meta 动态字段
+    version: int = 1                    # Schema version number, +1 on each change
+    enable_dynamic_field: bool = False  # Whether to enable $meta dynamic field
 
 
-# DataType → PyArrow 类型映射
+# DataType -> PyArrow type mapping
 TYPE_MAP: Dict[DataType, Any] = {
     DataType.BOOL:         pa.bool_(),
     DataType.INT8:         pa.int8(),
@@ -634,7 +634,7 @@ TYPE_MAP: Dict[DataType, Any] = {
     DataType.DOUBLE:       pa.float64(),
     DataType.VARCHAR:      pa.string(),
     DataType.JSON:         pa.string(),
-    DataType.FLOAT_VECTOR: None,  # 需要 dim，运行时通过 lambda dim: pa.list_(pa.float32(), dim) 生成
+    DataType.FLOAT_VECTOR: None,  # Requires dim; generated at runtime via lambda dim: pa.list_(pa.float32(), dim)
 }
 ```
 
@@ -642,15 +642,15 @@ TYPE_MAP: Dict[DataType, Any] = {
 
 ```python
 def validate_schema(schema: CollectionSchema) -> None:
-    """校验 CollectionSchema 定义合法性。
+    """Validate the legality of a CollectionSchema definition.
 
-    检查规则：
-    - 有且仅有一个 is_primary=True 字段，类型为 VARCHAR 或 INT64
-    - 有且仅有一个 FLOAT_VECTOR 字段（MVP 限制）
-    - 向量字段必须指定 dim > 0
-    - 主键字段不可 nullable
-    - 字段名不可重复
-    - 字段名不可使用保留名（_seq, _partition, $meta）
+    Validation rules:
+    - Exactly one is_primary=True field, of type VARCHAR or INT64
+    - Exactly one FLOAT_VECTOR field (MVP limitation)
+    - Vector field must specify dim > 0
+    - Primary key field cannot be nullable
+    - Field names must be unique
+    - Field names must not use reserved names (_seq, _partition, $meta)
 
     Raises:
         SchemaValidationError
@@ -658,14 +658,14 @@ def validate_schema(schema: CollectionSchema) -> None:
 
 
 def validate_record(record: dict, schema: CollectionSchema) -> None:
-    """校验单条记录是否符合 Schema。
+    """Validate that a single record conforms to the Schema.
 
-    检查规则：
-    - 主键字段存在且非 None
-    - 向量字段存在且维度 == schema.dim
-    - 已定义字段的类型匹配
-    - non-nullable 字段不为 None
-    - enable_dynamic_field=False 时不允许 Schema 外字段
+    Validation rules:
+    - Primary key field exists and is not None
+    - Vector field exists and dimension == schema.dim
+    - Defined fields have matching types
+    - Non-nullable fields are not None
+    - When enable_dynamic_field=False, fields outside Schema are not allowed
 
     Raises:
         SchemaValidationError
@@ -675,19 +675,19 @@ def validate_record(record: dict, schema: CollectionSchema) -> None:
 def separate_dynamic_fields(
     record: dict, schema: CollectionSchema
 ) -> Tuple[dict, Optional[str]]:
-    """将 record 拆分为 Schema 内字段 + $meta JSON。
+    """Split a record into Schema-defined fields + $meta JSON.
 
     Args:
-        record: 用户传入的原始记录
+        record: Original record provided by user
         schema: CollectionSchema
 
     Returns:
         (schema_fields, meta_json)
-        - schema_fields: 只含 Schema 定义的字段（含默认值填充）
-        - meta_json: 动态字段序列化后的 JSON 字符串，无动态字段时为 None
+        - schema_fields: Contains only Schema-defined fields (with default values filled in)
+        - meta_json: JSON string of dynamic fields serialized, None when there are no dynamic fields
 
     Raises:
-        SchemaValidationError: enable_dynamic_field=False 但有 Schema 外字段
+        SchemaValidationError: enable_dynamic_field=False but fields outside Schema exist
     """
 ```
 
@@ -695,35 +695,35 @@ def separate_dynamic_fields(
 
 ```python
 def get_primary_field(schema: CollectionSchema) -> FieldSchema:
-    """返回主键 FieldSchema。"""
+    """Return the primary key FieldSchema."""
 
 
 def get_vector_field(schema: CollectionSchema) -> FieldSchema:
-    """返回向量 FieldSchema。"""
+    """Return the vector FieldSchema."""
 
 
 def build_data_schema(schema: CollectionSchema) -> pa.Schema:
-    """数据 Parquet 文件的 Arrow Schema。
-    列顺序: _seq(uint64) + 用户字段 + [$meta(string)]
-    不含 _partition。"""
+    """Arrow Schema for data Parquet files.
+    Column order: _seq(uint64) + user fields + [$meta(string)]
+    Does not include _partition."""
 
 
 def build_delta_schema(schema: CollectionSchema) -> pa.Schema:
-    """Delta Parquet 文件的 Arrow Schema。
-    列: {pk_name}(主键类型) + _seq(uint64)
-    不含 _partition。"""
+    """Arrow Schema for delta Parquet files.
+    Columns: {pk_name}(primary key type) + _seq(uint64)
+    Does not include _partition."""
 
 
 def build_wal_data_schema(schema: CollectionSchema) -> pa.Schema:
-    """WAL 数据文件的 Arrow Schema。
-    列顺序: _seq(uint64) + _partition(string) + 用户字段 + [$meta(string)]
-    比 data_schema 多 _partition 列。"""
+    """Arrow Schema for WAL data files.
+    Column order: _seq(uint64) + _partition(string) + user fields + [$meta(string)]
+    Has an additional _partition column compared to data_schema."""
 
 
 def build_wal_delta_schema(schema: CollectionSchema) -> pa.Schema:
-    """WAL 删除文件的 Arrow Schema。
-    列: {pk_name}(主键类型) + _seq(uint64) + _partition(string)
-    比 delta_schema 多 _partition 列。"""
+    """Arrow Schema for WAL delete files.
+    Columns: {pk_name}(primary key type) + _seq(uint64) + _partition(string)
+    Has an additional _partition column compared to delta_schema."""
 ```
 
 ### 9.5 schema/persistence.py
@@ -734,15 +734,15 @@ def save_schema(
     collection_name: str,
     path: str,
 ) -> None:
-    """将 Schema 序列化为 JSON 写入 path。
-    JSON 结构包含 collection_name（自描述）+ version + fields + enable_dynamic_field。
-    使用 write-tmp + rename 原子写入。"""
+    """Serialize Schema as JSON and write to path.
+    JSON structure includes collection_name (self-describing) + version + fields + enable_dynamic_field.
+    Uses write-tmp + rename for atomic writing."""
 
 
 def load_schema(path: str) -> Tuple[str, CollectionSchema]:
-    """从 JSON 文件加载 Schema。
+    """Load Schema from JSON file.
     Returns: (collection_name, schema)
-    Raises: FileNotFoundError, SchemaValidationError（JSON 格式非法）"""
+    Raises: FileNotFoundError, SchemaValidationError (invalid JSON format)"""
 ```
 
 ---
@@ -751,10 +751,10 @@ def load_schema(path: str) -> Tuple[str, CollectionSchema]:
 
 ```python
 class WAL:
-    """Write-Ahead Log，Arrow IPC Streaming 格式，双文件（data + delta）。
+    """Write-Ahead Log, Arrow IPC Streaming format, dual-file (data + delta).
 
-    每轮写入对应一对 WAL 文件（wal_data_{N}.arrow + wal_delta_{N}.arrow），
-    flush 成功后整个删除。Writer 延迟初始化（首次写入时创建文件）。
+    Each write round corresponds to a pair of WAL files (wal_data_{N}.arrow + wal_delta_{N}.arrow),
+    which are deleted entirely after successful flush. Writer is lazily initialized (file created on first write).
     """
 
     def __init__(
@@ -766,26 +766,26 @@ class WAL:
     ) -> None:
         """
         Args:
-            wal_dir: WAL 文件所在目录
-            wal_data_schema: wal_data 文件使用的 Arrow Schema（含 _partition）
-            wal_delta_schema: wal_delta 文件使用的 Arrow Schema（含 _partition）
-            wal_number: 本轮 WAL 编号（文件名中的 N）
+            wal_dir: Directory where WAL files reside
+            wal_data_schema: Arrow Schema used for wal_data files (includes _partition)
+            wal_delta_schema: Arrow Schema used for wal_delta files (includes _partition)
+            wal_number: WAL number for this round (the N in the filename)
         """
 
     def write_insert(self, record_batch: pa.RecordBatch) -> None:
-        """追加写入 wal_data 文件。首次调用时创建文件和 writer。
-        record_batch schema 必须匹配 wal_data_schema。"""
+        """Append-write to wal_data file. Creates file and writer on first call.
+        record_batch schema must match wal_data_schema."""
 
     def write_delete(self, record_batch: pa.RecordBatch) -> None:
-        """追加写入 wal_delta 文件。首次调用时创建文件和 writer。
-        record_batch schema 必须匹配 wal_delta_schema。"""
+        """Append-write to wal_delta file. Creates file and writer on first call.
+        record_batch schema must match wal_delta_schema."""
 
     def close_and_delete(self) -> None:
-        """关闭 writer，删除两个 WAL 文件。flush 成功后调用。"""
+        """Close writer, delete both WAL files. Called after successful flush."""
 
     @staticmethod
     def find_wal_files(wal_dir: str) -> List[int]:
-        """扫描 wal_dir，返回存在的 WAL 编号列表（用于 recovery 判断）。"""
+        """Scan wal_dir, return list of existing WAL numbers (used for recovery detection)."""
 
     @staticmethod
     def recover(
@@ -794,119 +794,119 @@ class WAL:
         wal_data_schema: pa.Schema,
         wal_delta_schema: pa.Schema,
     ) -> Tuple[List[pa.RecordBatch], List[pa.RecordBatch]]:
-        """读取指定编号的 WAL 文件，返回 (data_batches, delta_batches)。
-        每个 RecordBatch 含 _partition 列，恢复时按 _partition 路由到 MemTable。
+        """Read WAL files of the specified number, return (data_batches, delta_batches).
+        Each RecordBatch contains a _partition column; during recovery, route to MemTable by _partition.
         Raises: WALCorruptedError"""
 
     @property
     def number(self) -> int:
-        """当前 WAL 编号。"""
+        """Current WAL number."""
 
     @property
     def data_path(self) -> Optional[str]:
-        """wal_data 文件路径（未创建时为 None）。"""
+        """wal_data file path (None when not yet created)."""
 
     @property
     def delta_path(self) -> Optional[str]:
-        """wal_delta 文件路径（未创建时为 None）。"""
+        """wal_delta file path (None when not yet created)."""
 ```
 
 ### 9.7 storage/memtable.py
 
-**内部表示**：MemTable 不持有 `dict[pk → record_dict]`。Python dict + record dict 的内存开销是 Arrow 表示的 10-100 倍，且 flush 时还要做一次 Python → Arrow 转换。MemTable 内部维护 **append-only 的 RecordBatch list + 两个轻量索引**：
+**Internal representation**: MemTable does not hold `dict[pk -> record_dict]`. The memory overhead of Python dict + record dict is 10-100x that of Arrow representation, and requires an additional Python -> Arrow conversion at flush time. MemTable internally maintains **append-only RecordBatch list + two lightweight indexes**:
 
 ```
-_insert_batches: list[pa.RecordBatch]              # append-only，每次 apply_insert 追加一个 batch
-_pk_index:       dict[pk → (batch_idx, row_idx)]   # 指向 _insert_batches 中的最新位置
-_delete_index:   dict[pk → delete_seq]             # 删除水位
+_insert_batches: list[pa.RecordBatch]              # append-only, one batch appended per apply_insert
+_pk_index:       dict[pk -> (batch_idx, row_idx)]   # points to latest position in _insert_batches
+_delete_index:   dict[pk -> delete_seq]             # delete watermark
 ```
 
-`_pk_index` 是 lazy 的——同一 pk 的旧版本在 `_insert_batches` 中物理保留，直到 flush 时一次性 dedup 取活跃行。这样：
+`_pk_index` is lazy -- old versions of the same pk are physically retained in `_insert_batches` until flush time when they are deduped in one pass to extract active rows. This way:
 
-- **写入零拷贝**：apply_insert 直接 `append(batch)` + 更新 index
-- **flush 几乎零成本**：`pa.Table.from_batches` + 按 `_pk_index.values()` take 活跃行
-- **search 拿到的是 Arrow 列**：不再二次转换
+- **Write is zero-copy**: apply_insert directly `append(batch)` + update index
+- **Flush is nearly zero-cost**: `pa.Table.from_batches` + take active rows by `_pk_index.values()`
+- **Search gets Arrow columns**: no secondary conversion
 
-**Cross-clear 必须 seq-aware**（架构不变量 §2）。put / delete 之前先比较 `_seq`，只有当前操作 `_seq` 更大才生效；否则当前操作直接丢弃。**这条不变量决定了 recovery / 未来并发写入都不会触发数据损坏。**
+**Cross-clear must be seq-aware** (architecture invariant section 2). Before put / delete, first compare `_seq`; the current operation takes effect only if its `_seq` is larger; otherwise the current operation is discarded. **This invariant ensures that recovery / future concurrent writes will never trigger data corruption.**
 
 ```python
 class MemTable:
-    """Collection 级共享的内存缓冲区。
+    """Collection-level shared in-memory buffer.
 
-    内部表示：
-    - _insert_batches: list[pa.RecordBatch]，append-only
-    - _pk_index: dict[pk → (batch_idx, row_idx)]，最新位置索引
-    - _delete_index: dict[pk → delete_seq]，删除水位
+    Internal representation:
+    - _insert_batches: list[pa.RecordBatch], append-only
+    - _pk_index: dict[pk -> (batch_idx, row_idx)], latest position index
+    - _delete_index: dict[pk -> delete_seq], delete watermark
 
-    cross-clear 语义：
-    - apply_insert(seq=S, pk=P) 时，若 _delete_index[P] >= S 则操作丢弃（更新的 delete 已存在）；
-      否则插入并清除 _delete_index[P]。
-    - apply_delete(seq=S, pk=P) 时，若 _insert_batches 中 P 的最新 _seq >= S 则操作丢弃；
-      否则更新 _delete_index[P]=S 并清除 _pk_index[P]。
+    cross-clear semantics:
+    - apply_insert(seq=S, pk=P): if _delete_index[P] >= S then discard the operation (a newer delete already exists);
+      otherwise insert and clear _delete_index[P].
+    - apply_delete(seq=S, pk=P): if the latest _seq of P in _insert_batches >= S then discard the operation;
+      otherwise update _delete_index[P]=S and clear _pk_index[P].
     """
 
     def __init__(self, schema: CollectionSchema) -> None:
         """
         Args:
-            schema: CollectionSchema，用于确定 pk_name 和字段信息
+            schema: CollectionSchema, used to determine pk_name and field information
         """
 
     def apply_insert(self, batch: pa.RecordBatch) -> None:
-        """追加一个 wal_data schema 的 RecordBatch。
-        - batch 的每行必须含 _seq, _partition, pk_field 和所有用户字段
-        - 内部按 seq-aware 规则更新 _pk_index 和清除 _delete_index 中过时条目
-        - batch 物理追加到 _insert_batches，旧版本不删除（flush 时 dedup）
+        """Append a RecordBatch with wal_data schema.
+        - Each row in batch must contain _seq, _partition, pk_field, and all user fields
+        - Internally updates _pk_index and clears outdated entries in _delete_index per seq-aware rules
+        - Batch is physically appended to _insert_batches; old versions are not deleted (deduped at flush)
         """
 
     def apply_delete(self, batch: pa.RecordBatch) -> None:
-        """处理一个 wal_delta schema 的 RecordBatch。
-        - batch 共享同一 _seq；内部按 seq-aware 规则更新 _delete_index
-        - 不持有 batch 引用（只取 pk + seq 写进 _delete_index）
-        - 处理 _partition='_all' 的跨 partition 删除
+        """Process a RecordBatch with wal_delta schema.
+        - Batch shares the same _seq; internally updates _delete_index per seq-aware rules
+        - Does not hold batch reference (only extracts pk + seq into _delete_index)
+        - Handles cross-partition delete when _partition='_all'
         """
 
     def get(self, pk_value: Any) -> Optional[dict]:
-        """点查单条记录。
-        通过 _pk_index 定位最新位置，再检查 _delete_index 是否覆盖。
-        返回 record dict（不含 _partition, _seq）或 None。"""
+        """Point lookup for a single record.
+        Locates latest position via _pk_index, then checks if _delete_index overrides it.
+        Returns record dict (without _partition, _seq) or None."""
 
     def flush(self) -> Dict[str, Tuple[Optional[pa.Table], Optional[pa.Table]]]:
-        """按 Partition 拆分输出 Arrow Table。
+        """Output Arrow Tables split by Partition.
 
-        实现：
-        1. 把 _insert_batches concat 成一个大 Table
-        2. 按 _pk_index.values() 取活跃行（dedup 在这里发生）
-        3. 按 _partition 列拆分成各 partition 的 data_table
-        4. 把 _delete_index 物化成各 partition 的 delta_table
+        Implementation:
+        1. Concat _insert_batches into one large Table
+        2. Take active rows by _pk_index.values() (dedup happens here)
+        3. Split by _partition column into per-partition data_tables
+        4. Materialize _delete_index into per-partition delta_tables
 
         Returns: {partition_name: (data_table, delta_table)}
-            - data_table: 使用 data_schema（不含 _partition），可为 None
-            - delta_table: 使用 delta_schema（不含 _partition），可为 None
-        调用后内部状态不清空（由调用方冻结后丢弃整个 MemTable）。"""
+            - data_table: uses data_schema (without _partition), may be None
+            - delta_table: uses delta_schema (without _partition), may be None
+        Internal state is not cleared after call (caller freezes then discards the entire MemTable)."""
 
     def size(self) -> int:
-        """返回 len(_pk_index) + len(_delete_index)。
-        注意是"活跃 pk 数"，不是 _insert_batches 总行数——
-        flush 触发阈值用这个，避免同 pk 反复 upsert 把内存撑爆。"""
+        """Returns len(_pk_index) + len(_delete_index).
+        Note this is the "active pk count", not the total row count of _insert_batches --
+        the flush trigger threshold uses this to avoid memory blowup from repeated upserts of the same pk."""
 
     def get_active_records(
         self, partition_names: Optional[List[str]] = None
     ) -> List[dict]:
-        """返回 _pk_index 中未被 _delete_index 覆盖的活跃记录。
-        用于 search/get 时读取 MemTable 层数据。
-        partition_names 不为 None 时，只返回匹配 Partition 的记录。
-        返回的 dict 不含 _partition 和 _seq（对外干净）。"""
+        """Return active records from _pk_index that are not overridden by _delete_index.
+        Used for reading MemTable layer data during search/get.
+        When partition_names is not None, only returns records matching the specified Partitions.
+        Returned dicts do not contain _partition and _seq (clean for external use)."""
 ```
 
-**关键测试点**（实现时必须覆盖）：
+**Key test points** (must be covered during implementation):
 
 ```python
-# 验证 seq-aware cross-clear: 乱序 apply 仍得到正确终态
+# Verify seq-aware cross-clear: out-of-order apply still yields correct final state
 mt = MemTable(schema)
-mt.apply_insert(batch_with_pk_X_seq_7)   # 先来个 seq=7
-mt.apply_insert(batch_with_pk_X_seq_5)   # 再来个 seq=5（应丢弃）
-mt.apply_delete(batch_with_pk_X_seq_6)   # 再来个 delete seq=6（应丢弃，因 seq=7 更新）
-assert mt.get("X")["_seq"] == 7          # ← seq=7 必须保留
+mt.apply_insert(batch_with_pk_X_seq_7)   # First comes seq=7
+mt.apply_insert(batch_with_pk_X_seq_5)   # Then comes seq=5 (should be discarded)
+mt.apply_delete(batch_with_pk_X_seq_6)   # Then comes delete seq=6 (should be discarded, since seq=7 is newer)
+assert mt.get("X")["_seq"] == 7          # <- seq=7 must be retained
 ```
 
 ### 9.8 storage/data_file.py
@@ -918,36 +918,36 @@ def write_data_file(
     seq_min: int,
     seq_max: int,
 ) -> str:
-    """将 Arrow Table 写入数据 Parquet 文件。
-    文件路径: {partition_dir}/data/data_{seq_min:06d}_{seq_max:06d}.parquet
-    自动创建 data/ 子目录（如不存在）。
-    Returns: 写入的文件相对路径（相对于 Collection data_dir）。"""
+    """Write Arrow Table to a data Parquet file.
+    File path: {partition_dir}/data/data_{seq_min:06d}_{seq_max:06d}.parquet
+    Automatically creates data/ subdirectory (if it doesn't exist).
+    Returns: The relative path of the written file (relative to Collection data_dir)."""
 
 
 def read_data_file(path: str) -> pa.Table:
-    """读取数据 Parquet 文件，返回完整 Arrow Table。"""
+    """Read a data Parquet file, return complete Arrow Table."""
 
 
 def parse_seq_range(filename: str) -> Tuple[int, int]:
-    """从文件名解析 seq 范围。
-    'data_000001_000500.parquet' → (1, 500)
-    'delta_000501_000503.parquet' → (501, 503)"""
+    """Parse seq range from filename.
+    'data_000001_000500.parquet' -> (1, 500)
+    'delta_000501_000503.parquet' -> (501, 503)"""
 
 
 def get_file_size(path: str) -> int:
-    """返回文件字节大小，用于 Compaction 分桶。"""
+    """Return file size in bytes, used for Compaction bucketing."""
 ```
 
 ### 9.9 storage/delta_file.py + storage/delta_index.py
 
-**DeltaLog 拆成两个模块**，与 `data_file.py` 对称：
+**DeltaLog is split into two modules**, symmetric with `data_file.py`:
 
-- `delta_file.py` —— 纯 IO 函数，无状态
-- `delta_index.py` —— 内存 `DeltaIndex` 类，独立可测
+- `delta_file.py` -- pure IO functions, stateless
+- `delta_index.py` -- in-memory `DeltaIndex` class, independently testable
 
-**为什么拆**：原 `DeltaLog` 同时管 Parquet IO + 内存索引 + 查询，6 个方法 3 个职责，难单测；拆开后 IO 函数和 `data_file.py` 形成对称结构，内存索引可以脱离磁盘单测，未来想换实现（numpy / pyarrow dict array）也只动一处。
+**Why split**: The original `DeltaLog` simultaneously managed Parquet IO + in-memory index + queries, 6 methods with 3 responsibilities, hard to unit test; after splitting, IO functions form a symmetric structure with `data_file.py`, the in-memory index can be unit tested without disk, and future implementation changes (numpy / pyarrow dict array) only touch one place.
 
-#### 9.9.a delta_file.py（无状态 IO）
+#### 9.9.a delta_file.py (stateless IO)
 
 ```python
 def write_delta_file(
@@ -956,55 +956,55 @@ def write_delta_file(
     seq_min: int,
     seq_max: int,
 ) -> str:
-    """将 delta Arrow Table 写入 delta Parquet 文件。
-    文件路径: {partition_dir}/delta/delta_{seq_min:06d}_{seq_max:06d}.parquet
-    自动创建 delta/ 子目录。
-    Returns: 相对路径（相对于 Collection data_dir）。"""
+    """Write delta Arrow Table to a delta Parquet file.
+    File path: {partition_dir}/delta/delta_{seq_min:06d}_{seq_max:06d}.parquet
+    Automatically creates delta/ subdirectory.
+    Returns: Relative path (relative to Collection data_dir)."""
 
 
 def read_delta_file(path: str) -> pa.Table:
-    """读取 delta Parquet 文件，返回 Arrow Table（pk_field + _seq 两列）。"""
+    """Read a delta Parquet file, return Arrow Table (pk_field + _seq, two columns)."""
 ```
 
-#### 9.9.b delta_index.py（内存索引）
+#### 9.9.b delta_index.py (in-memory index)
 
 ```python
 class DeltaIndex:
-    """内存中的 delete 水位索引：pk → max_delete_seq。
+    """In-memory delete watermark index: pk -> max_delete_seq.
 
-    启动时通过 rebuild_from() 从所有 delta 文件重建；
-    运行时通过 add_batch() 增量更新；
-    通过 gc_below() 在 Compaction 后回收老 tombstone（架构不变量 §3）。
+    At startup, rebuilt via rebuild_from() from all delta files;
+    at runtime, incrementally updated via add_batch();
+    via gc_below(), old tombstones are reclaimed after Compaction (architecture invariant section 3).
     """
 
     def __init__(self, pk_name: str) -> None:
         """
         Args:
-            pk_name: 主键字段名（用于从 batch 中提取 pk 列）
+            pk_name: Primary key field name (used to extract pk column from batch)
         """
 
     def add_batch(self, delta_batch: pa.RecordBatch) -> None:
-        """把 delta batch 中的 (pk, _seq) 合并进内存索引。
-        - 对每个 pk 取 max(已有 seq, 新 seq)
-        - 不写磁盘
-        - 用于 flush 后更新 + WAL 重放
+        """Merge (pk, _seq) from delta batch into the in-memory index.
+        - For each pk, takes max(existing seq, new seq)
+        - Does not write to disk
+        - Used for post-flush update + WAL replay
         """
 
     def is_deleted(self, pk_value: Any, data_seq: int) -> bool:
-        """判断某条数据记录是否被删除。
-        规则: _map.get(pk, -1) > data_seq → 已删除。"""
+        """Determine whether a data record has been deleted.
+        Rule: _map.get(pk, -1) > data_seq -> deleted."""
 
     def gc_below(self, min_active_data_seq: int) -> int:
-        """回收 delete_seq < min_active_data_seq 的所有 tombstone。
+        """Reclaim all tombstones with delete_seq < min_active_data_seq.
 
         Args:
-            min_active_data_seq: 当前 manifest 中所有 data 文件 seq_min 的最小值
+            min_active_data_seq: Minimum seq_min across all data files in the current manifest
         Returns:
-            被回收的条目数
+            Number of entries reclaimed
 
-        正确性：任何 delete_seq < min_active_data_seq 的 tombstone，对应的所有
-        data 行都已经被 compaction 物理消化掉，不存在残留 data 行需要它过滤，
-        因此可以安全丢弃。详见架构不变量 §3。
+        Correctness: Any tombstone with delete_seq < min_active_data_seq has had all
+        corresponding data rows physically consumed by compaction; no residual data rows
+        need it for filtering, so it can be safely discarded. See architecture invariant section 3.
         """
 
     @classmethod
@@ -1013,165 +1013,165 @@ class DeltaIndex:
         pk_name: str,
         partition_delta_files: Dict[str, List[str]],
     ) -> "DeltaIndex":
-        """启动时一次性重建。
+        """One-time rebuild at startup.
         Args:
-            partition_delta_files: {partition_name: [绝对路径列表]}
-        Returns: 完整 DeltaIndex 实例
+            partition_delta_files: {partition_name: [list of absolute paths]}
+        Returns: Complete DeltaIndex instance
         """
 
     def __len__(self) -> int:
-        """当前活跃 tombstone 条目数（监控/测试用）。"""
+        """Current number of active tombstone entries (for monitoring/testing)."""
 
     @property
     def snapshot(self) -> Dict[Any, int]:
-        """只读快照: pk_value → max_delete_seq（拷贝，不持有内部引用）。"""
+        """Read-only snapshot: pk_value -> max_delete_seq (copy, does not hold internal references)."""
 ```
 
-**关键点**：
-- `add_batch` 接受 `pa.RecordBatch` 而不是 `pa.Table`，与 WAL / MemTable 的颗粒度统一
-- `gc_below` 是 Compaction 调用的入口，封装架构不变量 §3 的 GC 规则
-- 没有 `remove_files` 方法——文件管理是 Manifest 的事，DeltaIndex 不持有文件路径
+**Key points**:
+- `add_batch` accepts `pa.RecordBatch` rather than `pa.Table`, unified granularity with WAL / MemTable
+- `gc_below` is the entry point called by Compaction, encapsulating the GC rule of architecture invariant section 3
+- No `remove_files` method -- file management is Manifest's responsibility; DeltaIndex does not hold file paths
 
 ### 9.10 storage/manifest.py
 
 ```python
 class Manifest:
-    """全局状态快照文件，通过原子替换（write-tmp + rename）更新。
+    """Global state snapshot file, updated via atomic replacement (write-tmp + rename).
 
-    记录当前 _seq、Schema 版本、各 Partition 的文件列表、活跃 WAL。
-    是系统唯一的 truth source（架构不变量 §5）。
+    Records current _seq, Schema version, each Partition's file list, active WAL.
+    Is the system's only source of truth (architecture invariant section 5).
 
-    持久化布局：
+    Persistence layout:
         data_dir/
-          ├── manifest.json          # 当前版本
-          └── manifest.json.prev     # 上一版本备份（兜底一次序列化事故）
+          ├── manifest.json          # Current version
+          └── manifest.json.prev     # Previous version backup (fallback against one serialization failure)
     """
 
     def __init__(self, data_dir: str) -> None: ...
 
-    # ── 持久化 ──
+    # -- Persistence --
 
     def save(self) -> None:
-        """原子更新 manifest.json，version 自动 +1。
+        """Atomically update manifest.json, version auto-increments by 1.
 
-        步骤：
-        1. 序列化到 manifest.json.tmp
-        2. 若 manifest.json 存在，cp 它 → manifest.json.prev（覆盖旧 .prev）
-        3. os.rename(manifest.json.tmp, manifest.json)  ← 原子切换
-        4. fsync data_dir 目录确保 rename 持久化
+        Steps:
+        1. Serialize to manifest.json.tmp
+        2. If manifest.json exists, cp it -> manifest.json.prev (overwriting old .prev)
+        3. os.rename(manifest.json.tmp, manifest.json)  <- atomic switch
+        4. fsync data_dir directory to ensure rename is durable
 
-        失败语义：步骤 1 失败 → tmp 文件孤立，无影响；
-                  步骤 2 失败 → 抛异常，磁盘上仍是上一次成功 save 的 manifest；
-                  步骤 3 是原子的，要么成功要么失败。
+        Failure semantics: Step 1 failure -> orphaned tmp file, no impact;
+                          Step 2 failure -> raises exception, disk still has previous successful save's manifest;
+                          Step 3 is atomic, either succeeds or fails entirely.
         """
 
     @classmethod
     def load(cls, data_dir: str) -> "Manifest":
-        """加载 manifest.json。
+        """Load manifest.json.
 
-        加载策略：
-        1. 尝试 manifest.json
-           - 文件不存在 → 返回初始状态（version=0, _default Partition），不报错
-           - 加载成功 → 返回
-           - 加载失败（JSON 损坏、字段缺失）→ 警告日志 + 走第 2 步
-        2. 尝试 manifest.json.prev
-           - 加载成功 → 警告日志（"using prev manifest, last save likely corrupted"）+ 返回
-           - 加载失败 → 抛 ManifestCorruptedError
+        Loading strategy:
+        1. Try manifest.json
+           - File doesn't exist -> return initial state (version=0, _default Partition), no error
+           - Load succeeds -> return
+           - Load fails (corrupt JSON, missing fields) -> warning log + proceed to step 2
+        2. Try manifest.json.prev
+           - Load succeeds -> warning log ("using prev manifest, last save likely corrupted") + return
+           - Load fails -> raise ManifestCorruptedError
         """
 
-    # ── 文件管理（per Partition）──
+    # -- File management (per Partition) --
 
     def add_data_file(self, partition: str, filename: str) -> None:
-        """向指定 Partition 添加数据文件。"""
+        """Add a data file to the specified Partition."""
 
     def add_delta_file(self, partition: str, filename: str) -> None:
-        """向指定 Partition 添加 delta 文件。"""
+        """Add a delta file to the specified Partition."""
 
     def remove_data_files(self, partition: str, filenames: List[str]) -> None:
-        """从指定 Partition 移除数据文件（Compaction 后）。"""
+        """Remove data files from the specified Partition (after Compaction)."""
 
     def remove_delta_files(self, partition: str, filenames: List[str]) -> None:
-        """从指定 Partition 移除 delta 文件（Compaction 后）。"""
+        """Remove delta files from the specified Partition (after Compaction)."""
 
     def get_data_files(self, partition: str) -> List[str]:
-        """返回指定 Partition 的数据文件列表。"""
+        """Return the data file list for the specified Partition."""
 
     def get_delta_files(self, partition: str) -> List[str]:
-        """返回指定 Partition 的 delta 文件列表。"""
+        """Return the delta file list for the specified Partition."""
 
     def get_all_data_files(self) -> Dict[str, List[str]]:
-        """返回所有 Partition 的数据文件: {partition: [files]}。"""
+        """Return data files for all Partitions: {partition: [files]}."""
 
     def get_all_delta_files(self) -> Dict[str, List[str]]:
-        """返回所有 Partition 的 delta 文件: {partition: [files]}。"""
+        """Return delta files for all Partitions: {partition: [files]}."""
 
-    # ── Partition 管理 ──
+    # -- Partition management --
 
     def add_partition(self, name: str) -> None:
-        """添加新 Partition（初始化空文件列表）。
+        """Add a new Partition (initialize empty file lists).
         Raises: PartitionAlreadyExistsError"""
 
     def remove_partition(self, name: str) -> None:
-        """移除 Partition。
-        Raises: DefaultPartitionError（不允许删除 _default）, PartitionNotFoundError"""
+        """Remove a Partition.
+        Raises: DefaultPartitionError (deleting _default not allowed), PartitionNotFoundError"""
 
     def list_partitions(self) -> List[str]:
-        """返回所有 Partition 名称列表。"""
+        """Return list of all Partition names."""
 
     def has_partition(self, name: str) -> bool:
-        """检查 Partition 是否存在。"""
+        """Check if a Partition exists."""
 
-    # ── 属性 ──
+    # -- Properties --
 
     @property
     def version(self) -> int:
-        """Manifest 版本号（每次 save +1）。"""
+        """Manifest version number (+1 on each save)."""
 
     @property
     def current_seq(self) -> int:
-        """当前最大 _seq，启动时恢复计数器。"""
+        """Current maximum _seq, restores counter at startup."""
 
     @current_seq.setter
     def current_seq(self, value: int) -> None: ...
 
     @property
     def schema_version(self) -> int:
-        """当前 Schema 版本号。"""
+        """Current Schema version number."""
 
     @schema_version.setter
     def schema_version(self, value: int) -> None: ...
 
     @property
     def active_wal_number(self) -> Optional[int]:
-        """当前活跃 WAL 编号。"""
+        """Current active WAL number."""
 
     @active_wal_number.setter
     def active_wal_number(self, value: int) -> None: ...
 
-    # ── Phase 9.3 — Index spec 持久化 ──
+    # -- Phase 9.3 -- Index spec persistence --
 
     @property
     def index_spec(self) -> Optional["IndexSpec"]:
-        """当前 Collection 的索引规格（无 → None）。"""
+        """Current Collection's index specification (None if none)."""
 
     def set_index_spec(self, spec: Optional["IndexSpec"]) -> None:
-        """设置或清空 IndexSpec；调用后必须再 save() 持久化。
-        Phase 9.3 引入。"""
+        """Set or clear IndexSpec; must call save() afterwards to persist.
+        Introduced in Phase 9.3."""
 
     @property
     def format_version(self) -> int:
-        """Manifest schema 版本号。Phase 9.3 起 = 2（v1 旧 manifest 加载时
-        index_spec 默认 None，下一次 save 自动升级）。"""
+        """Manifest schema version number. From Phase 9.3 onward = 2 (v1 old manifest
+        defaults index_spec to None on load; next save automatically upgrades)."""
 ```
 
-**Manifest v1 → v2 兼容**：
+**Manifest v1 -> v2 compatibility**:
 
-| 字段 | v1 | v2 |
+| Field | v1 | v2 |
 |---|---|---|
-| `format_version` | 1（或缺失） | 2 |
-| `index_spec` | 无 | dict 或 null |
+| `format_version` | 1 (or missing) | 2 |
+| `index_spec` | absent | dict or null |
 
-加载时缺失字段按默认值处理；保存时一律写 v2。无需迁移工具。
+Missing fields during load are handled with default values; save always writes v2. No migration tool needed.
 
 ---
 
@@ -1184,25 +1184,25 @@ def build_valid_mask(
     delta_index: "DeltaIndex",
     filter_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """构建有效行 bitmap（np.ndarray[bool]，True=有效）。
+    """Build valid row bitmap (np.ndarray[bool], True=valid).
 
-    三步过滤（按顺序）：
-    1. 去重：同一 PK 出现多次时，只保留 _seq 最大的行，其余标记 False
-    2. 删除过滤：调用 delta_index.is_deleted(pk, seq)，已删除标记 False
-    3. 标量过滤：若 filter_mask 不为 None，按位 AND 进最终 mask
+    Three-step filtering (in order):
+    1. Dedup: When the same PK appears multiple times, keep only the row with the largest _seq, mark others as False
+    2. Delete filtering: Call delta_index.is_deleted(pk, seq), mark deleted rows as False
+    3. Scalar filtering: If filter_mask is not None, bitwise AND it into the final mask
 
     Args:
-        all_pks: 长度 N 的 pk 列表
-        all_seqs: shape=(N,) 所有行的 _seq
-        delta_index: DeltaIndex 实例，提供 is_deleted() 查询
-        filter_mask: 可选，长度 N 的 bool array，由 search/filter 子系统对
-            assemble_candidates 中各源的 pa.Table 求值后拼接得到
+        all_pks: Length N pk list
+        all_seqs: shape=(N,), _seq of all rows
+        delta_index: DeltaIndex instance, provides is_deleted() queries
+        filter_mask: Optional, length N bool array, obtained by evaluating the search/filter
+            subsystem on pa.Tables from each source in assemble_candidates and concatenating
 
     Returns:
         np.ndarray[bool] shape=(N,)
 
     Raises:
-        ValueError: filter_mask 长度不等于 all_pks 长度
+        ValueError: filter_mask length does not equal all_pks length
     """
 ```
 
@@ -1213,21 +1213,21 @@ def cosine_distance(
     query: np.ndarray,          # shape=(dim,)
     candidates: np.ndarray,     # shape=(n, dim)
 ) -> np.ndarray:                # shape=(n,)
-    """余弦距离 = 1 - cosine_similarity。值域 [0, 2]，越小越相似。"""
+    """Cosine distance = 1 - cosine_similarity. Range [0, 2], smaller is more similar."""
 
 
 def l2_distance(
     query: np.ndarray,
     candidates: np.ndarray,
 ) -> np.ndarray:
-    """L2（欧氏）距离。越小越相似。"""
+    """L2 (Euclidean) distance. Smaller is more similar."""
 
 
 def ip_distance(
     query: np.ndarray,
     candidates: np.ndarray,
 ) -> np.ndarray:
-    """内积距离 = -dot(q, c)。取负使得越小越相似（与 cosine/L2 统一方向）。"""
+    """Inner product distance = -dot(q, c). Negated so smaller is more similar (same direction as cosine/L2)."""
 
 
 def compute_distances(
@@ -1235,42 +1235,42 @@ def compute_distances(
     candidates: np.ndarray,
     metric_type: str,           # "COSINE" | "L2" | "IP"
 ) -> np.ndarray:
-    """根据 metric_type 分派到对应距离函数。
-    Raises: ValueError（不支持的 metric_type）"""
+    """Dispatch to the corresponding distance function based on metric_type.
+    Raises: ValueError (unsupported metric_type)"""
 ```
 
 ### 9.13 search/executor.py
 
 ```python
 def execute_search(
-    query_vectors: np.ndarray,      # shape=(nq, dim)，nq 个查询向量
-    all_pks: List[Any],             # 长度 N，所有候选行的 PK
-    all_seqs: np.ndarray,           # shape=(N,)，所有候选行的 _seq
-    all_vectors: np.ndarray,        # shape=(N, dim)，所有候选行的向量
-    all_records: List[dict],        # 所有候选行的完整记录（用于返回 entity 字段）
+    query_vectors: np.ndarray,      # shape=(nq, dim), nq query vectors
+    all_pks: List[Any],             # Length N, PKs of all candidate rows
+    all_seqs: np.ndarray,           # shape=(N,), _seq of all candidate rows
+    all_vectors: np.ndarray,        # shape=(N, dim), vectors of all candidate rows
+    all_records: List[dict],        # Complete records of all candidate rows (for returning entity fields)
     delta_index: "DeltaIndex",
     top_k: int,
     metric_type: str,
     pk_field: str,
     vector_field: str,
-    filter_mask: Optional[np.ndarray] = None,    # Phase 8: 标量过滤
+    filter_mask: Optional[np.ndarray] = None,    # Phase 8: scalar filter
 ) -> List[List[dict]]:
-    """执行向量搜索。
+    """Execute vector search.
 
-    流程：
-    1. build_valid_mask(filter_mask=filter_mask) → 有效行 bitmap（含去重 +
-       删除过滤 + 标量过滤）
-    2. 对每个 query_vector：
-       a. 用 bitmap 过滤候选向量
-       b. compute_distances() → 距离数组
-       c. argpartition 取 top-k 最小距离
-       d. 组装结果
-    3. 返回结果
+    Flow:
+    1. build_valid_mask(filter_mask=filter_mask) -> valid row bitmap (including dedup +
+       delete filtering + scalar filtering)
+    2. For each query_vector:
+       a. Filter candidate vectors using bitmap
+       b. compute_distances() -> distance array
+       c. argpartition to get top-k smallest distances
+       d. Assemble results
+    3. Return results
 
     Returns:
-        外层 List = 每个查询向量的结果
-        内层 List = top-K 结果，按 distance 升序
-        每条结果: {"id": pk_value, "distance": float, "entity": {field: value}}
+        Outer List = results for each query vector
+        Inner List = top-K results, sorted by distance ascending
+        Each result: {"id": pk_value, "distance": float, "entity": {field: value}}
     """
 ```
 
@@ -1290,19 +1290,19 @@ def assemble_candidates(
     List[dict],        # all_records (entity dicts)
     Optional[np.ndarray],  # filter_mask (bool, length N) or None
 ]:
-    """把 segments 和 MemTable 拼成统一的候选数组。
+    """Assemble segments and MemTable into unified candidate arrays.
 
-    顺序：先 segments（按迭代顺序），然后 MemTable。这个顺序决定 filter_mask
-    的拼接顺序，bitmap 阶段按相同顺序使用。
+    Order: segments first (in iteration order), then MemTable. This order determines
+    the concatenation order of filter_mask; the bitmap stage uses the same order.
 
-    若 filter_compiled 非 None：
-        - 对每个进入候选集的 segment，调 evaluator 求出 BooleanArray
-        - 对 MemTable 的活跃数据，构造临时 pa.Table 后调 evaluator
-        - 各源的 mask 按 candidate 顺序 concat 成单一 numpy array
+    If filter_compiled is not None:
+        - For each segment entering the candidate set, call evaluator to produce a BooleanArray
+        - For MemTable's active data, construct a temporary pa.Table then call evaluator
+        - Masks from each source are concatenated in candidate order into a single numpy array
     """
 ```
 
-`assembler` 是 search 子系统中**唯一同时知道 storage 类型 (Segment, MemTable) 和 filter 子系统**的模块——其他 search 文件都是 storage-agnostic 的。
+`assembler` is the **only module in the search subsystem that simultaneously knows about storage types (Segment, MemTable) and the filter subsystem** -- other search files are storage-agnostic.
 
 ---
 
@@ -1317,30 +1317,30 @@ def execute_flush(
     manifest: "Manifest",
     delta_index: "DeltaIndex",
     compaction_mgr: "CompactionManager",
-    collection: Optional["Collection"] = None,    # Phase 9.4: 用于 index hook
+    collection: Optional["Collection"] = None,    # Phase 9.4: used for index hook
 ) -> None:
-    """执行 Flush 管线（7+1 步，**同步阻塞**——架构不变量 §6）。
+    """Execute the Flush pipeline (7+1 steps, **synchronous blocking** -- architecture invariant section 6).
 
-    前置条件：调用方已完成 Step 1（冻结旧 MemTable/WAL，创建新的）。
+    Precondition: Caller has already completed Step 1 (frozen old MemTable/WAL, created new ones).
 
-    Step 2: frozen_memtable.flush() → {partition: (data_table, delta_table)}
-    Step 3: 写 Parquet 文件到各 Partition 目录（含 delta Parquet）
-    Step 4: 更新 delta_index 内存（add_batch 每个 delta_table 的 RecordBatch）
-    Step 5: 原子更新 Manifest（新增文件 + 更新 current_seq + 切换 active_wal + .prev 备份）
-    Step 6: 删除旧 WAL（frozen_wal.close_and_delete，含 fsync）
-    Step 7: 按 Partition 触发 compaction_mgr.maybe_compact()（其中含 tombstone GC）
+    Step 2: frozen_memtable.flush() -> {partition: (data_table, delta_table)}
+    Step 3: Write Parquet files to each Partition directory (including delta Parquet)
+    Step 4: Update delta_index in-memory (add_batch for each delta_table's RecordBatch)
+    Step 5: Atomically update Manifest (add new files + update current_seq + switch active_wal + .prev backup)
+    Step 6: Delete old WAL (frozen_wal.close_and_delete, includes fsync)
+    Step 7: Trigger compaction_mgr.maybe_compact() per Partition (which includes tombstone GC)
 
-    Step 8 (Phase 9.4): 对 Step 3 新建的每个 Segment：
-        - 加载 Segment 进 _segment_cache
-        - 如果 collection._load_state == "loaded" 且 collection._index_spec is not None:
+    Step 8 (Phase 9.4): For each new Segment created in Step 3:
+        - Load Segment into _segment_cache
+        - If collection._load_state == "loaded" and collection._index_spec is not None:
             seg.build_or_load_index(spec, index_dir)
-        - flush 完成后新数据立即可被 search 使用
+        - After flush completes, new data is immediately available for search
 
-    崩溃安全：
-    - Step 3 崩溃 → Manifest 未更新，Parquet 成为孤儿文件，recovery 清理
-    - Step 5 前崩溃 → WAL 完整，重放恢复
-    - Step 5 后崩溃 → Manifest 已更新，WAL 重放产生重复但 _seq 去重保证正确
-    - Step 8 崩溃 → .idx 文件可能不完整，下次 load() 时检测到失败会重新 build
+    Crash safety:
+    - Crash at Step 3 -> Manifest not updated, Parquet becomes orphan files, recovery cleans up
+    - Crash before Step 5 -> WAL is intact, replay recovers
+    - Crash after Step 5 -> Manifest already updated, WAL replay produces duplicates but _seq dedup ensures correctness
+    - Crash at Step 8 -> .idx files may be incomplete, next load() detects failure and rebuilds
     """
 ```
 
@@ -1352,29 +1352,29 @@ def execute_recovery(
     schema: "CollectionSchema",
     manifest: "Manifest",
 ) -> Tuple["MemTable", "DeltaIndex", int]:
-    """执行崩溃恢复（5+1 步）。
+    """Execute crash recovery (5+1 steps).
 
-    前置条件：调用方已加载 Manifest（Step 1）。
+    Precondition: Caller has already loaded Manifest (Step 1).
 
-    Step 2: 扫描 wal/ 目录，有未清理的 WAL → 按 _seq 顺序重放 Operations 到新建 MemTable
-            （重放经由 WAL.read_operations() Iterator[Operation]，详见 §9.x operation）
-    Step 3: 校验 Manifest 中的文件是否实际存在（处理 Compaction 中途崩溃）
-    Step 4: 清理孤儿文件（在磁盘但不在 Manifest 中的 Parquet）
-    Step 5: DeltaIndex.rebuild_from(所有 Partition 的 delta_files)
+    Step 2: Scan wal/ directory; if uncleaned WAL exists -> replay Operations in _seq order to a new MemTable
+            (Replay via WAL.read_operations() Iterator[Operation], see section 9.x operation)
+    Step 3: Verify that files in Manifest actually exist (handle Compaction mid-crash)
+    Step 4: Clean up orphan files (files on disk but not in Manifest)
+    Step 5: DeltaIndex.rebuild_from(all Partitions' delta_files)
     Step 6 (Phase 9.4): _cleanup_orphan_index_files(data_dir, manifest)
-            - 扫描每个 partition 的 indexes/ 目录
-            - 对每个 .idx 文件，从文件名解析回对应的 data 文件 stem
-            - 如果对应 data 文件不在 manifest 中，删除该 .idx 文件
-            - 如果 manifest 中的 data 文件没有对应 .idx，无操作（load() 时会建）
+            - Scan each partition's indexes/ directory
+            - For each .idx file, parse back the corresponding data file stem from the filename
+            - If the corresponding data file is not in manifest, delete the .idx file
+            - If a data file in manifest has no corresponding .idx, no action (will be built at load())
 
-    Phase 9.3 后：调用方拿到这些返回值后必须把 Collection._load_state 强制设为 "released"。
-    重启不自动 load index，与 Milvus 行为对齐。
+    After Phase 9.3: Caller must force Collection._load_state to "released" after receiving these return values.
+    Restart does not automatically load index, aligning with Milvus behavior.
 
     Returns:
         (memtable, delta_index, next_wal_number)
-        - memtable: 重放 WAL 后的 MemTable（无 WAL 则为空 MemTable）
-        - delta_index: 重建后的 DeltaIndex
-        - next_wal_number: 下一轮 WAL 应使用的编号
+        - memtable: MemTable after WAL replay (empty MemTable if no WAL)
+        - delta_index: Rebuilt DeltaIndex
+        - next_wal_number: WAL number to use for the next round
     """
 ```
 
@@ -1382,13 +1382,13 @@ def execute_recovery(
 
 ```python
 class CompactionManager:
-    """Size-Tiered Compaction Manager，按 Partition 独立执行。"""
+    """Size-Tiered Compaction Manager, executes independently per Partition."""
 
     def __init__(self, data_dir: str, schema: CollectionSchema) -> None:
         """
         Args:
-            data_dir: Collection 数据目录
-            schema: CollectionSchema（用于读取 Parquet 时确定主键和 schema）
+            data_dir: Collection data directory
+            schema: CollectionSchema (used to determine primary key and schema when reading Parquet)
         """
 
     def maybe_compact(
@@ -1396,68 +1396,68 @@ class CompactionManager:
         partition: str,
         manifest: "Manifest",
         delta_index: "DeltaIndex",
-        collection: Optional["Collection"] = None,    # Phase 9.4: 用于 index hook
+        collection: Optional["Collection"] = None,    # Phase 9.4: used for index hook
     ) -> None:
-        """检查指定 Partition 是否需要 Compaction，满足条件则执行。
+        """Check if the specified Partition needs Compaction; execute if conditions are met.
 
-        触发条件（满足任一）：
-        - 同一大小桶内文件数 >= COMPACTION_MIN_FILES_PER_BUCKET
-        - 该 Partition 文件总数 > MAX_DATA_FILES
+        Trigger conditions (any one met):
+        - File count in the same size bucket >= COMPACTION_MIN_FILES_PER_BUCKET
+        - Total file count for the Partition > MAX_DATA_FILES
 
-        Compaction 流程：
-        1. 对文件按大小分桶
-        2. 选择目标桶中的文件
-        3. 读取并合并 Arrow Tables
-        4. 按主键去重（保留 max _seq）
-        5. 用 delta_index.is_deleted() 过滤已删除记录
-        6. 写入新 Parquet 文件
-        7. 原子更新 Manifest（移除旧文件 + 新增新文件 + 移除已消费 delta 文件）
-        8. 删除旧文件和已消费的 delta 文件
-        9. **Tombstone GC**: 调用 delta_index.gc_below(min_active_data_seq)
-           其中 min_active_data_seq 来自 Manifest 中所有 partition 的 data 文件 seq_min 的全局最小值
-        10. (Phase 9.4) 删除被淘汰 segment 对应的 .idx 文件
-        11. (Phase 9.4) 如果 collection._load_state == "loaded" 且 _index_spec is not None:
-            对新 merged segment 调 build_or_load_index(spec, index_dir)
+        Compaction flow:
+        1. Bucket files by size
+        2. Select files in the target bucket
+        3. Read and merge Arrow Tables
+        4. Dedup by primary key (keep max _seq)
+        5. Filter deleted records using delta_index.is_deleted()
+        6. Write new Parquet file
+        7. Atomically update Manifest (remove old files + add new files + remove consumed delta files)
+        8. Delete old files and consumed delta files
+        9. **Tombstone GC**: Call delta_index.gc_below(min_active_data_seq)
+           where min_active_data_seq is the global minimum of seq_min across all partitions' data files in Manifest
+        10. (Phase 9.4) Delete .idx files corresponding to retired segments
+        11. (Phase 9.4) If collection._load_state == "loaded" and _index_spec is not None:
+            call build_or_load_index(spec, index_dir) for the new merged segment
         """
 
     def _global_min_active_data_seq(self, manifest: "Manifest") -> int:
-        """计算所有 partition 中 data 文件 seq_min 的最小值。
+        """Compute the minimum seq_min across all data files in all partitions.
 
-        用于 tombstone GC 触发——任何 delete_seq 小于此值的 tombstone 都
-        不可能再过滤到任何 data 行（因为所有 seq < 此值的 data 都已被
-        compaction 物理消化掉）。
+        Used for tombstone GC triggering -- any tombstone with delete_seq less than this value
+        cannot possibly filter any data rows (because all data with seq < this value has been
+        physically consumed by compaction).
 
         Returns:
-            全局最小 seq_min；若无 data 文件，返回 sys.maxsize（GC 会清空 delta_index）
+            Global minimum seq_min; if no data files exist, returns sys.maxsize (GC will empty delta_index)
         """
 ```
 
-**Tombstone GC 不变量**（架构不变量 §3 的实现说明）：
+**Tombstone GC invariant** (implementation notes for architecture invariant section 3):
 
 ```
-对任意 delete tombstone (pk, delete_seq):
-  存在残留 data 行需要它过滤  ⟺  ∃ 某个 data 文件含 pk 且 seq_min ≤ delete_seq
+For any delete tombstone (pk, delete_seq):
+  There exist residual data rows that need it for filtering  <=>  There exists some data file containing pk with seq_min <= delete_seq
 
-保守 GC 规则（MVP 用）:
-  if delete_seq < min(所有 data 文件的 seq_min):
+Conservative GC rule (used in MVP):
+  if delete_seq < min(seq_min of all data files):
       drop tombstone(pk, delete_seq)
 
-正确性证明：
-  delete_seq < min_seq_min ⟹ 不存在 seq_min ≤ delete_seq 的 data 文件
-                         ⟹ 不存在残留 data 行需要它过滤
-                         ⟹ 安全可丢
+Correctness proof:
+  delete_seq < min_seq_min ==> no data file exists with seq_min <= delete_seq
+                           ==> no residual data rows need it for filtering
+                           ==> safe to discard
 ```
 
-### 9.16.5 engine/operation.py（写编排抽象层）
+### 9.16.5 engine/operation.py (Write Orchestration Abstraction Layer)
 
-**目的**：为 insert / delete 流水线提供统一的编排入口。**统一 orchestration，保留 representation**——schema、buffer、parquet 文件类型该分仍然分，只在编排层（Collection / WAL / MemTable / recovery）抽象一层。
+**Purpose**: Provide a unified orchestration entry point for the insert / delete pipeline. **Unified orchestration, preserved representation** -- schema, buffer, parquet file types remain separate where they should be; only one abstraction layer at the orchestration level (Collection / WAL / MemTable / recovery).
 
-**为什么要有这一层**：
+**Why this layer exists**:
 
-1. Collection 的 `_apply` 是单一写入路径——任何写操作的唯一入口，未来加新操作（schema migration、bulk import）只在一处加 dispatch
-2. WAL.write / MemTable.apply 都接受 Operation，不需要为每种操作各开一个方法
-3. recovery 路径变成 5 行 `for op in WAL.read_operations(): memtable.apply(op)`，告别 row-by-row 的嵌套循环
-4. Operation 是冻结 dataclass + Arrow batch，不持有 Collection / WAL 引用——纯描述，不带行为
+1. Collection's `_apply` is the single write path -- the sole entry point for any write operation; adding new operations in the future (schema migration, bulk import) only requires dispatch in one place
+2. WAL.write / MemTable.apply both accept Operation, no need to open a separate method for each operation type
+3. The recovery path becomes 5 lines of `for op in WAL.read_operations(): memtable.apply(op)`, eliminating nested row-by-row loops
+4. Operation is a frozen dataclass + Arrow batch, does not hold Collection / WAL references -- pure description, no behavior
 
 ```python
 # engine/operation.py
@@ -1469,50 +1469,50 @@ import pyarrow as pa
 
 @dataclass(frozen=True)
 class InsertOp:
-    """一次 insert 调用的事务描述。
+    """Transaction description for one insert call.
 
-    batch 的 schema = wal_data_schema（含 _seq, _partition, 用户字段, $meta），
-    每行都已经分配独立的 _seq。
+    batch's schema = wal_data_schema (contains _seq, _partition, user fields, $meta),
+    each row has been assigned an independent _seq.
     """
-    partition: str          # 单个 partition 名
-    batch: pa.RecordBatch   # 含 _seq, _partition, 用户字段, $meta
+    partition: str          # Single partition name
+    batch: pa.RecordBatch   # Contains _seq, _partition, user fields, $meta
 
     @property
     def seq_min(self) -> int:
-        """batch 中最小 _seq。"""
+        """Minimum _seq in the batch."""
 
     @property
     def seq_max(self) -> int:
-        """batch 中最大 _seq。"""
+        """Maximum _seq in the batch."""
 
     @property
     def num_rows(self) -> int:
-        """batch 行数。"""
+        """Batch row count."""
 
 
 @dataclass(frozen=True)
 class DeleteOp:
-    """一次 delete 调用的事务描述。
+    """Transaction description for one delete call.
 
-    batch 的 schema = wal_delta_schema（含 pk, _seq, _partition），
-    整个 batch 共享同一个 _seq。partition 可以是 '_all'（跨所有 partition 删除）。
+    batch's schema = wal_delta_schema (contains pk, _seq, _partition),
+    the entire batch shares a single _seq. partition can be '_all' (delete across all partitions).
     """
-    partition: str          # 可以是 ALL_PARTITIONS = "_all"
-    batch: pa.RecordBatch   # 含 pk, _seq, _partition
+    partition: str          # Can be ALL_PARTITIONS = "_all"
+    batch: pa.RecordBatch   # Contains pk, _seq, _partition
 
     @property
     def seq(self) -> int:
-        """batch 共享的 _seq。"""
+        """The shared _seq of the batch."""
 
     @property
     def num_rows(self) -> int:
-        """batch 行数（被删除的 pk 数）。"""
+        """Batch row count (number of PKs being deleted)."""
 
 
 Operation = Union[InsertOp, DeleteOp]
 ```
 
-**Collection 入口的样子**（§9.17 会重写 insert/delete，这里先示意）：
+**What the Collection entry point looks like** (section 9.17 will rewrite insert/delete; this is illustrative):
 
 ```python
 def insert(self, records, partition_name="_default"):
@@ -1532,10 +1532,10 @@ def delete(self, pks, partition_name=None):
     return len(pks)
 
 def _apply(self, op: Operation) -> None:
-    """单一写入路径——dispatch 到 raw batch 接口。
+    """Single write path -- dispatch to raw batch interfaces.
 
-    Operation 抽象只活在 engine 层。WAL / MemTable 不知道它，
-    所以 dispatch 必须在这里显式做。
+    The Operation abstraction only lives in the engine layer. WAL / MemTable
+    do not know about it, so dispatch must be done explicitly here.
     """
     if isinstance(op, InsertOp):
         self.wal.write_insert(op.batch)
@@ -1547,50 +1547,50 @@ def _apply(self, op: Operation) -> None:
         self._trigger_flush()
 ```
 
-**WAL / MemTable 不知道 Operation**——它们仍然只接受 raw `pa.RecordBatch`，dispatch 在 Collection.\_apply 里完成。
+**WAL / MemTable do not know about Operation** -- they still only accept raw `pa.RecordBatch`; dispatch is done in Collection.\_apply.
 
-**为什么这样设计**：依赖层级。`storage/` 在 Level 2，`engine/` 在 Level 5/6，让 storage 反向 import engine 的 `Operation` 类型会破坏层级。Operation 是事务编排概念，本来就属于 engine 层。
+**Why this design**: Dependency hierarchy. `storage/` is at Level 2, `engine/` is at Level 5/6; having storage reverse-import engine's `Operation` type would break the layering. Operation is a transaction orchestration concept that belongs to the engine layer.
 
 ```python
 class WAL:
-    # 仍然是 raw batch 接口（Phase 1 已落地）
+    # Still raw batch interfaces (landed in Phase 1)
     def write_insert(self, record_batch: pa.RecordBatch) -> None: ...
     def write_delete(self, record_batch: pa.RecordBatch) -> None: ...
 
-    # Recovery 路径在 engine/recovery.py 里包装：
-    # raw WAL.recover() → 拼成 Iterator[Operation]
+    # Recovery path is wrapped in engine/recovery.py:
+    # raw WAL.recover() -> assembled into Iterator[Operation]
     @staticmethod
     def recover(wal_dir, wal_number) -> Tuple[List[pa.RecordBatch], List[pa.RecordBatch]]:
         ...
 
 
 class MemTable:
-    # 仍然是 raw batch 接口
+    # Still raw batch interfaces
     def apply_insert(self, batch: pa.RecordBatch) -> None: ...
     def apply_delete(self, batch: pa.RecordBatch) -> None: ...
 ```
 
-**Operation 的统一回放在 engine/recovery.py 里实现**（Phase 3 落地）：
+**The unified replay of Operations is implemented in engine/recovery.py** (landed in Phase 3):
 
 ```python
 # engine/recovery.py
 def replay_wal_operations(
     wal_dir: str, wal_number: int, pk_field: str,
 ) -> Iterator[Operation]:
-    """读 WAL 文件，按 _seq 顺序 yield Operation。
+    """Read WAL files, yield Operations in _seq order.
 
-    实现：
-    1. WAL.recover(wal_dir, wal_number) → (data_batches, delta_batches)
-    2. 把每个 batch 包成 InsertOp(partition=..., batch=b) / DeleteOp(...)
-    3. 按起始 _seq 归并排序后 yield
+    Implementation:
+    1. WAL.recover(wal_dir, wal_number) -> (data_batches, delta_batches)
+    2. Wrap each batch into InsertOp(partition=..., batch=b) / DeleteOp(...)
+    3. Merge-sort by starting _seq then yield
 
-    按 _seq 顺序回放是为了让 recovery 后 MemTable 的 max observed seq
-    天然等于最后一次 yield 的 op.seq——并非正确性必需（MemTable 已 seq-aware），
-    而是让 next_seq 推导更干净。
+    Replaying in _seq order ensures that after recovery, MemTable's max observed seq
+    naturally equals the last yielded op.seq -- this is not required for correctness
+    (MemTable is already seq-aware), but makes next_seq derivation cleaner.
     """
 ```
 
-**Recovery 受益**：
+**Recovery benefits**:
 
 ```python
 def execute_recovery(...):
@@ -1606,54 +1606,54 @@ def execute_recovery(...):
     return memtable, delta_index, max_seq + 1
 ```
 
-**保持不动的部分**（不要被"统一"诱惑）：
+**Parts that stay unchanged** (don't be tempted by "unification"):
 
-- `insert_buf` 与 `delete_buf` 内部表示**不合并**（语义不同：覆盖 vs max 累积）
-- `wal_data_schema` 与 `wal_delta_schema` **不合并**（schema 是数据契约，不是编排概念）
-- `InsertOp` 与 `DeleteOp` **不继承共同 base class**——用 `Union` + `isinstance` dispatch
-- **不**给 Operation 加 `execute(collection)` 方法——会变成 god object
-- **不**让 storage 层 import Operation——dispatch 留在 Collection.\_apply
+- `insert_buf` and `delete_buf` internal representations **are not merged** (different semantics: override vs max accumulation)
+- `wal_data_schema` and `wal_delta_schema` **are not merged** (schema is a data contract, not an orchestration concept)
+- `InsertOp` and `DeleteOp` **do not inherit from a common base class** -- use `Union` + `isinstance` dispatch
+- **Do not** add an `execute(collection)` method to Operation -- it would become a god object
+- **Do not** let the storage layer import Operation -- dispatch stays in Collection.\_apply
 
 ### 9.17 engine/collection.py
 
 ```python
 class Collection:
-    """Collection 层：引擎核心，管理 WAL / MemTable / Manifest / Compaction。
+    """Collection layer: engine core, manages WAL / MemTable / Manifest / Compaction.
 
-    持有全部 storage 组件实例，编排读写路径。
-    __init__ 时自动执行 recovery。
+    Holds all storage component instances, orchestrates read/write paths.
+    Automatically executes recovery during __init__.
     """
 
     def __init__(self, name: str, data_dir: str, schema: CollectionSchema) -> None:
-        """初始化 Collection，加载 Manifest，执行 recovery。
+        """Initialize Collection, load Manifest, execute recovery.
         Args:
-            name: Collection 名称
-            data_dir: Collection 数据目录（包含 manifest.json, schema.json, wal/, partitions/）
+            name: Collection name
+            data_dir: Collection data directory (contains manifest.json, schema.json, wal/, partitions/)
             schema: CollectionSchema
         """
 
-    # ─── 写操作（partition_name: 单数 str）───
+    # --- Write operations (partition_name: singular str) ---
 
     def insert(
         self,
         records: List[dict],
         partition_name: str = "_default",
     ) -> List:
-        """批量写入，天然 upsert 语义（PK 存在则覆盖）。
+        """Batch write, with natural upsert semantics (overrides if PK exists).
 
-        流程: 校验 → 分配 _seq → WAL → MemTable → (满了触发 flush)
-        每条记录分配独立 _seq。
+        Flow: validate -> allocate _seq -> WAL -> MemTable -> (trigger flush if full)
+        Each record is assigned an independent _seq.
 
         Args:
-            records: List[dict]，每个 dict 包含用户字段
-            partition_name: 目标 Partition
+            records: List[dict], each dict contains user fields
+            partition_name: Target Partition
 
         Returns:
-            写入的 PK 列表
+            List of written PKs
 
         Raises:
-            SchemaValidationError: 记录不符合 Schema
-            PartitionNotFoundError: 指定 Partition 不存在
+            SchemaValidationError: Record does not conform to Schema
+            PartitionNotFoundError: Specified Partition does not exist
         """
 
     def delete(
@@ -1661,23 +1661,23 @@ class Collection:
         pks: List,
         partition_name: Optional[str] = None,
     ) -> int:
-        """批量删除，不检查记录是否存在。
+        """Batch delete, does not check whether records exist.
 
-        流程: 分配共享 _seq → WAL → MemTable → (满了触发 flush)
-        多条 PK 共享同一个 _seq。
+        Flow: allocate shared _seq -> WAL -> MemTable -> (trigger flush if full)
+        Multiple PKs share a single _seq.
 
         Args:
-            pks: PK 值列表
-            partition_name: 目标 Partition，None 则跨所有 Partition 删除
+            pks: List of PK values
+            partition_name: Target Partition, None means delete across all Partitions
 
         Returns:
-            处理的 PK 数量
+            Number of PKs processed
 
         Raises:
-            PartitionNotFoundError: 指定 Partition 不存在
+            PartitionNotFoundError: Specified Partition does not exist
         """
 
-    # ─── 读操作（partition_names: 复数 List[str]）───
+    # --- Read operations (partition_names: plural List[str]) ---
 
     def get(
         self,
@@ -1685,20 +1685,20 @@ class Collection:
         partition_names: Optional[List[str]] = None,
         expr: Optional[str] = None,                  # Phase 8
     ) -> List[dict]:
-        """按 PK 批量查询。
+        """Batch lookup by PK.
 
-        流程：MemTable 查 → segment 查（取 max-seq 版本）→ delta_index 过滤 →
-              （若 expr 给出）调 filter.evaluate 在命中行上再过滤一遍。
+        Flow: MemTable lookup -> segment lookup (take max-seq version) -> delta_index filtering ->
+              (if expr is provided) call filter.evaluate on matched rows for additional filtering.
 
         Args:
-            pks: PK 值列表
-            partition_names: 搜索范围，None 则搜索所有 Partition
-            expr: 可选 Milvus-style 过滤表达式（详见 §9.19-9.25）。命中
-                的 pk 必须额外满足该表达式才会出现在结果里。
+            pks: List of PK values
+            partition_names: Search scope, None means search all Partitions
+            expr: Optional Milvus-style filter expression (see sections 9.19-9.25). Matched
+                pks must additionally satisfy this expression to appear in results.
 
         Returns:
-            List[dict]，每个 dict 为一条记录（不在返回列表中 = pk 不存在
-            或被过滤掉）
+            List[dict], each dict is one record (absence from return list = pk doesn't exist
+            or was filtered out)
         """
 
     def search(
@@ -1710,153 +1710,153 @@ class Collection:
         expr: Optional[str] = None,                  # Phase 8
         output_fields: Optional[List[str]] = None,   # Phase 9.1
     ) -> List[List[dict]]:
-        """向量检索。
+        """Vector retrieval.
 
-        流程：(若 expr 给出) parse_expr → compile_expr →
-              assemble_candidates(filter_compiled=...) →
+        Flow: (if expr is provided) parse_expr -> compile_expr ->
+              assemble_candidates(filter_compiled=...) ->
               execute_search_with_index(filter_mask=...)
 
-        Phase 9 起：
-        - 调用前 Collection 必须处于 loaded 态，否则抛 CollectionNotLoadedError
-        - 每个 segment 如果有 .index 则走 index.search，否则走 brute force
-        - memtable 永远走 brute force（最新写入未建索引）
+        From Phase 9 onward:
+        - Collection must be in loaded state before calling, otherwise raises CollectionNotLoadedError
+        - Each segment uses index.search if .index exists, otherwise falls back to brute force
+        - MemTable always uses brute force (latest writes have no index built)
 
         Args:
-            query_vectors: 查询向量列表，每个元素是 list[float]
-            top_k: 返回最近邻数量
+            query_vectors: List of query vectors, each element is list[float]
+            top_k: Number of nearest neighbors to return
             metric_type: "COSINE" | "L2" | "IP"
-            partition_names: 搜索范围，None 则搜索所有 Partition
-            expr: 可选 Milvus-style 过滤表达式（详见 §9.19-9.25）
-            output_fields: 返回 entity 中要保留的字段列表；None 表示全部
+            partition_names: Search scope, None means search all Partitions
+            expr: Optional Milvus-style filter expression (see sections 9.19-9.25)
+            output_fields: List of fields to retain in the returned entity; None means all
 
         Returns:
-            外层 List = 每个查询向量
-            内层 List = top-K 结果
-            每条: {"id": pk, "distance": float, "entity": {field: value}}
+            Outer List = per query vector
+            Inner List = top-K results
+            Each entry: {"id": pk, "distance": float, "entity": {field: value}}
         """
 
-    def query(                                       # Phase 8 新方法
+    def query(                                       # Phase 8 new method
         self,
         expr: str,
         output_fields: Optional[List[str]] = None,
         partition_names: Optional[List[str]] = None,
         limit: Optional[int] = None,
     ) -> List[dict]:
-        """纯标量查询（无向量、无 distance）。
+        """Pure scalar query (no vectors, no distance).
 
-        流程：parse_expr → compile_expr → assemble_candidates(无 query) →
-              build_valid_mask(filter_mask=...) → 取所有 True 行 →
-              project output_fields → 截断 limit。
+        Flow: parse_expr -> compile_expr -> assemble_candidates(no query) ->
+              build_valid_mask(filter_mask=...) -> take all True rows ->
+              project output_fields -> truncate to limit.
 
         Args:
-            expr: 必填，过滤表达式（详见 §9.19-9.25）
-            output_fields: 返回字段列表，None 返回所有字段（不含 _seq, _partition）
-            partition_names: 搜索范围
-            limit: 最多返回条数（None = 不限）
+            expr: Required, filter expression (see sections 9.19-9.25)
+            output_fields: List of fields to return, None returns all fields (excluding _seq, _partition)
+            partition_names: Search scope
+            limit: Maximum number of rows to return (None = unlimited)
 
         Returns:
-            List[dict]，每个 dict 是一条匹配的记录
+            List[dict], each dict is one matching record
         """
 
-    # ─── Partition 管理 ───
+    # --- Partition management ---
 
     def create_partition(self, partition_name: str) -> None:
-        """创建新 Partition。创建目录 + 更新 Manifest。
+        """Create a new Partition. Creates directory + updates Manifest.
         Raises: PartitionAlreadyExistsError"""
 
     def drop_partition(self, partition_name: str) -> None:
-        """删除 Partition。删除目录 + 更新 Manifest。
+        """Delete a Partition. Deletes directory + updates Manifest.
         Raises: DefaultPartitionError, PartitionNotFoundError"""
 
     def list_partitions(self) -> List[str]:
-        """返回所有 Partition 名称列表。"""
+        """Return list of all Partition names."""
 
     def has_partition(self, partition_name: str) -> bool:
-        """Phase 9.1: 检查 Partition 是否存在。"""
+        """Phase 9.1: Check if a Partition exists."""
 
-    # ─── 统计与描述（Phase 9.1） ───
+    # --- Statistics and description (Phase 9.1) ---
 
     @property
     def num_entities(self) -> int:
-        """Phase 9.1: Collection 总行数（memtable 活跃行 + 所有 segment 行 - 已删除）。"""
+        """Phase 9.1: Total row count of Collection (memtable active rows + all segment rows - deleted)."""
 
     def describe(self) -> dict:
-        """Phase 9.1: 返回 dict，包含 name / schema / num_entities /
-        load_state / index_spec / partitions。"""
+        """Phase 9.1: Return dict containing name / schema / num_entities /
+        load_state / index_spec / partitions."""
 
-    # ─── 索引生命周期（Phase 9.3） ───
+    # --- Index lifecycle (Phase 9.3) ---
 
     def create_index(self, field_name: str, index_params: dict) -> None:
-        """Phase 9.3: persist IndexSpec 到 manifest。**不立即构建** —
-        实际构建发生在 load() 时。
+        """Phase 9.3: Persist IndexSpec to manifest. **Does not build immediately** --
+        actual building happens at load() time.
 
         Args:
-            field_name: 必须是 schema 中的 vector field
-            index_params: dict 含 "index_type" / "metric_type" / "params" /
+            field_name: Must be a vector field in the schema
+            index_params: dict containing "index_type" / "metric_type" / "params" /
                 "search_params"
 
         Raises:
-            IndexAlreadyExistsError: 已经 create_index 过
-            FilterFieldError: field_name 不是 vector field
+            IndexAlreadyExistsError: create_index has already been called
+            FilterFieldError: field_name is not a vector field
         """
 
     def drop_index(self, field_name: str) -> None:
-        """Phase 9.3: 释放 in-memory 索引 + 删除磁盘上的所有 .idx 文件 +
-        清空 manifest 中的 IndexSpec。drop 后 _load_state 强制变为 released。"""
+        """Phase 9.3: Release in-memory indexes + delete all .idx files on disk +
+        clear IndexSpec in manifest. After drop, _load_state is forced to released."""
 
     def has_index(self) -> bool:
-        """Phase 9.3: Collection 是否已 create_index。"""
+        """Phase 9.3: Whether create_index has been called on the Collection."""
 
     def get_index_info(self) -> Optional[dict]:
-        """Phase 9.3: 返回 IndexSpec.to_dict() 或 None。"""
+        """Phase 9.3: Return IndexSpec.to_dict() or None."""
 
     def load(self) -> None:
-        """Phase 9.3: 状态机 released → loading → loaded。
+        """Phase 9.3: State machine released -> loading -> loaded.
 
-        对每个 segment 调 build_or_load_index：先尝试 load .idx 文件，
-        失败则 build + save。无 IndexSpec 的 Collection 也允许 load
-        （直接进入 loaded 态，search 走 brute force）。
+        For each segment, calls build_or_load_index: first tries to load .idx file,
+        falls back to build + save on failure. Collections without IndexSpec are also
+        allowed to load (directly enters loaded state, search uses brute force).
 
-        Raises 任何异常时回滚到 released 态。
+        Rolls back to released state on any exception.
         """
 
     def release(self) -> None:
-        """Phase 9.3: 释放所有 segment 的 in-memory 索引；状态机 → released。"""
+        """Phase 9.3: Release all segments' in-memory indexes; state machine -> released."""
 
     @property
     def load_state(self) -> str:
         """Phase 9.3: "released" | "loading" | "loaded"."""
 
-    # ─── Schema 变更 ───
+    # --- Schema changes ---
 
     def add_field(self, field: FieldSchema) -> None:
-        """新增字段到 Schema。schema_version +1，持久化更新。
-        利用 Parquet 天然 schema evolution：旧文件缺失列自动填 null。
-        不支持删除字段和修改字段类型。"""
+        """Add a new field to Schema. schema_version +1, persists the update.
+        Leverages Parquet's natural schema evolution: old files missing the column automatically fill with null.
+        Does not support deleting fields or modifying field types."""
 
-    # ─── 生命周期 ───
+    # --- Lifecycle ---
 
     def flush(self) -> None:
-        """手动触发 flush（不等 MemTable 满）。
-        MemTable 为空时无操作。"""
+        """Manually trigger flush (without waiting for MemTable to be full).
+        No-op when MemTable is empty."""
 
     def close(self) -> None:
-        """关闭 Collection：flush 残留数据 → 关闭 WAL writer。"""
+        """Close Collection: flush residual data -> close WAL writer."""
 ```
 
 ### 9.18 db.py
 
 ```python
 class MilvusLite:
-    """DB 层：管理多个 Collection 的生命周期。
+    """DB layer: manages the lifecycle of multiple Collections.
 
-    对应磁盘上一个根目录，每个 Collection 是根目录下的一个子目录。
+    Corresponds to a root directory on disk; each Collection is a subdirectory under the root.
     """
 
     def __init__(self, root_dir: str) -> None:
-        """初始化 DB，扫描 root_dir 发现已有 Collection（延迟加载）。
+        """Initialize DB, scan root_dir to discover existing Collections (lazy loading).
         Args:
-            root_dir: 数据库根目录，不存在则自动创建
+            root_dir: Database root directory, auto-created if it doesn't exist
         """
 
     def create_collection(
@@ -1864,57 +1864,57 @@ class MilvusLite:
         collection_name: str,
         schema: CollectionSchema,
     ) -> "Collection":
-        """创建新 Collection。
-        创建子目录 + 写入 schema.json + 初始化 Manifest + 创建 _default Partition。
-        Returns: Collection 实例
+        """Create a new Collection.
+        Creates subdirectory + writes schema.json + initializes Manifest + creates _default Partition.
+        Returns: Collection instance
         Raises: CollectionAlreadyExistsError"""
 
     def get_collection(self, collection_name: str) -> "Collection":
-        """获取已有 Collection（首次获取时加载并执行 recovery）。
+        """Get an existing Collection (loads and executes recovery on first access).
         Raises: CollectionNotFoundError"""
 
     def drop_collection(self, collection_name: str) -> None:
-        """删除 Collection。关闭 → 删除整个子目录。
+        """Delete a Collection. Close -> delete entire subdirectory.
         Raises: CollectionNotFoundError"""
 
     def list_collections(self) -> List[str]:
-        """返回所有 Collection 名称列表。"""
+        """Return list of all Collection names."""
 
     def has_collection(self, collection_name: str) -> bool:
-        """Phase 9.1: 检查 Collection 是否存在。"""
+        """Phase 9.1: Check if a Collection exists."""
 
     def get_collection_stats(self, collection_name: str) -> dict:
-        """Phase 9.1: 返回 dict，至少包含 row_count 字段；
-        gRPC 适配层 GetCollectionStatistics 直接消费。"""
+        """Phase 9.1: Return dict, containing at least a row_count field;
+        directly consumed by gRPC adapter layer GetCollectionStatistics."""
 
     def close(self) -> None:
-        """关闭所有已加载的 Collection。"""
+        """Close all loaded Collections."""
 ```
 
 ---
 
-## Phase 8: search/filter 子系统接口详解
+## Phase 8: search/filter Subsystem Interface Detailed Descriptions
 
-**目标**：让 `Collection.search` / `get` / `query` 接受 Milvus-style 标量过滤表达式。
+**Goal**: Allow `Collection.search` / `get` / `query` to accept Milvus-style scalar filter expressions.
 
-**架构**：三阶段编译 + 双 backend dispatcher。
+**Architecture**: Three-stage compilation + dual backend dispatcher.
 
 ```
-source string  ──parse_expr()──▶  Expr (raw AST, schema 无关)
-                                      │
-                                      │ compile_expr(expr, schema)
-                                      ▼
-                              CompiledExpr (字段绑定 + 类型检查 + backend 标记)
-                                      │
-                                      │ evaluate(compiled, table)
-                                      ▼
+source string  --parse_expr()-->  Expr (raw AST, schema-independent)
+                                      |
+                                      | compile_expr(expr, schema)
+                                      v
+                              CompiledExpr (field binding + type checking + backend tag)
+                                      |
+                                      | evaluate(compiled, table)
+                                      v
                               pa.BooleanArray (length == table.num_rows)
 ```
 
-**架构不变量补充（写进顶部"架构不变量"区段）**：
+**Architecture invariant supplement (written into the top-level "Architecture Invariants" section)**:
 
-11. **Filter parser 与 evaluator 通过 AST 解耦**——AST 是稳定接口，未来切换 parser 实现（例如 ANTLR）不影响 type checker / backends。
-12. **Filter backend 在 compile 时静态决定**——不在 evaluate 热路径上 dispatch；F1 始终选 arrow，未来 F2b 引入 `$meta` 时遇到含动态字段的 ref 才升级到 python。
+11. **Filter parser and evaluator are decoupled via AST** -- AST is the stable interface; future parser implementation swaps (e.g., ANTLR) do not affect type checker / backends.
+12. **Filter backend is statically determined at compile time** -- no dispatch on the evaluate hot path; F1 always selects arrow; future F2b when encountering refs containing dynamic fields will upgrade to python.
 
 ### 9.19 search/filter/exceptions.py
 
@@ -1984,7 +1984,7 @@ class TokenKind(Enum):
     OR = "OR"       # or / OR / ||
     NOT = "NOT"     # not / NOT / !
     IN = "IN"       # in / IN
-    SUB = "-"       # 一元负号（不识别为 INT 字面量的一部分）
+    SUB = "-"       # Unary negation (not recognized as part of INT literal)
     EOF = "EOF"
 
 @dataclass(frozen=True)
@@ -2021,7 +2021,7 @@ def tokenize(source: str) -> List[Token]:
 from dataclasses import dataclass
 from typing import Tuple, Union
 
-# ── Literals ────────────────────────────────────────────────
+# -- Literals --------------------------------------------------------
 
 @dataclass(frozen=True)
 class IntLit:
@@ -2049,14 +2049,14 @@ class ListLit:
     elements: Tuple["Literal", ...]
     pos: int
 
-# ── Reference ───────────────────────────────────────────────
+# -- Reference -------------------------------------------------------
 
 @dataclass(frozen=True)
 class FieldRef:
     name: str
     pos: int
 
-# ── Operations ──────────────────────────────────────────────
+# -- Operations ------------------------------------------------------
 
 @dataclass(frozen=True)
 class CmpOp:
@@ -2087,7 +2087,7 @@ class Not:
     operand: "Expr"
     pos: int
 
-# ── Type aliases ────────────────────────────────────────────
+# -- Type aliases ----------------------------------------------------
 
 Literal = Union[IntLit, FloatLit, StringLit, BoolLit]
 
@@ -2097,13 +2097,13 @@ Expr = Union[
 ]
 ```
 
-**关键设计**：
-- 11 个 frozen dataclass，全部值语义、可哈希、自动 `__eq__`
-- 用 `tuple` 不用 `list`（frozen 友好）
-- 没有共同 base class — 用 `Union` + `isinstance` dispatch（与 Operation 一致）
-- 没有方法 — 行为在 backend 里
-- 每节点带 `pos` 用于错误信息溯源
-- 节点命名比 Milvus 简化：单一 `CmpOp`（带 op 字段）替代 Milvus 的 `Equality`/`Relational`
+**Key design decisions**:
+- 11 frozen dataclasses, all value semantics, hashable, automatic `__eq__`
+- Uses `tuple` not `list` (frozen-friendly)
+- No common base class -- uses `Union` + `isinstance` dispatch (consistent with Operation)
+- No methods -- behavior is in the backends
+- Each node carries `pos` for error message source tracing
+- Node naming is simplified compared to Milvus: a single `CmpOp` (with op field) replaces Milvus's `Equality`/`Relational`
 
 ### 9.22 search/filter/parser.py
 
@@ -2114,7 +2114,7 @@ class Parser:
     def parse(self) -> Expr:
         """Parse one expression and verify EOF."""
 
-    # Pratt-style descent (low → high precedence)
+    # Pratt-style descent (low -> high precedence)
     def parse_or(self) -> Expr: ...      # prec 1: a or b or c
     def parse_and(self) -> Expr: ...     # prec 2: a and b and c
     def parse_not(self) -> Expr: ...     # prec 3: not a
@@ -2125,22 +2125,22 @@ def parse_expr(source: str) -> Expr:
     """Public entry. Lex + parse."""
 ```
 
-**优先级表**（与 Milvus Plan.g4 对齐）：
+**Precedence table** (aligned with Milvus Plan.g4):
 
 | Prec | Operator | Associativity |
 |---|---|---|
 | 1 | `or`, `OR`, `\|\|` | left |
 | 2 | `and`, `AND`, `&&` | left |
-| 3 | `not`, `NOT`, `!` (前缀) | right |
-| 4 | `==, !=, <, <=, >, >=` | left（链式比较 parse 接受、semantic 拒绝）|
+| 3 | `not`, `NOT`, `!` (prefix) | right |
+| 4 | `==, !=, <, <=, >, >=` | left (chained comparison is parse-accepted, semantic-rejected) |
 | 4 | `in [...]`, `not in [...]` | non-assoc |
-| 5 | unary `-`（前缀） | right |
+| 5 | unary `-` (prefix) | right |
 | 6 | literal / ident / `(...)` | — |
 
-**与 Milvus 收紧的部分**：
-- `in` 的 RHS 必须是字面量数组（Milvus 接受任意 expr，但实际只用字面量数组）
-- 数组字面量元素必须是字面量（Milvus 接受 expr，F1 只接 literal）
-- F1 不支持算术 / `like` / `is null` / `exists` / `$meta` / 函数调用 — 这些 token 会被 lex 或 parse 阶段拒绝并给出 "Phase F2/F3 will support" 提示
+**Restrictions tightened compared to Milvus**:
+- RHS of `in` must be a literal array (Milvus accepts arbitrary expr, but in practice only literal arrays are used)
+- Array literal elements must be literals (Milvus accepts expr, F1 only accepts literal)
+- F1 does not support arithmetic / `like` / `is null` / `exists` / `$meta` / function calls -- these tokens are rejected at the lex or parse stage with a "Phase F2/F3 will support" hint
 
 ### 9.23 search/filter/semantic.py
 
@@ -2182,26 +2182,26 @@ def compile_expr(expr: Expr, schema: CollectionSchema) -> CompiledExpr:
     """
 ```
 
-**类型推断规则**：
+**Type inference rules**:
 
-| 节点 | 推断类型 | 校验 |
+| Node | Inferred type | Validation |
 |---|---|---|
 | `IntLit` | `int` | — |
 | `FloatLit` | `float` | — |
 | `StringLit` | `string` | — |
 | `BoolLit` | `bool` | — |
-| `ListLit` | `list[T]` | 元素 mutually compatible |
-| `FieldRef` | schema 声明类型 | 必须存在、非保留、非 vector |
-| `CmpOp` | `bool` | 左右类型 compatible |
-| `InOp` | `bool` | field type ≈ list 元素类型 |
-| `And/Or/Not` | `bool` | operand 是 bool |
+| `ListLit` | `list[T]` | Elements are mutually compatible |
+| `FieldRef` | Schema-declared type | Must exist, not reserved, not vector |
+| `CmpOp` | `bool` | Left and right types are compatible |
+| `InOp` | `bool` | Field type is compatible with list element type |
+| `And/Or/Not` | `bool` | Operand is bool |
 
-**Compatible types**：
-- `int ≈ int` ✓
-- `int ≈ float` ✓（晋升）
-- `string ≈ string` ✓
-- `bool ≈ bool` ✓
-- 其他 ✗
+**Compatible types**:
+- `int ~ int` yes
+- `int ~ float` yes (promotion)
+- `string ~ string` yes
+- `bool ~ bool` yes
+- All others: no
 
 ### 9.24 search/filter/eval/arrow_backend.py
 
@@ -2228,14 +2228,14 @@ def evaluate_arrow(
     """
 ```
 
-**Dispatch 表**（每个 AST 节点 → pyarrow.compute 调用）：
+**Dispatch table** (each AST node -> pyarrow.compute call):
 
 | AST | pyarrow operation |
 |---|---|
 | `IntLit / FloatLit / StringLit / BoolLit` | `pa.scalar(value)` |
 | `FieldRef` | `table.column(name)` |
 | `CmpOp(op, l, r)` | `_CMP_KERNELS[op](_eval(l), _eval(r))` |
-| `InOp(field, values, negate)` | `pc.is_in(col, value_set=values)`，`negate` 时 `pc.invert` |
+| `InOp(field, values, negate)` | `pc.is_in(col, value_set=values)`, `negate` -> `pc.invert` |
 | `And(operands)` | `functools.reduce(pc.and_kleene, masks)` |
 | `Or(operands)` | `functools.reduce(pc.or_kleene, masks)` |
 | `Not(operand)` | `pc.invert(_eval(operand))` |
@@ -2249,27 +2249,27 @@ def evaluate_python(
 ) -> pa.BooleanArray:
     """Row-wise interpreter. Slow but flexible.
 
-    用途：
-        - 差分测试基准（arrow_backend / hybrid_backend 的输出必须与之相等）
-        - hybrid_backend 在异构 JSON 类型 / arrow kernel 不兼容时的运行时 fallback
-        - 未来 F3 UDF / 真正动态语义的最终落点
+    Use cases:
+        - Differential test baseline (arrow_backend / hybrid_backend output must match this)
+        - hybrid_backend's runtime fallback for heterogeneous JSON types / arrow kernel incompatibility
+        - Future F3 UDF / truly dynamic semantics ultimate fallback
 
-    F3+ 后不再被 dispatcher 自动选中（含 $meta 的表达式默认走 hybrid_backend）。
+    After F3+, no longer automatically selected by dispatcher ($meta expressions default to hybrid_backend).
 
-    NULL 语义：用 Kleene 三值逻辑实现 AND/OR/NOT，最终结果 None → False。
+    NULL semantics: Uses Kleene three-valued logic for AND/OR/NOT, final result None -> False.
     """
 ```
 
-**Dispatch**：与 arrow_backend 镜像，但每个节点接受 row dict 返回 Python 值：
+**Dispatch**: Mirrors arrow_backend, but each node accepts a row dict and returns a Python value:
 
 | AST | Python operation |
 |---|---|
-| `IntLit` 等 | `node.value` |
+| `IntLit` etc. | `node.value` |
 | `FieldRef` | `row.get(node.name)` |
-| `CmpOp(op, l, r)` | `_CMP_OPS[op](_eval(l, row), _eval(r, row))`，None 传染 |
-| `InOp` | 集合查找 + 可选否定 |
-| `And/Or` | Kleene 三值短路 |
-| `Not` | None 传染 |
+| `CmpOp(op, l, r)` | `_CMP_OPS[op](_eval(l, row), _eval(r, row))`, None propagation |
+| `InOp` | Set lookup + optional negation |
+| `And/Or` | Kleene three-valued short-circuit |
+| `Not` | None propagation |
 
 ### 9.25a search/filter/eval/hybrid_backend.py (F3+)
 
@@ -2309,8 +2309,8 @@ def evaluate(
 ) -> pa.BooleanArray:
     """Backend dispatcher.
 
-    Backend 决策已在 compile_expr 完成、固化在 CompiledExpr.backend 字段；
-    evaluate 热路径上不做重复决策。
+    Backend decision has already been made at compile_expr time and fixed in
+    the CompiledExpr.backend field; evaluate hot path does not repeat the decision.
     """
     if compiled.backend == "arrow":
         return evaluate_arrow(compiled, data)
@@ -2321,30 +2321,30 @@ def evaluate(
     raise ValueError(f"unknown filter backend: {compiled.backend!r}")
 ```
 
-### 9.27 Phase 8 实施分阶段
+### 9.27 Phase 8 Implementation Phases
 
-| Phase | 目标 grammar | Backend |
+| Phase | Target grammar | Backend |
 |---|---|---|
-| **F1** ✅ | Tier 1：`==/!=/<.../in/and/or/not` + 字面量 + 字段引用 + 括号 | 仅 arrow_backend（python_backend 用作差分测试基准） |
-| **F2a** ✅ | + `like` + 算术 (`+ - * / %`) + `is null` | 仍 arrow_backend |
-| **F2b** ✅ | + `$meta["key"]` 动态字段 | 引入 python_backend dispatch（含 $meta 的表达式自动降级） |
-| **F2c** ✅ | + filter LRU cache + `query()` 公开方法 | 与 backend 无关 |
-| **F3+** ✅ | 性能优化：per-batch JSON 预处理 → arrow path；hybrid 取代 python 作 $meta 默认 dispatch | 引入 hybrid_backend |
-| **F3** | + `json_contains` / `array_contains` / UDF / 严格 Milvus 兼容 | 扩展 python_backend；可选 ANTLR parser swap |
+| **F1** done | Tier 1: `==/!=/<.../in/and/or/not` + literals + field references + parentheses | arrow_backend only (python_backend used as differential test baseline) |
+| **F2a** done | + `like` + arithmetic (`+ - * / %`) + `is null` | Still arrow_backend |
+| **F2b** done | + `$meta["key"]` dynamic fields | Introduces python_backend dispatch ($meta expressions auto-downgrade) |
+| **F2c** done | + filter LRU cache + `query()` public method | Backend-independent |
+| **F3+** done | Performance optimization: per-batch JSON preprocessing -> arrow path; hybrid replaces python as default $meta dispatch | Introduces hybrid_backend |
+| **F3** | + `json_contains` / `array_contains` / UDF / strict Milvus compatibility | Extends python_backend; optional ANTLR parser swap |
 
-### 9.28 Phase 8 设计参考
+### 9.28 Phase 8 Design References
 
-- **Milvus Plan.g4**: `internal/parser/planparserv2/Plan.g4`（master 分支）
-- **操作符优先级、关键字大小写、字面量语法均对齐 Milvus**
-- **AST 节点形态借鉴 Milvus PlanNode 概念**，但简化（`CmpOp` 替代 `Equality`/`Relational`）
-- **F1 不追 binary 兼容**——文档化我们的子集，未来 F3 才考虑
-- **F1 选手写 Pratt parser** 而非 ANTLR：F1 grammar 小、错误信息更友好、零依赖。AST 是稳定接口，F3 切 ANTLR 不影响 type checker / backends
+- **Milvus Plan.g4**: `internal/parser/planparserv2/Plan.g4` (master branch)
+- **Operator precedence, keyword case sensitivity, literal syntax all aligned with Milvus**
+- **AST node shape inspired by Milvus PlanNode concepts**, but simplified (`CmpOp` replaces `Equality`/`Relational`)
+- **F1 does not pursue binary compatibility** -- document our subset, consider in future F3
+- **F1 uses hand-written Pratt parser** rather than ANTLR: F1 grammar is small, error messages are friendlier, zero dependencies. AST is the stable interface; switching to ANTLR in F3 does not affect type checker / backends
 
 ---
 
-## 10. Phase 9 索引子系统接口详解
+## 10. Phase 9 Index Subsystem Interface Detailed Descriptions
 
-**目标**：让 `Collection.search` 的检索路径从 NumPy 暴力扫描升级为 ANN，默认 FAISS HNSW。深度设计见 `plan/index-design.md`。
+**Goal**: Upgrade `Collection.search` retrieval path from NumPy brute-force scan to ANN, defaulting to FAISS HNSW. See `plan/index-design.md` for in-depth design.
 
 ### 10.1 index/protocol.py
 
@@ -2357,7 +2357,7 @@ class VectorIndex(ABC):
     """Abstract per-segment vector index.
 
     Implementations: BruteForceIndex, FaissHnswIndex, future FaissIvf*Index.
-    Lifetime: build → save → load → search → close. Indexes are immutable —
+    Lifetime: build -> save -> load -> search -> close. Indexes are immutable --
     no add/remove after build.
     """
 
@@ -2419,10 +2419,10 @@ class IndexSpec:
 
 ```python
 class BruteForceIndex(VectorIndex):
-    """NumPy 实现，零外部依赖。差分测试 baseline + faiss 不可用时 fallback。
+    """NumPy implementation, zero external dependencies. Differential test baseline + fallback when faiss is unavailable.
 
-    内部存全量 vectors，search 时直接调用 search/distance.compute_distances。
-    valid_mask 通过 vectors[mask] 实现。
+    Internally stores full vectors; search directly calls search/distance.compute_distances.
+    valid_mask is implemented via vectors[mask].
     """
 
     @classmethod
@@ -2442,14 +2442,14 @@ import faiss
 import numpy as np
 
 class FaissHnswIndex(VectorIndex):
-    """FAISS HNSW 实现。
+    """FAISS HNSW implementation.
 
-    关键细节：
-    - metric 符号在内部归一化（FAISS L2 是 squared，IP 越大越相似 → 上层
-      统一为"越小越相似"）
-    - cosine：vectors 和 query 都做 L2 normalize，然后调 IndexFlatIP
-    - IDSelectorBitmap 接受 numpy bool mask（packbits little-endian）
-    - faiss.write_index / read_index 持久化
+    Key details:
+    - Metric sign is normalized internally (FAISS L2 is squared, IP is larger-is-more-similar ->
+      upper layer unified to "smaller is more similar")
+    - cosine: both vectors and query are L2 normalized, then use IndexFlatIP
+    - IDSelectorBitmap accepts numpy bool mask (packbits little-endian)
+    - faiss.write_index / read_index for persistence
     """
 
     @classmethod
@@ -2472,37 +2472,37 @@ except ImportError:
     _FAISS_AVAILABLE = False
 
 def build_index_from_spec(spec: IndexSpec, vectors: np.ndarray) -> VectorIndex:
-    """根据 IndexSpec.index_type 选择实现。
+    """Select implementation based on IndexSpec.index_type.
 
     Raises:
-        IndexBackendUnavailableError: 请求 HNSW/IVF 但 faiss 不可用
-        ValueError: index_type 不识别
+        IndexBackendUnavailableError: HNSW/IVF requested but faiss is unavailable
+        ValueError: Unrecognized index_type
     """
 
 def load_index(path: str, spec: IndexSpec, dim: int) -> VectorIndex:
-    """根据 IndexSpec.index_type 反序列化磁盘文件。"""
+    """Deserialize disk file based on IndexSpec.index_type."""
 ```
 
-### 10.6 storage/segment.py 的 Phase 9 扩展
+### 10.6 storage/segment.py Phase 9 Extension
 
 ```python
 class Segment:
-    __slots__ = (..., "index")    # 新增
+    __slots__ = (..., "index")    # New addition
 
     index: Optional[VectorIndex]
 
     def attach_index(self, index: VectorIndex) -> None:
-        """注入索引，幂等。"""
+        """Inject index, idempotent."""
 
     def release_index(self) -> None:
-        """释放索引引用。"""
+        """Release index reference."""
 
     def build_or_load_index(self, spec: IndexSpec, index_dir: str) -> None:
-        """先尝试 load .idx 文件，失败则 build + save。
-        路径约定：indexes/<data_filename_stem>.<index_type_lowercase>.idx"""
+        """First try to load .idx file, falls back to build + save on failure.
+        Path convention: indexes/<data_filename_stem>.<index_type_lowercase>.idx"""
 ```
 
-### 10.7 索引文件命名与路径约定
+### 10.7 Index File Naming and Path Conventions
 
 ```
 data_dir/collections/<col>/partitions/<partition>/
@@ -2512,24 +2512,24 @@ data_dir/collections/<col>/partitions/<partition>/
     └── data_000001_000500.hnsw.idx        # stem + index_type.lower()
 ```
 
-**严格不变量**（架构不变量 §11）：一个 segment 的 .idx 文件名由 segment 文件名 + IndexSpec.index_type 唯一确定，删 segment 必须同时删 .idx。
+**Strict invariant** (architecture invariant section 11): A segment's .idx file name is uniquely determined by segment file name + IndexSpec.index_type; deleting a segment must simultaneously delete its .idx.
 
-### 10.8 Phase 9 实施分阶段
+### 10.8 Phase 9 Implementation Phases
 
-| Phase | 内容 | 工作量 |
+| Phase | Content | Effort |
 |---|---|---|
-| **9.1** | 补齐 pymilvus quickstart 前置 API（Collection 5 个新方法 + db.get_collection_stats） | S |
-| **9.2** | VectorIndex protocol + BruteForceIndex + Segment.index + execute_search_with_index 路径 | M |
-| **9.3** | IndexSpec + Manifest v2 + Collection.create_index/drop_index/load/release/has_index/get_index_info + _load_state 状态机 | M |
-| **9.4** | Index 文件持久化 + flush/compaction/recovery 钩子 + 孤儿清理 | M |
-| **9.5** | FaissHnswIndex + factory + [faiss] extras + metric 对齐 + 差分测试 | L |
-| **9.6** | m9 demo + 长跑测试 | S |
+| **9.1** | Fill in pymilvus quickstart prerequisite APIs (5 new Collection methods + db.get_collection_stats) | S |
+| **9.2** | VectorIndex protocol + BruteForceIndex + Segment.index + execute_search_with_index path | M |
+| **9.3** | IndexSpec + Manifest v2 + Collection.create_index/drop_index/load/release/has_index/get_index_info + _load_state state machine | M |
+| **9.4** | Index file persistence + flush/compaction/recovery hooks + orphan cleanup | M |
+| **9.5** | FaissHnswIndex + factory + [faiss] extras + metric alignment + differential tests | L |
+| **9.6** | m9 demo + long-run tests | S |
 
 ---
 
-## 11. Phase 10 gRPC 适配层接口详解
+## 11. Phase 10 gRPC Adapter Layer Interface Detailed Descriptions
 
-**目标**：让 pymilvus 客户端无需修改代码连接 MilvusLite。深度设计见 `plan/grpc-adapter-design.md`。
+**Goal**: Allow pymilvus clients to connect to MilvusLite without any code changes. See `plan/grpc-adapter-design.md` for in-depth design.
 
 ### 11.1 adapter/grpc/server.py
 
@@ -2540,37 +2540,37 @@ def run_server(
     port: int = 19530,
     max_workers: int = 10,
 ) -> None:
-    """启动 gRPC server，阻塞直到 KeyboardInterrupt。"""
+    """Start gRPC server, blocks until KeyboardInterrupt."""
 ```
 
-### 11.2 adapter/grpc/servicer.py — RPC 映射表
+### 11.2 adapter/grpc/servicer.py — RPC Mapping Table
 
-| RPC | engine API | 备注 |
+| RPC | engine API | Notes |
 |---|---|---|
 | `CreateCollection` | `db.create_collection(name, schema)` | translator: schema.py |
 | `DropCollection` | `db.drop_collection(name)` | |
 | `HasCollection` | `db.has_collection(name)` | |
-| `DescribeCollection` | `db.get_collection(name).describe()` + schema 序列化 | |
+| `DescribeCollection` | `db.get_collection(name).describe()` + schema serialization | |
 | `ShowCollections` | `db.list_collections()` | |
-| `GetCollectionStatistics` | `col.num_entities` | row_count 字段 |
+| `GetCollectionStatistics` | `col.num_entities` | row_count field |
 | `CreatePartition` | `col.create_partition(name)` | |
 | `DropPartition` | `col.drop_partition(name)` | |
 | `HasPartition` | `col.has_partition(name)` | |
 | `ShowPartitions` | `col.list_partitions()` | |
-| `Insert` / `Upsert` | `col.insert(records, partition)` | translator: records.py — FieldData 列行转置 |
+| `Insert` / `Upsert` | `col.insert(records, partition)` | translator: records.py — FieldData column-row transposition |
 | `Delete(ids=)` | `col.delete(pks, partition)` | |
-| `Delete(filter=)` | `col.query(filter) → 提取 pk → col.delete` | |
-| `Query` | `col.query(expr, output_fields, partition_names, limit)` 或 `col.get(pks, ...)` | id 表达式走 get |
+| `Delete(filter=)` | `col.query(filter) -> extract pk -> col.delete` | |
+| `Query` | `col.query(expr, output_fields, partition_names, limit)` or `col.get(pks, ...)` | id expression goes to get |
 | `Search` | `col.search(query_vectors, top_k, metric_type, partition_names, expr, output_fields)` | translator: search.py + result.py |
 | `CreateIndex` | `col.create_index(field, params)` | translator: index.py |
 | `DropIndex` | `col.drop_index(field)` | |
 | `DescribeIndex` | `col.get_index_info()` | |
 | `LoadCollection` | `col.load()` | |
 | `ReleaseCollection` | `col.release()` | |
-| `GetLoadState` | `col.load_state` 枚举映射 | |
+| `GetLoadState` | `col.load_state` enum mapping | |
 | `Flush` | `col.flush()` | |
 | `ListDatabases` | stub returns `["default"]` | |
-| Aliases / RBAC / Backup / Replica / ResourceGroup / etc | — | UNIMPLEMENTED + 友好消息 |
+| Aliases / RBAC / Backup / Replica / ResourceGroup / etc | — | UNIMPLEMENTED + friendly message |
 
 ### 11.3 adapter/grpc/translators/records.py
 
@@ -2579,10 +2579,10 @@ def fields_data_to_records(
     fields_data: List["FieldData"],
     num_rows: int,
 ) -> List[Dict[str, Any]]:
-    """Milvus 列式 → engine 行式。
+    """Milvus columnar -> engine row-wise.
 
-    支持类型：INT64 / INT32 / VARCHAR / BOOL / FLOAT / DOUBLE / FLOAT_VECTOR / JSON
-    不支持：BinaryVector / SparseFloatVector / Float16/BFloat16 → UnsupportedFieldTypeError
+    Supported types: INT64 / INT32 / VARCHAR / BOOL / FLOAT / DOUBLE / FLOAT_VECTOR / JSON
+    Unsupported: BinaryVector / SparseFloatVector / Float16/BFloat16 -> UnsupportedFieldTypeError
     """
 
 def records_to_fields_data(
@@ -2590,7 +2590,7 @@ def records_to_fields_data(
     schema: "CollectionSchema",
     output_fields: Optional[List[str]] = None,
 ) -> List["FieldData"]:
-    """engine 行式 → Milvus 列式（用于 Query/Get/Search 返回）。"""
+    """engine row-wise -> Milvus columnar (for Query/Get/Search return)."""
 ```
 
 ### 11.4 adapter/grpc/errors.py
@@ -2611,23 +2611,23 @@ _EXCEPTION_TO_CODE = {
 }
 
 def to_grpc_status(exc: MilvusLiteError) -> dict:
-    """异常 → grpc Status code/reason，对齐 Milvus 2.3 numeric code。"""
+    """Exception -> grpc Status code/reason, aligned with Milvus 2.3 numeric codes."""
 ```
 
-### 11.5 Phase 10 实施分阶段
+### 11.5 Phase 10 Implementation Phases
 
-| Phase | 内容 | 工作量 |
+| Phase | Content | Effort |
 |---|---|---|
-| **10.1** | proto 拉取 + stub 生成 + 空 servicer + run_server + CLI | M |
-| **10.2** | Collection 生命周期 RPC + translators/schema.py | M |
-| **10.3** | insert/get/delete/query RPC + translators/records.py 双向转置 | L |
+| **10.1** | proto pull + stub generation + empty servicer + run_server + CLI | M |
+| **10.2** | Collection lifecycle RPC + translators/schema.py | M |
+| **10.3** | insert/get/delete/query RPC + translators/records.py bidirectional transposition | L |
 | **10.4** | search + create_index + load + release RPC + translators/{search,result,expr,index}.py | L |
-| **10.5** | Partition + flush + stats + m10 demo + pymilvus quickstart 冒烟 | M |
-| **10.6** | 错误码映射 + UNIMPLEMENTED 友好消息 | S |
+| **10.5** | Partition + flush + stats + m10 demo + pymilvus quickstart smoke test | M |
+| **10.6** | Error code mapping + UNIMPLEMENTED friendly messages | S |
 
-### 11.6 Phase 10 完成标志
+### 11.6 Phase 10 Completion Criteria
 
-- pymilvus quickstart 全流程跑通（create → insert → create_index → load → search → query → delete → release → drop）
-- recall parity：grpc search 与 engine 直接 search top-k 一致
-- 不支持的 RPC 返回 `UNIMPLEMENTED` + 友好消息（不 silent fail）
-- m10 demo 通过
+- pymilvus quickstart full flow passes (create -> insert -> create_index -> load -> search -> query -> delete -> release -> drop)
+- recall parity: grpc search and engine direct search top-k are identical
+- Unsupported RPCs return `UNIMPLEMENTED` + friendly message (no silent fail)
+- m10 demo passes
