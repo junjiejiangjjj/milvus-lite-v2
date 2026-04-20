@@ -3,26 +3,26 @@
 </div>
 
 <h3 align="center">
-    <p>Milvus Lite v2 &mdash; The next-generation lightweight Milvus</p>
+    <p>Milvus Lite &mdash; The next-generation lightweight Milvus</p>
 </h3>
 
 <p align="center">
-    <a href="https://github.com/junjiejiangjjj/milvus-lite-v2/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
+    <a href="https://github.com/milvus-io/milvus-lite/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
     <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python">
     <img src="https://img.shields.io/badge/built%20with-vibe%20coding-ff69b4" alt="Vibe Coding">
 </p>
 
 # Introduction
 
-Milvus Lite v2 is the next-generation lightweight version of [Milvus](https://github.com/milvus-io/milvus), rebuilt from scratch in **pure Python** to replace the original [milvus-lite](https://github.com/milvus-io/milvus-lite).
+Milvus Lite is the next-generation lightweight version of [Milvus](https://github.com/milvus-io/milvus), rebuilt from scratch in **pure Python** to replace the original [milvus-lite](https://github.com/milvus-io/milvus-lite).
 
-The original milvus-lite wraps the full C++ Milvus core via CGo bindings, inheriting its heavy build chain, platform restrictions (no Windows, no Alpine), and opaque debugging experience. Milvus Lite v2 takes a different approach: a clean-room Python implementation with an LSM-tree storage engine, delivering the same pymilvus-compatible API in a package that is easy to install, inspect, and extend.
+The original milvus-lite wraps the full C++ Milvus core via CGo bindings, inheriting its heavy build chain, platform restrictions (no Windows, no Alpine), and opaque debugging experience. Milvus Lite takes a different approach: a clean-room Python implementation with an LSM-tree storage engine, delivering the same pymilvus-compatible API in a package that is easy to install, inspect, and extend.
 
 This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 2100+ test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
 
 ### Why replace milvus-lite?
 
-| | milvus-lite (v1) | Milvus Lite v2 |
+| | milvus-lite (v1) | Milvus Lite |
 |---|---|---|
 | Language | C++ core + CGo + Python wrapper | Pure Python |
 | Install | `pip install` downloads ~200MB binary | `pip install` pulls lightweight Python packages |
@@ -40,7 +40,7 @@ This project is entirely **vibe coded** — designed, implemented, and tested th
 # Installation
 
 ```bash
-pip install litevecdb
+pip install milvus-lite
 ```
 
 Default install includes FAISS (HNSW/IVF_FLAT indexes), pymilvus, and gRPC — everything needed for `MilvusClient("./demo.db")` to work out of the box.
@@ -48,16 +48,16 @@ Default install includes FAISS (HNSW/IVF_FLAT indexes), pymilvus, and gRPC — e
 > **Note:** If you have the original `milvus-lite` installed, uninstall it first to avoid conflicts — both packages provide the `milvus_lite` Python module:
 > ```bash
 > pip uninstall milvus-lite -y
-> pip install litevecdb
+> pip install milvus-lite
 > ```
 
-> **Important:** `.db` files created by milvus-lite v1 are **not compatible** with Milvus Lite v2. The v1 storage format uses SQLite + C++ internal structures, while v2 uses a completely different LSM-tree engine (WAL + Parquet). You must re-import your data into a new v2 database — there is no automatic migration.
+> **Important:** `.db` files created by milvus-lite v1 are **not compatible** with Milvus Lite. The v1 storage format uses SQLite + C++ internal structures, while v2 uses a completely different LSM-tree engine (WAL + Parquet). You must re-import your data into a new v2 database — there is no automatic migration.
 
 For development:
 
 ```bash
-git clone https://github.com/junjiejiangjjj/milvus-lite-v2.git
-cd milvus-lite-v2
+git clone https://github.com/milvus-io/milvus-lite.git
+cd milvus-lite
 make dev                    # create .venv + install with dev deps
 source .venv/bin/activate
 ```
@@ -109,14 +109,14 @@ client.delete("demo", ids=[0, 1, 2])
 client.drop_collection("demo")
 ```
 
-This is a **drop-in replacement** for milvus-lite — just `pip install litevecdb` and your existing `MilvusClient("./xxx.db")` code works without changes.
+This is a **drop-in replacement** for milvus-lite — just `pip install milvus-lite` and your existing `MilvusClient("./xxx.db")` code works without changes.
 
 ### Option 2: Standalone gRPC server
 
 For multi-client or long-running service scenarios, start the server explicitly:
 
 ```bash
-litevecdb-grpc --data-dir ./data --port 19530
+milvus-lite-server --data-dir ./data --port 19530
 ```
 
 ```python
@@ -129,7 +129,7 @@ client = MilvusClient(uri="http://localhost:19530")
 ### Option 3: Embedded engine (no server, no gRPC)
 
 ```python
-from litevecdb import LiteVecDB, CollectionSchema, FieldSchema, DataType
+from milvus_lite import MilvusLite, CollectionSchema, FieldSchema, DataType
 
 schema = CollectionSchema(fields=[
     FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
@@ -137,7 +137,7 @@ schema = CollectionSchema(fields=[
     FieldSchema(name="category", dtype=DataType.VARCHAR, max_length=64),
 ])
 
-with LiteVecDB("./data") as db:
+with MilvusLite("./data") as db:
     col = db.create_collection("docs", schema)
     col.insert([
         {"id": 1, "vec": [0.1] * 128, "category": "tech"},
@@ -217,7 +217,7 @@ results = client.hybrid_search(
 Define a `TEXT_EMBEDDING` function to auto-generate dense vectors from text fields during insert, and auto-embed text queries during search:
 
 ```python
-from litevecdb import LiteVecDB, CollectionSchema, FieldSchema, DataType, Function, FunctionType
+from milvus_lite import MilvusLite, CollectionSchema, FieldSchema, DataType, Function, FunctionType
 
 schema = CollectionSchema(fields=[
     FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
@@ -231,7 +231,7 @@ schema = CollectionSchema(fields=[
     ),
 ])
 
-with LiteVecDB("./data") as db:
+with MilvusLite("./data") as db:
     col = db.create_collection("docs", schema)
 
     # Insert text only — vectors are auto-generated via OpenAI API
@@ -261,7 +261,7 @@ Requires `OPENAI_API_KEY` environment variable or `api_key` param. Uses `urllib`
 Add a `RERANK` function with an external provider to re-score search results using a cross-encoder model:
 
 ```python
-from litevecdb import Function, FunctionType
+from milvus_lite import Function, FunctionType
 
 # Add to schema alongside TEXT_EMBEDDING
 Function(
@@ -368,7 +368,7 @@ Benchmarked using the Cohere 100K dataset from [VectorDBBench](https://github.co
 | **Search latency P99** | 27.62 ms |
 | **Recall@10** | **91.18%** |
 
-> As a pure-Python embedded vector database, LiteVecDB delivers solid search quality (91% recall) with stable latency (P50 to P95 gap is only ~1ms). Batched queries (nq=10) reach 340+ VPS (vectors per second) thanks to amortized RPC overhead and FAISS HNSW batch processing.
+> As a pure-Python embedded vector database, Milvus Lite delivers solid search quality (91% recall) with stable latency (P50 to P95 gap is only ~1ms). Batched queries (nq=10) reach 340+ VPS (vectors per second) thanks to amortized RPC overhead and FAISS HNSW batch processing.
 >
 > **Note on QPS vs VPS:** `QPS (nq=1)` counts one query per RPC. `VPS (nq=10)` counts total vector queries processed per second — these are not directly comparable because batching amortizes RPC and serialization overhead.
 
@@ -446,12 +446,12 @@ No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human wit
 pytest                                  # 2100+ tests
 pytest tests/adapter/ -k "grpc"         # gRPC integration tests
 pytest tests/index/test_index_differential.py  # recall validation
-pytest --cov=litevecdb                  # with coverage
+pytest --cov=milvus_lite                  # with coverage
 ```
 
 # Contributing
 
-Issues and pull requests are welcome at [GitHub](https://github.com/junjiejiangjjj/milvus-lite-v2).
+Issues and pull requests are welcome at [GitHub](https://github.com/milvus-io/milvus-lite).
 
 # License
 
