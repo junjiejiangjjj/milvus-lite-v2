@@ -9,7 +9,7 @@ pymilvus 提供两种 SearchIterator 实现：
 
 ### 当前状态
 
-LiteVecDB 已支持 V1 所依赖的全部底层能力：
+MilvusLite 已支持 V1 所依赖的全部底层能力：
 - ✅ Range Search（`radius` + `range_filter`）— Phase 14
 - ✅ Offset 分页 — Phase 17
 - ✅ PK `not in [...]` 过滤表达式 — Phase 8
@@ -109,7 +109,7 @@ message SearchResultData {
 
 ---
 
-## 3. LiteVecDB 设计方案
+## 3. MilvusLite 设计方案
 
 ### 3.1 核心思路
 
@@ -184,7 +184,7 @@ iterator.next()  → 返回 batch 2 (distance > 0.5)
 - `snapshot_seq` = 读快照的版本上界（等价于经典 MVCC 的 `read_ts`）
 - `seq_mask = (seqs <= snapshot_seq)` = 版本可见性判定
 
-LiteVecDB 的 `_seq` 机制天然具备 MVCC 能力，此前只用于 dedup 和 tombstone 判定，这里扩展为快照读。
+MilvusLite 的 `_seq` 机制天然具备 MVCC 能力，此前只用于 dedup 和 tombstone 判定，这里扩展为快照读。
 
 基于这个底层能力，Consistency Levels 理论上可以实现：
 - **Strong**：`snapshot_seq = current_seq`（当前默认行为，单进程同步天然满足）
@@ -289,7 +289,7 @@ def _apply_last_bound(hits: List[dict], last_bound: float) -> List[dict]:
 2. 过滤 `distance ≤ last_bound`
 3. 截取前 `batch_size` 条
 
-over-fetch 的余量：Milvus C++ 层的做法是让索引迭代器自然跳过 ≤ last_bound 的结果（HNSW 图遍历中直接跳过）。LiteVecDB 的 FAISS 不支持这种定制，所以用 over-fetch + post-filter 替代。over-fetch 倍率设为 2x（即 `top_k = batch_size * 2`），如果过滤后不足 batch_size，不重试——返回实际数量，客户端自行判断是否继续。
+over-fetch 的余量：Milvus C++ 层的做法是让索引迭代器自然跳过 ≤ last_bound 的结果（HNSW 图遍历中直接跳过）。MilvusLite 的 FAISS 不支持这种定制，所以用 over-fetch + post-filter 替代。over-fetch 倍率设为 2x（即 `top_k = batch_size * 2`），如果过滤后不足 batch_size，不重试——返回实际数量，客户端自行判断是否继续。
 
 ### 4.4 Servicer 改动
 

@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-LiteVecDB Phase 9 引入向量索引（vector index），把 `Collection.search` 的检索路径从 NumPy 暴力扫描升级为 ANN（Approximate Nearest Neighbor）检索。**默认实现是 FAISS HNSW**，同时保留 BruteForceIndex 作为差分基准 + 无依赖兜底。
+MilvusLite Phase 9 引入向量索引（vector index），把 `Collection.search` 的检索路径从 NumPy 暴力扫描升级为 ANN（Approximate Nearest Neighbor）检索。**默认实现是 FAISS HNSW**，同时保留 BruteForceIndex 作为差分基准 + 无依赖兜底。
 
 **为什么现在做**：
 - Phase 8 标量过滤系统建立了 `bitmap pipeline + filter_mask` 抽象，FAISS 的 `IDSelectorBitmap` 与之天然同构 — Phase 9 一次性把这条管线接通
@@ -61,7 +61,7 @@ LiteVecDB Phase 9 引入向量索引（vector index），把 `Collection.search`
 
 `BruteForceIndex` 不是临时的占位实现，而是一个**长期保留**的一等公民：
 
-1. **零依赖兜底**：用户不装 faiss-cpu 时仍能用 LiteVecDB（性能受限但功能完整）
+1. **零依赖兜底**：用户不装 faiss-cpu 时仍能用 MilvusLite（性能受限但功能完整）
 2. **差分测试基准**：`tests/index/test_index_differential.py` 用 BruteForceIndex 作为 groundtruth，验证 FaissHnswIndex 的 recall@10 ≥ 0.95
 3. **小 segment 实际选择**：低于阈值的 segment 实际就用它
 
@@ -107,7 +107,7 @@ LiteVecDB Phase 9 引入向量索引（vector index），把 `Collection.search`
 ### 3.1 protocol 定义
 
 ```python
-# litevecdb/index/protocol.py
+# milvus_lite/index/protocol.py
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
@@ -188,7 +188,7 @@ class VectorIndex(ABC):
 ### 3.2 IndexSpec
 
 ```python
-# litevecdb/index/spec.py
+# milvus_lite/index/spec.py
 
 from dataclasses import dataclass, field
 from typing import Dict, Optional
@@ -222,7 +222,7 @@ class IndexSpec:
 ### 4.1 Segment 改动
 
 ```python
-# litevecdb/storage/segment.py
+# milvus_lite/storage/segment.py
 
 class Segment:
     __slots__ = (
@@ -274,7 +274,7 @@ class Segment:
 ### 4.2 Collection 改动
 
 ```python
-# litevecdb/engine/collection.py
+# milvus_lite/engine/collection.py
 
 class Collection:
     def __init__(self, ...):
@@ -367,7 +367,7 @@ class Collection:
 - 新路径内部按 segment 分别召回，每个 segment 看自己有没有 index：有就用 index，没有就走 brute-force
 
 ```python
-# litevecdb/search/executor_indexed.py  (or extend executor.py)
+# milvus_lite/search/executor_indexed.py  (or extend executor.py)
 
 def execute_search_with_index(
     query_vectors: np.ndarray,
@@ -408,7 +408,7 @@ def execute_search_with_index(
 ### 4.4 flush / compaction 钩子
 
 ```python
-# litevecdb/engine/flush.py — Step 8 (new)
+# milvus_lite/engine/flush.py — Step 8 (new)
 
 def execute_flush(collection):
     ... # Steps 1-7 unchanged
@@ -422,7 +422,7 @@ def execute_flush(collection):
 ```
 
 ```python
-# litevecdb/engine/compaction.py — at end of run_compaction
+# milvus_lite/engine/compaction.py — at end of run_compaction
 
 def run_compaction(collection, ...):
     ...
@@ -441,7 +441,7 @@ def run_compaction(collection, ...):
 ### 4.5 recovery 改动
 
 ```python
-# litevecdb/engine/recovery.py
+# milvus_lite/engine/recovery.py
 
 def recover(collection):
     ... # Steps 1-5 unchanged
@@ -459,7 +459,7 @@ def recover(collection):
 ### 4.6 Manifest schema bump
 
 ```python
-# litevecdb/storage/manifest.py
+# milvus_lite/storage/manifest.py
 
 # Bump format_version from 1 to 2 to add index_spec support.
 # Backward-compat: old manifests without index_spec field load with
@@ -527,7 +527,7 @@ data_dir/
 
 ### 6.1 Metric 符号对齐（最大坑）
 
-| Metric | FAISS 内部约定 | LiteVecDB 上层约定 | 转换 |
+| Metric | FAISS 内部约定 | MilvusLite 上层约定 | 转换 |
 |---|---|---|---|
 | L2 | squared L2（越小越相似） | raw L2（越小越相似） | `dist = sqrt(faiss_dist)` |
 | IP | dot product（越大越相似） | -dot（越小越相似） | `dist = -faiss_dist` |
@@ -593,7 +593,7 @@ loaded = faiss.read_index(path)
 faiss = ["faiss-cpu>=1.7.4"]
 ```
 
-并在 `litevecdb/index/factory.py` 用 try-import 模式：
+并在 `milvus_lite/index/factory.py` 用 try-import 模式：
 
 ```python
 try:
@@ -607,7 +607,7 @@ def build_index_from_spec(spec: IndexSpec, vectors: np.ndarray) -> VectorIndex:
         if not _FAISS_AVAILABLE:
             raise IndexBackendUnavailableError(
                 f"index_type={spec.index_type} requires faiss-cpu; "
-                "install with `pip install litevecdb[faiss]`"
+                "install with `pip install milvus_lite[faiss]`"
             )
         ...
     elif spec.index_type == "BRUTE_FORCE":
@@ -745,7 +745,7 @@ def test_faiss_hnsw_recall_vs_brute_force(dim, n, metric):
 def test_collection_search_index_path_matches_brute_force(tmp_path):
     """The full Collection.search going through index path returns the
     same top-k as if we forced brute-force everywhere."""
-    db = LiteVecDB(str(tmp_path))
+    db = MilvusLite(str(tmp_path))
     col = db.create_collection("test", schema=...)
     col.insert([...])  # 1000 records
     col.flush()
@@ -776,7 +776,7 @@ def test_collection_search_index_path_matches_brute_force(tmp_path):
 
 | 子阶段 | 内容 | 完成标志 | 工作量 |
 |---|---|---|---|
-| **9.1** | 补齐 pymilvus quickstart 前置 API：`Collection.create_partition / drop_partition / list_partitions / num_entities / describe` + `search(output_fields=...)` + `LiteVecDB.get_collection_stats` | 6 个新方法 + 测试齐全；不引入任何 index 概念 | S |
+| **9.1** | 补齐 pymilvus quickstart 前置 API：`Collection.create_partition / drop_partition / list_partitions / num_entities / describe` + `search(output_fields=...)` + `MilvusLite.get_collection_stats` | 6 个新方法 + 测试齐全；不引入任何 index 概念 | S |
 | **9.2** | `VectorIndex` protocol + `BruteForceIndex` + 接入 `Segment.index` + 新 `execute_search_with_index` 路径（仍走 brute-force 实现） | 全部老搜索测试在新路径下通过；差分测试 brute-force-via-index ≡ 老 execute_search | M |
 | **9.3** | `IndexSpec` + `Manifest` v2 升级 + `Collection.create_index / drop_index / load / release / has_index / get_index_info` + `_load_state` 状态机 + `CollectionNotLoadedError` | `col.create_index → col.load → col.search → col.release → col.search raise` 全链路通；manifest v1→v2 兼容测试通 | M |
 | **9.4** | Index 文件持久化（`indexes/<stem>.<type>.idx`）+ flush / compaction / recovery 钩子 + 孤儿 .idx 清理 | Collection 重启 → load → search 等价；compaction 后无孤儿 .idx；崩溃注入测试通 | M |

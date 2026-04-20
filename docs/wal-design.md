@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-WAL 是 LiteVecDB 崩溃安全的核心保障。任何写入在进入 MemTable 之前，必须先持久化到 WAL。
+WAL 是 MilvusLite 崩溃安全的核心保障。任何写入在进入 MemTable 之前，必须先持久化到 WAL。
 系统崩溃后，通过重放 WAL 可以恢复 MemTable 中未 flush 的数据。
 
 **设计目标**：
@@ -954,7 +954,7 @@ def _cleanup_old_wals(wal_dir: str, up_to_number: int) -> None:
 ### 13.1 Upsert 不是 Delete + Insert
 
 传统数据库的 upsert 通常实现为"先删后插"，涉及两步写入。
-LiteVecDB 采用 LSM-Tree 风格，**upsert 纯粹是一次 insert，只写 `wal_data`，不碰 `wal_delta`**。
+MilvusLite 采用 LSM-Tree 风格，**upsert 纯粹是一次 insert，只写 `wal_data`，不碰 `wal_delta`**。
 
 ```
 Insert("doc_1", new_data)   ← PK "doc_1" 已存在于磁盘 Parquet 中
@@ -1473,7 +1473,7 @@ search/
 ### 17.2 更新后的完整结构
 
 ```
-litevecdb/
+milvus_lite/
 ├── storage/
 │   ├── wal.py           # WAL 读写
 │   ├── memtable.py      # 内存缓冲（含搜索支持）
@@ -2208,7 +2208,7 @@ Compaction 在 Partition 内部的 Segment 间合并，**不处理跨 Partition 
 | Discussion #18201 | What happens if I insert data with the same id several times? | query 返回第一个；search 可能返回多个同 PK |
 | PR #10967 | Remove primary key duplicated query result on proxy | Proxy 层 post-reduce 去重实现 |
 
-### 23.6 对 LiteVecDB 的设计启示
+### 23.6 对 MilvusLite 的设计启示
 
 **PK 唯一性范围有三种选择**：
 
@@ -2221,7 +2221,7 @@ Compaction 在 Partition 内部的 Segment 间合并，**不处理跨 Partition 
 **我们选择方案 A，且已经天然实现了**：
 
 ```
-LiteVecDB 的 _seq 全局去重机制天然提供 Collection 级 PK 唯一性：
+MilvusLite 的 _seq 全局去重机制天然提供 Collection 级 PK 唯一性：
 
 1. insert 时不需要额外检查
    → 直接写入，不查旧 Partition
@@ -2241,7 +2241,7 @@ LiteVecDB 的 _seq 全局去重机制天然提供 Collection 级 PK 唯一性：
 **这是比 Milvus 更强的语义保证，且不需要额外开销**：
 
 ```
-                        Milvus                     LiteVecDB
+                        Milvus                     MilvusLite
                         ────────                   ──────────
 PK 唯一性范围            不保证                      Collection 级（跨 Partition）
 upsert 跨 Partition     不处理（只在目标 Partition    _seq 去重自动处理

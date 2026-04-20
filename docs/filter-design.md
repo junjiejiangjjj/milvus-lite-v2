@@ -2,12 +2,12 @@
 
 ## 1. 概述
 
-LiteVecDB Phase 8 引入 Milvus-style 标量过滤表达式系统，让 `Collection.search` /
+MilvusLite Phase 8 引入 Milvus-style 标量过滤表达式系统，让 `Collection.search` /
 `get` / `query` 接受字符串形式的谓词表达式（如 `"age > 18 and category == 'tech'"`），
 打通"向量召回 + 标量过滤"的混合查询。
 
 **为什么自己写**：pymilvus 只是把表达式字符串透传给 Milvus 服务端，所有 lex/parse/eval
-都在服务端完成。LiteVecDB 是嵌入式的，没有"服务端"，必须自己实现完整的 lexer + parser
+都在服务端完成。MilvusLite 是嵌入式的，没有"服务端"，必须自己实现完整的 lexer + parser
 + type checker + evaluator。
 
 **为什么"Milvus-inspired"而非 binary 兼容**：
@@ -221,7 +221,7 @@ left side is int (field 'age'), right side is string
 ```
 
 实现要点：
-- 所有异常继承 `LiteVecDBError`，user 可以一把 catch
+- 所有异常继承 `MilvusLiteError`，user 可以一把 catch
 - 异常带 `source: str` + `pos: int`，`__str__` 自动渲染 caret
 - "did you mean" 用 `difflib.get_close_matches`（标准库）
 - 每个错误指出**字段名**和**类型**，不只是"type mismatch"
@@ -456,7 +456,7 @@ class Collection:
         """Pure scalar query — no vector. Returns all matching rows."""
 
     def _compile_filter(self, expr_str: str) -> CompiledExpr:
-        from litevecdb.search.filter import parse_expr, compile_expr
+        from milvus_lite.search.filter import parse_expr, compile_expr
         return compile_expr(parse_expr(expr_str), self._schema)
 ```
 

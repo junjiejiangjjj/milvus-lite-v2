@@ -1,9 +1,9 @@
-# LiteVecDB 代码模块设计
+# MilvusLite 代码模块设计
 
 ## 1. 顶层 Package 划分
 
 ```
-litevecdb/
+milvus_lite/
 ├── schema/          # 数据模型与类型系统
 ├── storage/         # 存储层：持久化 + 内存缓冲
 ├── engine/          # 引擎层：核心逻辑编排
@@ -26,7 +26,7 @@ lite-v2/
 ├── modules.md
 ├── CLAUDE.md
 │
-├── litevecdb/
+├── milvus_lite/
 │   ├── __init__.py                 # 公共 API 导出
 │   ├── constants.py                # 全局常量
 │   ├── exceptions.py               # 异常层级
@@ -88,10 +88,10 @@ lite-v2/
 │   │       ├── __init__.py
 │   │       ├── server.py           #   run_server(data_dir, host, port)
 │   │       ├── servicer.py         #   MilvusServicer — 所有 RPC 实现
-│   │       ├── cli.py              #   python -m litevecdb.adapter.grpc 入口
-│   │       ├── errors.py           #   LiteVecDBError → grpc Status 映射
+│   │       ├── cli.py              #   python -m milvus_lite.adapter.grpc 入口
+│   │       ├── errors.py           #   MilvusLiteError → grpc Status 映射
 │   │       ├── translators/
-│   │       │   ├── schema.py       #   Milvus FieldSchema ↔ LiteVecDB FieldSchema
+│   │       │   ├── schema.py       #   Milvus FieldSchema ↔ MilvusLite FieldSchema
 │   │       │   ├── records.py      #   FieldData (列式) ↔ list[dict] (行式) 转置
 │   │       │   ├── search.py       #   SearchRequest 解析
 │   │       │   ├── result.py       #   engine 结果 → SearchResults proto
@@ -105,7 +105,7 @@ lite-v2/
 │   │           └── README.md       #   source commit reference
 │   │
 │   └── db.py                       # ══ DB 层 ══
-│                                    #   LiteVecDB 类 (create/get/drop/list_collection, get_collection_stats, close)
+│                                    #   MilvusLite 类 (create/get/drop/list_collection, get_collection_stats, close)
 │
 ├── tests/
 │   ├── conftest.py                 # 共享 fixtures: 临时目录, 示例 Schema, 随机向量生成器
@@ -227,7 +227,7 @@ lite-v2/
 
 ```python
 # schema/__init__.py
-from litevecdb.schema.types import DataType, FieldSchema, CollectionSchema
+from milvus_lite.schema.types import DataType, FieldSchema, CollectionSchema
 ```
 
 ### 3.2 storage/ — 存储层
@@ -245,12 +245,12 @@ from litevecdb.schema.types import DataType, FieldSchema, CollectionSchema
 
 ```python
 # storage/__init__.py
-from litevecdb.storage.wal import WAL
-from litevecdb.storage.memtable import MemTable
-from litevecdb.storage.data_file import write_data_file, read_data_file
-from litevecdb.storage.delta_file import write_delta_file, read_delta_file
-from litevecdb.storage.delta_index import DeltaIndex
-from litevecdb.storage.manifest import Manifest
+from milvus_lite.storage.wal import WAL
+from milvus_lite.storage.memtable import MemTable
+from milvus_lite.storage.data_file import write_data_file, read_data_file
+from milvus_lite.storage.delta_file import write_delta_file, read_delta_file
+from milvus_lite.storage.delta_index import DeltaIndex
+from milvus_lite.storage.manifest import Manifest
 ```
 
 ### 3.3 engine/ — 引擎层
@@ -267,7 +267,7 @@ from litevecdb.storage.manifest import Manifest
 
 ```python
 # engine/__init__.py
-from litevecdb.engine.collection import Collection
+from milvus_lite.engine.collection import Collection
 ```
 
 **flush.py 与 collection.py 的关系**：
@@ -294,9 +294,9 @@ from litevecdb.engine.collection import Collection
 
 ```python
 # search/__init__.py
-from litevecdb.search.executor import execute_search
-from litevecdb.search.assembler import assemble_candidates
-from litevecdb.search.filter import (
+from milvus_lite.search.executor import execute_search
+from milvus_lite.search.assembler import assemble_candidates
+from milvus_lite.search.filter import (
     parse_expr, compile_expr, evaluate,
     FilterError, FilterParseError, FilterFieldError, FilterTypeError,
 )
@@ -324,12 +324,12 @@ from litevecdb.search.filter import (
 
 ```python
 # index/__init__.py
-from litevecdb.index.protocol import VectorIndex
-from litevecdb.index.spec import IndexSpec
-from litevecdb.index.brute_force import BruteForceIndex
-from litevecdb.index.factory import build_index_from_spec, load_index
+from milvus_lite.index.protocol import VectorIndex
+from milvus_lite.index.spec import IndexSpec
+from milvus_lite.index.brute_force import BruteForceIndex
+from milvus_lite.index.factory import build_index_from_spec, load_index
 try:
-    from litevecdb.index.faiss_hnsw import FaissHnswIndex
+    from milvus_lite.index.faiss_hnsw import FaissHnswIndex
     __all__ = ["VectorIndex", "IndexSpec", "BruteForceIndex", "FaissHnswIndex",
                "build_index_from_spec", "load_index"]
 except ImportError:
@@ -357,9 +357,9 @@ except ImportError:
 |--------|------|---------|
 | `grpc/server.py` | gRPC server 生命周期 | `run_server(data_dir, host, port, max_workers)` |
 | `grpc/servicer.py` | RPC dispatcher | `MilvusServicer(MilvusServiceServicer)` — 实现 quickstart 子集 RPC，未实现的返回 UNIMPLEMENTED |
-| `grpc/cli.py` | CLI 入口 | `python -m litevecdb.adapter.grpc --data-dir ./data --port 19530` |
-| `grpc/errors.py` | 错误码翻译 | `to_grpc_status(LiteVecDBError) → grpc Status code + reason` |
-| `grpc/translators/schema.py` | schema 翻译 | `milvus_to_litevecdb_schema(milvus.CollectionSchema) → CollectionSchema`，反向同 |
+| `grpc/cli.py` | CLI 入口 | `python -m milvus_lite.adapter.grpc --data-dir ./data --port 19530` |
+| `grpc/errors.py` | 错误码翻译 | `to_grpc_status(MilvusLiteError) → grpc Status code + reason` |
+| `grpc/translators/schema.py` | schema 翻译 | `milvus_to_milvus_lite_schema(milvus.CollectionSchema) → CollectionSchema`，反向同 |
 | `grpc/translators/records.py` | 列行转置 | `fields_data_to_records(fields_data, num_rows) → List[dict]`，反向 `records_to_fields_data(records, schema, output_fields)` |
 | `grpc/translators/search.py` | 搜索请求解析 | `parse_search_params(search_params_kv)`，`decode_search_query(request)` |
 | `grpc/translators/result.py` | 搜索结果生成 | engine `List[List[dict]]` → milvus `SearchResults` proto |
@@ -369,14 +369,14 @@ except ImportError:
 
 ```python
 # adapter/grpc/__init__.py
-from litevecdb.adapter.grpc.server import run_server
-from litevecdb.adapter.grpc.servicer import MilvusServicer
+from milvus_lite.adapter.grpc.server import run_server
+from milvus_lite.adapter.grpc.servicer import MilvusServicer
 ```
 
 **与其他模块的关系**：
-- `servicer.py` 持有 `LiteVecDB` 实例，所有 RPC 通过 `self._db.get_collection(name)` 拿到 `Collection` 对象后调用 engine 方法
+- `servicer.py` 持有 `MilvusLite` 实例，所有 RPC 通过 `self._db.get_collection(name)` 拿到 `Collection` 对象后调用 engine 方法
 - 不直接依赖 `storage/` / `search/` / `index/`（这些是 engine 内部实现细节）
-- `errors.py` 依赖 `litevecdb.exceptions`
+- `errors.py` 依赖 `milvus_lite.exceptions`
 
 **为什么 adapter 独立为顶层 package**：
 - 概念上是协议层，与 engine / storage / search / index 是垂直关系
@@ -386,7 +386,7 @@ from litevecdb.adapter.grpc.servicer import MilvusServicer
 ## 4. 依赖图
 
 ```
-                        litevecdb.__init__
+                        milvus_lite.__init__
                               │
                            db.py
                               │
@@ -435,15 +435,15 @@ Level 8:  adapter/grpc/*                        ← 依赖 L7 (db.py) — Phase 
 ## 5. 公共 API 导出
 
 ```python
-# litevecdb/__init__.py
-from litevecdb.schema import DataType, FieldSchema, CollectionSchema
-from litevecdb.db import LiteVecDB
-from litevecdb.exceptions import LiteVecDBError
+# milvus_lite/__init__.py
+from milvus_lite.schema import DataType, FieldSchema, CollectionSchema
+from milvus_lite.db import MilvusLite
+from milvus_lite.exceptions import MilvusLiteError
 
-__all__ = ["LiteVecDB", "CollectionSchema", "FieldSchema", "DataType", "LiteVecDBError"]
+__all__ = ["MilvusLite", "CollectionSchema", "FieldSchema", "DataType", "MilvusLiteError"]
 ```
 
-用户只需 `from litevecdb import LiteVecDB, CollectionSchema, FieldSchema, DataType`。Collection 通过 `db.get_collection()` 获得，不直接导出。
+用户只需 `from milvus_lite import MilvusLite, CollectionSchema, FieldSchema, DataType`。Collection 通过 `db.get_collection()` 获得，不直接导出。
 
 ## 6. constants.py 内容
 
@@ -471,15 +471,15 @@ ALL_PARTITIONS = "_all"
 ## 7. exceptions.py 内容
 
 ```python
-class LiteVecDBError(Exception): ...
+class MilvusLiteError(Exception): ...
 
-class SchemaValidationError(LiteVecDBError): ...
-class CollectionNotFoundError(LiteVecDBError): ...
-class CollectionAlreadyExistsError(LiteVecDBError): ...
-class PartitionNotFoundError(LiteVecDBError): ...
-class PartitionAlreadyExistsError(LiteVecDBError): ...
-class DefaultPartitionError(LiteVecDBError): ...
-class WALCorruptedError(LiteVecDBError): ...
+class SchemaValidationError(MilvusLiteError): ...
+class CollectionNotFoundError(MilvusLiteError): ...
+class CollectionAlreadyExistsError(MilvusLiteError): ...
+class PartitionNotFoundError(MilvusLiteError): ...
+class PartitionAlreadyExistsError(MilvusLiteError): ...
+class DefaultPartitionError(MilvusLiteError): ...
+class WALCorruptedError(MilvusLiteError): ...
 ```
 
 ## 8. 与实现优先级对齐
@@ -531,28 +531,28 @@ ALL_PARTITIONS: str = "_all"               # 跨 Partition 删除时的内部标
 ### 9.1 exceptions.py
 
 ```python
-class LiteVecDBError(Exception):
-    """所有 LiteVecDB 异常的基类"""
+class MilvusLiteError(Exception):
+    """所有 MilvusLite 异常的基类"""
 
-class SchemaValidationError(LiteVecDBError):
+class SchemaValidationError(MilvusLiteError):
     """Schema 定义不合法 或 记录不符合 Schema"""
 
-class CollectionNotFoundError(LiteVecDBError):
+class CollectionNotFoundError(MilvusLiteError):
     """Collection 不存在"""
 
-class CollectionAlreadyExistsError(LiteVecDBError):
+class CollectionAlreadyExistsError(MilvusLiteError):
     """Collection 已存在"""
 
-class PartitionNotFoundError(LiteVecDBError):
+class PartitionNotFoundError(MilvusLiteError):
     """Partition 不存在"""
 
-class PartitionAlreadyExistsError(LiteVecDBError):
+class PartitionAlreadyExistsError(MilvusLiteError):
     """Partition 已存在"""
 
-class DefaultPartitionError(LiteVecDBError):
+class DefaultPartitionError(MilvusLiteError):
     """试图删除 _default Partition"""
 
-class WALCorruptedError(LiteVecDBError):
+class WALCorruptedError(MilvusLiteError):
     """WAL 文件损坏，无法恢复"""
 ```
 
@@ -1816,7 +1816,7 @@ class Collection:
 ### 9.18 db.py
 
 ```python
-class LiteVecDB:
+class MilvusLite:
     """DB 层：管理多个 Collection 的生命周期。
 
     对应磁盘上一个根目录，每个 Collection 是根目录下的一个子目录。
@@ -1888,9 +1888,9 @@ source string  ──parse_expr()──▶  Expr (raw AST, schema 无关)
 ### 9.19 search/filter/exceptions.py
 
 ```python
-from litevecdb.exceptions import LiteVecDBError
+from milvus_lite.exceptions import MilvusLiteError
 
-class FilterError(LiteVecDBError):
+class FilterError(MilvusLiteError):
     """Base class for filter expression errors."""
 
 class FilterParseError(FilterError):
@@ -2498,7 +2498,7 @@ data_dir/collections/<col>/partitions/<partition>/
 
 ## 11. Phase 10 gRPC 适配层接口详解
 
-**目标**：让 pymilvus 客户端无需修改代码连接 LiteVecDB。深度设计见 `plan/grpc-adapter-design.md`。
+**目标**：让 pymilvus 客户端无需修改代码连接 MilvusLite。深度设计见 `plan/grpc-adapter-design.md`。
 
 ### 11.1 adapter/grpc/server.py
 
@@ -2579,7 +2579,7 @@ _EXCEPTION_TO_CODE = {
     IndexBackendUnavailableError:  (26,  "IndexBuildFailed"),
 }
 
-def to_grpc_status(exc: LiteVecDBError) -> dict:
+def to_grpc_status(exc: MilvusLiteError) -> dict:
     """异常 → grpc Status code/reason，对齐 Milvus 2.3 numeric code。"""
 ```
 

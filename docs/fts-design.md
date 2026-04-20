@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-LiteVecDB Phase 11 引入全文检索（Full Text Search, FTS），让用户能够通过自然语言文本进行语义相关性搜索。**核心实现是 BM25 评分 + 稀疏倒排索引**，与 Milvus 的 Full Text Search API 完全兼容。
+MilvusLite Phase 11 引入全文检索（Full Text Search, FTS），让用户能够通过自然语言文本进行语义相关性搜索。**核心实现是 BM25 评分 + 稀疏倒排索引**，与 Milvus 的 Full Text Search API 完全兼容。
 
 **为什么现在做**：
 - 全文检索是 Milvus 2.5 的核心新能力，"本地版 Milvus"必须跟进
@@ -122,7 +122,7 @@ Search:
 ### 3.1 新增模块
 
 ```
-litevecdb/
+milvus_lite/
 ├── analyzer/                      # Phase 11.2: 分词子系统
 │   ├── __init__.py
 │   ├── protocol.py                # Analyzer ABC
@@ -295,7 +295,7 @@ def bytes_to_sparse(b: bytes) -> dict[int, float]:
 
 ### 6.2 与 Milvus SparseFloatArray 的映射
 
-| Milvus Proto | LiteVecDB |
+| Milvus Proto | MilvusLite |
 |---|---|
 | `SparseFloatArray.contents[i]` (bytes) | `sparse_to_bytes(row_dict)` |
 | `SparseFloatArray.dim` | `max(all_indices) + 1` across all rows |
@@ -385,7 +385,7 @@ class TextMatchNode(ASTNode):
 
 ### 9.1 Schema 翻译
 
-| Milvus Proto | LiteVecDB |
+| Milvus Proto | MilvusLite |
 |---|---|
 | `FieldSchema.data_type = 104` (SparseFloatVector) | `DataType.SPARSE_FLOAT_VECTOR` |
 | `FieldSchema.type_params["enable_analyzer"]` | `FieldSchema.enable_analyzer` |
@@ -422,13 +422,13 @@ fd.vectors.sparse_float_vector.CopyFrom(sfa)
 BM25 搜索时，pymilvus 发送文本查询的方式：
 - `PlaceholderGroup` 中 `PlaceholderValue.type = 104`（SPARSE_FLOAT_VECTOR）
 - 但实际数据是文本 — pymilvus 内部先分词生成稀疏向量再编码
-- LiteVecDB 需要支持两种搜索入口：
+- MilvusLite 需要支持两种搜索入口：
   1. 客户端已分词的稀疏向量搜索
   2. 文本直接搜索（engine 内部分词）
 
 ### 9.4 Index 参数
 
-| Milvus index_type | LiteVecDB 处理 |
+| Milvus index_type | MilvusLite 处理 |
 |---|---|
 | `SPARSE_INVERTED_INDEX` | 映射到 SparseInvertedIndex |
 | `metric_type = BM25` | 使用 BM25 评分 |
@@ -444,7 +444,7 @@ BM25 搜索时，pymilvus 发送文本查询的方式：
 
 ### Phase 11.2 — Analyzer 分词子系统
 
-新建 `litevecdb/analyzer/` 包：
+新建 `milvus_lite/analyzer/` 包：
 - `protocol.py` — Analyzer ABC
 - `standard.py` — StandardAnalyzer
 - `jieba_analyzer.py` — JiebaAnalyzer（optional）
