@@ -902,7 +902,6 @@ Search → top-N 候选 → 按 group_by_field 分组 → 每组 top group_size 
 | DiskANN Index | DiskANN index type | 磁盘索引，大数据量场景 | 大 |
 | IVF_PQ / OPQ / SCANN | 量化索引系列 | 量化压缩，内存效率 | 大 |
 | Binary Vector | BIN_FLAT / BIN_IVF_FLAT | 二值向量索引 | 中 |
-| Consistency Levels | consistency_level 参数 | Strong/Bounded/Session/Eventually | 中 |
 | Bulk Insert | import / get_import_state | 批量文件导入 | 大 |
 | phrase_match | text_match 增强 | 有序短语匹配 + slop | 中 |
 | run_analyzer | run_analyzer | 分析器调试接口 | 小 |
@@ -938,6 +937,7 @@ Search → top-N 候选 → 按 group_by_field 分组 → 每组 top group_size 
 | Row-Level Security | 企业安全功能 |
 | Privilege Groups | 嵌入式无需权限分组 |
 | Metrics / GetComponentStates | 分布式监控 |
+| Consistency Levels | 单进程同步架构天然 Strong Consistency，无需多级别 |
 
 **覆盖率**：以 Milvus pymilvus 测试套件（55 个测试文件）衡量，LiteVecDB 覆盖约 80% 核心功能。P0 补齐后预计可达 ~85%，P0+P1 补齐后预计可达 ~90%。剩余缺口集中在高级索引类型、扩展数据类型和企业级运维能力。
 
