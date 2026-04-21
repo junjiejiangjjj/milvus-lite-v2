@@ -157,6 +157,67 @@ def build_hybrid_rerank_chain(
     return chain
 
 
+# ── Single-search rerank (no MergeOp) ────────────────────────
+
+
+def build_single_rerank_chain(
+    rerank_func=None,
+    decay_func=None,
+) -> FuncChain:
+    """Build a rerank chain for single-path search (no MergeOp).
+
+    Used by ``Collection.search()`` when the schema has RERANK or DECAY
+    functions.  The chain is pre-built at init time and reused across
+    searches; only ``RerankModelExpr.query_texts`` needs to be set before
+    each execution.
+
+    Unlike ``build_rerank_chain`` (which always starts with MergeOp for
+    multi-path fusion), this chain has no Merge and no tail (Sort/Limit
+    are added by the caller per-search since top_k/offset vary).
+
+    Args:
+        rerank_func: schema ``Function`` with a model reranker, or None.
+        decay_func: schema ``Function`` with decay reranker, or None.
+
+    Returns:
+        A :class:`FuncChain` with Map steps only (no Sort/Limit/Select).
+    """
+    chain = FuncChain("single_rerank", STAGE_RERANK)
+
+    if rerank_func is not None:
+        from milvus_lite.function.expr.rerank_model import RerankModelExpr
+        from milvus_lite.rerank.factory import create_rerank_provider
+
+        in_name = rerank_func.input_field_names[0]
+        provider = create_rerank_provider(rerank_func.params)
+        chain.map(RerankModelExpr(provider), [in_name], [SCORE_FIELD])
+
+    if decay_func is not None:
+        from milvus_lite.function.expr.decay_expr import DecayExpr
+        from milvus_lite.function.expr.score_combine import ScoreCombineExpr
+
+        p = decay_func.params
+        in_name = decay_func.input_field_names[0]
+        chain.map(
+            DecayExpr(
+                function=p["function"],
+                origin=p["origin"],
+                scale=p["scale"],
+                offset=p.get("offset", 0.0),
+                decay=p.get("decay", 0.5),
+            ),
+            [in_name],
+            ["_decay_score"],
+        )
+        chain.map(
+            ScoreCombineExpr("multiply"),
+            [SCORE_FIELD, "_decay_score"],
+            [SCORE_FIELD],
+        )
+
+    return chain
+
+
 # ── Helpers ──────────────────────────────────────────────────
 
 
