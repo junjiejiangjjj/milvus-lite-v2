@@ -219,9 +219,9 @@ class Collection:
         # *queries* before vector search, not records or results).
         self._bm25_analyzers: List[Tuple[str, str, Any]] = []
         self._embedding_providers: List[Tuple[str, str, Any]] = []
-        # Rerank/decay stay as per-type lists until FC-7 migrates them.
-        self._rerank_functions: List[Tuple[str, Any]] = []
-        self._decay_functions: List[Tuple[str, Any]] = []
+        # Rerank/decay: store raw schema Function for chain building at search time.
+        self._rerank_function: Optional[Any] = None  # schema Function object
+        self._decay_function: Optional[Any] = None   # schema Function object
         if schema.functions:
             from milvus_lite.analyzer.factory import create_analyzer
             for func in schema.functions:
@@ -238,22 +238,11 @@ class Collection:
                     provider = create_embedding_provider(func.params)
                     self._embedding_providers.append((in_name, out_name, provider))
                 elif func.function_type == FunctionType.RERANK:
-                    in_name = func.input_field_names[0]
                     reranker_type = func.params.get("reranker", "").lower()
                     if reranker_type == "decay":
-                        from milvus_lite.rerank.decay import DecayReranker
-                        dr = DecayReranker(
-                            function=func.params["function"],
-                            origin=func.params["origin"],
-                            scale=func.params["scale"],
-                            offset=func.params.get("offset", 0.0),
-                            decay=func.params.get("decay", 0.5),
-                        )
-                        self._decay_functions.append((in_name, dr))
+                        self._decay_function = func
                     else:
-                        from milvus_lite.rerank.factory import create_rerank_provider
-                        provider = create_rerank_provider(func.params)
-                        self._rerank_functions.append((in_name, provider))
+                        self._rerank_function = func
 
         # ── 10. partition key (auto-bucket partitions) ──────────────
         pk_key_field = next(
@@ -624,7 +613,7 @@ class Collection:
 
         # Save original query texts for reranking (before embedding)
         _query_texts: Optional[List[str]] = None
-        if self._rerank_functions and query_vectors and isinstance(query_vectors[0], str):
+        if self._rerank_function and query_vectors and isinstance(query_vectors[0], str):
             _query_texts = list(query_vectors)
 
         # Validate group_by_field
@@ -658,15 +647,15 @@ class Collection:
         # If reranking is active, ensure the rerank input field is fetched
         _rerank_field_injected = False
         if _query_texts is not None:
-            rerank_in_name = self._rerank_functions[0][0]
+            rerank_in_name = self._rerank_function.input_field_names[0]
             if output_fields is not None and rerank_in_name not in output_fields:
                 output_fields = list(output_fields) + [rerank_in_name]
                 _rerank_field_injected = True
 
         # If decay reranking is active, ensure the decay input field is fetched
         _decay_field_injected = False
-        if self._decay_functions:
-            decay_in_name = self._decay_functions[0][0]
+        if self._decay_function is not None:
+            decay_in_name = self._decay_function.input_field_names[0]
             if output_fields is not None and decay_in_name not in output_fields:
                 output_fields = list(output_fields) + [decay_in_name]
                 _decay_field_injected = True
@@ -711,40 +700,34 @@ class Collection:
                 metric_type=metric_type,
             )
 
-        # Apply reranking (after range_filter, before group_by)
-        _scores_replaced = False
-        if _query_texts is not None:
-            raw_results = self._apply_rerank(
-                raw_results, _query_texts, _rerank_field_injected,
+        # Apply reranking / decay via FuncChain (or legacy path for no-function collections)
+        _has_rerank = _query_texts is not None
+        _has_decay = self._decay_function is not None
+
+        if _has_rerank or _has_decay:
+            raw_results = self._apply_rerank_chain(
+                raw_results, metric_type, top_k, offset,
+                query_texts=_query_texts,
+                rerank_field_injected=_rerank_field_injected,
+                decay_field_injected=_decay_field_injected,
+                group_by_field=group_by_field,
+                group_size=group_size,
+                strict_group_size=strict_group_size,
             )
-            _scores_replaced = True
-
-        # Apply decay reranking
-        if self._decay_functions:
-            raw_results = self._apply_decay(
-                raw_results, metric_type, _decay_field_injected,
-                _scores_replaced,
-            )
-            _scores_replaced = True
-
-        # Apply group_by post-processing
-        if group_by_field is not None:
-            raw_results = _apply_group_by(
-                raw_results, group_by_field, top_k + offset,
-                group_size, strict_group_size,
-            )
-
-        # Apply offset: skip the first `offset` results per query
-        if offset > 0:
-            raw_results = [hits[offset:offset + top_k] for hits in raw_results]
-
-        # Convert IP distances to Milvus convention (positive = more similar).
-        # Internally we use -dot for sorting; Milvus returns raw dot product.
-        # Skip if scores were already replaced by reranking.
-        if metric_type == "IP" and not _scores_replaced:
-            for hits in raw_results:
-                for hit in hits:
-                    hit["distance"] = -hit["distance"]
+        else:
+            # No rerank/decay: legacy inline post-processing
+            if group_by_field is not None:
+                raw_results = _apply_group_by(
+                    raw_results, group_by_field, top_k + offset,
+                    group_size, strict_group_size,
+                )
+            if offset > 0:
+                raw_results = [hits[offset:offset + top_k] for hits in raw_results]
+            # Convert IP distances to Milvus convention
+            if metric_type == "IP":
+                for hits in raw_results:
+                    for hit in hits:
+                        hit["distance"] = -hit["distance"]
 
         return raw_results
 
@@ -1009,97 +992,122 @@ class Collection:
                 embedded.append(qv)
         return embedded
 
-    def _apply_rerank(
-        self,
-        raw_results: List[List[dict]],
-        query_texts: List[str],
-        strip_rerank_field: bool,
-    ) -> List[List[dict]]:
-        """Re-score search results using the RERANK function provider.
-
-        For each query, extracts the rerank input field text from each hit's
-        entity, calls the reranker, and re-orders hits by relevance_score.
-
-        Args:
-            raw_results: per-query hit lists from the vector search.
-            query_texts: original query strings (one per query).
-            strip_rerank_field: if True, remove the rerank input field from
-                entity dicts (it was injected internally, user didn't ask for it).
-        """
-        in_name, provider = self._rerank_functions[0]
-
-        reranked_results: List[List[dict]] = []
-        for qi, hits in enumerate(raw_results):
-            if not hits:
-                reranked_results.append(hits)
-                continue
-
-            query_text = query_texts[qi]
-
-            # Extract document texts from hits; fall back to "" for missing
-            doc_texts = [
-                hit.get("entity", {}).get(in_name, "") or ""
-                for hit in hits
-            ]
-
-            rr = provider.rerank(query_text, doc_texts, top_n=len(hits))
-
-            # Rebuild hits in reranked order with reranker score
-            new_hits = []
-            for r in rr:
-                hit = hits[r.index]
-                hit["distance"] = r.relevance_score
-                new_hits.append(hit)
-            reranked_results.append(new_hits)
-
-            # Strip rerank input field from entity if we injected it
-            if strip_rerank_field:
-                for hit in new_hits:
-                    hit.get("entity", {}).pop(in_name, None)
-
-        return reranked_results
-
-    def _apply_decay(
+    def _apply_rerank_chain(
         self,
         raw_results: List[List[dict]],
         metric_type: str,
-        strip_decay_field: bool,
-        scores_already_replaced: bool,
+        top_k: int,
+        offset: int,
+        *,
+        query_texts: Optional[List[str]] = None,
+        rerank_field_injected: bool = False,
+        decay_field_injected: bool = False,
+        group_by_field: Optional[str] = None,
+        group_size: int = 1,
+        strict_group_size: bool = False,
+        round_decimal: int = -1,
     ) -> List[List[dict]]:
-        """Apply decay reranking based on a numeric field's proximity to origin.
+        """Apply rerank/decay via FuncChain on single-search results.
 
-        For each hit, computes a decay factor from the numeric field value,
-        multiplies it with the vector relevance score, and re-sorts.
+        Converts hits to flat dicts with $id/$score, builds a chain
+        (no MergeOp — single search path), executes, and converts back.
         """
-        in_name, reranker = self._decay_functions[0]
+        from milvus_lite.function.chain import FuncChain
+        from milvus_lite.function.types import (
+            ID_FIELD, SCORE_FIELD, STAGE_RERANK,
+        )
 
-        decayed_results: List[List[dict]] = []
+        # ── 1. Convert hits → chain format ──
+        # Flatten {"id", "distance", "entity"} → {"$id", "$score", field1, ...}
+        chain_chunks: List[List[dict]] = []
         for hits in raw_results:
-            if not hits:
-                decayed_results.append(hits)
-                continue
-
+            chunk = []
             for hit in hits:
-                field_val = hit.get("entity", {}).get(in_name)
-                if field_val is None:
-                    hit["distance"] = 0.0
-                    continue
-                factor = reranker.compute_factor(float(field_val))
-                if scores_already_replaced:
-                    # distance is already a relevance score (higher = better)
-                    hit["distance"] = hit["distance"] * factor
+                flat: dict = {ID_FIELD: hit["id"]}
+                # Convert distance → score (higher = better)
+                if query_texts is not None:
+                    # Model rerank will replace scores anyway, use distance as-is
+                    flat[SCORE_FIELD] = _distance_to_score(hit["distance"], metric_type)
+                elif self._decay_function is not None:
+                    flat[SCORE_FIELD] = _distance_to_score(hit["distance"], metric_type)
                 else:
-                    score = _distance_to_score(hit["distance"], metric_type)
-                    hit["distance"] = score * factor
+                    flat[SCORE_FIELD] = hit.get("distance", 0.0)
+                # Flatten entity fields
+                for k, v in hit.get("entity", {}).items():
+                    flat[k] = v
+                chunk.append(flat)
+            chain_chunks.append(chunk)
 
-            # Sort by final score descending (higher = better)
-            hits.sort(key=lambda h: h["distance"], reverse=True)
+        # ── 2. Build single-search chain (no MergeOp) ──
+        chain = FuncChain("single_rerank", STAGE_RERANK)
 
-            if strip_decay_field:
-                for hit in hits:
-                    hit.get("entity", {}).pop(in_name, None)
+        if query_texts is not None and self._rerank_function is not None:
+            from milvus_lite.function.expr.rerank_model import RerankModelExpr
+            from milvus_lite.rerank.factory import create_rerank_provider
+            in_name = self._rerank_function.input_field_names[0]
+            provider = create_rerank_provider(self._rerank_function.params)
+            chain.map(RerankModelExpr(provider, query_texts), [in_name], [SCORE_FIELD])
 
-            decayed_results.append(hits)
+        if self._decay_function is not None:
+            from milvus_lite.function.expr.decay_expr import DecayExpr
+            from milvus_lite.function.expr.score_combine import ScoreCombineExpr
+            p = self._decay_function.params
+            in_name = self._decay_function.input_field_names[0]
+            chain.map(
+                DecayExpr(
+                    function=p["function"], origin=p["origin"],
+                    scale=p["scale"], offset=p.get("offset", 0.0),
+                    decay=p.get("decay", 0.5),
+                ),
+                [in_name], ["_decay_score"],
+            )
+            chain.map(
+                ScoreCombineExpr("multiply"),
+                [SCORE_FIELD, "_decay_score"], [SCORE_FIELD],
+            )
+
+        # Sort + limit (or group_by)
+        if group_by_field is not None:
+            chain.group_by(group_by_field, group_size, top_k, offset)
+        else:
+            chain.sort(SCORE_FIELD, desc=True)
+            chain.limit(top_k, offset)
+
+        if round_decimal >= 0:
+            from milvus_lite.function.expr.round_decimal import RoundDecimalExpr
+            chain.map(RoundDecimalExpr(round_decimal), [SCORE_FIELD], [SCORE_FIELD])
+
+        # ── 3. Execute chain ──
+        from milvus_lite.function.dataframe import DataFrame
+        df = DataFrame(chain_chunks)
+        result_df = chain.execute(df)
+
+        # ── 4. Convert back → {"id", "distance", "entity"} ──
+        # Determine which fields to strip (injected internally)
+        strip_fields: set = set()
+        if rerank_field_injected and self._rerank_function is not None:
+            strip_fields.add(self._rerank_function.input_field_names[0])
+        if decay_field_injected and self._decay_function is not None:
+            strip_fields.add(self._decay_function.input_field_names[0])
+        strip_fields.add("_decay_score")
+
+        _virtual = {ID_FIELD, SCORE_FIELD, "$group_score"}
+        out_results: List[List[dict]] = []
+        for ci in range(result_df.num_chunks):
+            hits = []
+            for row in result_df.chunk(ci):
+                entity = {
+                    k: v for k, v in row.items()
+                    if k not in _virtual and k not in strip_fields
+                }
+                hits.append({
+                    "id": row[ID_FIELD],
+                    "distance": row[SCORE_FIELD],
+                    "entity": entity,
+                })
+            out_results.append(hits)
+
+        return out_results
 
         return decayed_results
 
