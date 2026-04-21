@@ -36,10 +36,10 @@ class EmbeddingExpr(FunctionExpr):
             for i, emb in zip(indices, embeddings):
                 vectors[i] = emb
 
-        # Fill null slots with zero vectors
-        zero_vec = [0.0] * self._provider.dimension
+        # Fill null slots with zero vectors (fresh list per slot to avoid aliasing)
+        dim = self._provider.dimension
         for i in range(len(vectors)):
             if vectors[i] is None:
-                vectors[i] = zero_vec
+                vectors[i] = [0.0] * dim
 
         return [vectors]

@@ -65,6 +65,11 @@ class DataFrame:
     def set_column(self, name: str, chunk_idx: int, values: list) -> None:
         """Write a column of values back to the specified chunk (in-place)."""
         chunk = self._chunks[chunk_idx]
+        if len(values) != len(chunk):
+            raise ValueError(
+                f"set_column({name!r}): values length {len(values)} "
+                f"!= chunk length {len(chunk)}"
+            )
         for r, v in zip(chunk, values):
             r[name] = v
 

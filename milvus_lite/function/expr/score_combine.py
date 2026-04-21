@@ -20,7 +20,14 @@ class ScoreCombineExpr(FunctionExpr):
     name = "score_combine"
     supported_stages: FrozenSet[str] = frozenset({STAGE_RERANK})
 
+    _VALID_MODES = frozenset({"multiply", "sum", "max", "min", "avg"})
+
     def __init__(self, mode: str = "multiply") -> None:
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"ScoreCombineExpr: unknown mode {mode!r}, "
+                f"must be one of {sorted(self._VALID_MODES)}"
+            )
         self._mode = mode
 
     def execute(self, ctx: FuncContext, inputs: List[list]) -> List[list]:

@@ -33,17 +33,21 @@ class DecayExpr(FunctionExpr):
         offset: float = 0.0,
         decay: float = 0.5,
     ) -> None:
+        if scale <= 0:
+            raise ValueError(f"DecayExpr: scale must be > 0, got {scale}")
+        if not (0 < decay < 1):
+            raise ValueError(f"DecayExpr: decay must be 0 < decay < 1, got {decay}")
         self._function = function
         self._origin = float(origin)
         self._scale = float(scale)
         self._offset = float(offset)
         self._decay = float(decay)
         # Pre-compute constants (same as DecayReranker)
-        self._ln_decay = math.log(decay) if 0 < decay < 1 else -0.6931
+        self._ln_decay = math.log(decay)
         if function == "gauss":
             self._sigma_sq = scale * scale / self._ln_decay
         elif function == "linear":
-            self._slope = (1.0 - decay) / scale if scale > 0 else 0.0
+            self._slope = (1.0 - decay) / scale
 
     def execute(self, ctx: FuncContext, inputs: List[list]) -> List[list]:
         values = inputs[0]

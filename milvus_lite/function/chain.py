@@ -5,14 +5,11 @@ Corresponds to Milvus: internal/util/function/chain/chain.go FuncChain
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import List
 
 from milvus_lite.function.dataframe import DataFrame
 from milvus_lite.function.operator import Operator
 from milvus_lite.function.types import FuncContext, FunctionExpr
-
-if TYPE_CHECKING:
-    pass
 
 
 class FuncChain:
@@ -64,6 +61,8 @@ class FuncChain:
 
     def merge(self, strategy: str, **kwargs) -> FuncChain:
         """Add a :class:`MergeOp` (must be the first Operator)."""
+        if self._operators:
+            raise ValueError("MergeOp must be the first operator in the chain")
         from milvus_lite.function.ops.merge_op import MergeOp
 
         return self.add(MergeOp(strategy, **kwargs))

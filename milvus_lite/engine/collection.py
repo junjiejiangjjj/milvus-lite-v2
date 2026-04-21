@@ -1109,8 +1109,6 @@ class Collection:
 
         return out_results
 
-        return decayed_results
-
     def _prepare_sparse_queries(self, query_vectors: List) -> List[Dict[int, float]]:
         """Convert query vectors to sparse dicts (text → tokenize → TF)."""
         query_sparse: List[Dict[int, float]] = []
