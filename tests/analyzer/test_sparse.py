@@ -154,8 +154,9 @@ class TestBM25AutoGeneration:
             col = self._make_collection(d)
             records = [self._record(1, "hello world")]
 
-            # Manually check what _apply_bm25_functions does
-            col._apply_bm25_functions(records)
+            # Use ingestion chain (replaces removed _apply_bm25_functions)
+            from milvus_lite.function.dataframe import DataFrame
+            col._ingestion_chain.execute(DataFrame.from_records(records))
             sv = records[0]["sparse_emb"]
             assert isinstance(sv, dict)
             assert term_to_id("hello") in sv
@@ -167,7 +168,8 @@ class TestBM25AutoGeneration:
         with tempfile.TemporaryDirectory() as d:
             col = self._make_collection(d)
             records = [self._record(1, "test test test")]
-            col._apply_bm25_functions(records)
+            from milvus_lite.function.dataframe import DataFrame
+            col._ingestion_chain.execute(DataFrame.from_records(records))
             sv = records[0]["sparse_emb"]
             assert sv[term_to_id("test")] == 3.0
 
@@ -175,7 +177,8 @@ class TestBM25AutoGeneration:
         with tempfile.TemporaryDirectory() as d:
             col = self._make_collection(d)
             records = [self._record(1, "")]
-            col._apply_bm25_functions(records)
+            from milvus_lite.function.dataframe import DataFrame
+            col._ingestion_chain.execute(DataFrame.from_records(records))
             assert records[0]["sparse_emb"] == {}
 
     def test_none_text_nullable(self):
@@ -210,7 +213,8 @@ class TestBM25AutoGeneration:
             )
             col = Collection(name="test", data_dir=d, schema=schema)
             records = [{"id": 1, "text": None, "vec": [1.0, 0.0, 0.0, 0.0]}]
-            col._apply_bm25_functions(records)
+            from milvus_lite.function.dataframe import DataFrame
+            col._ingestion_chain.execute(DataFrame.from_records(records))
             assert records[0]["sv"] == {}
 
     def test_flush_preserves_sparse(self):

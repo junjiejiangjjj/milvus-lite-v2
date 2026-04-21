@@ -209,33 +209,34 @@ class Collection:
         # previously assigned auto_id.
         self._next_auto_id: int = self._next_seq
 
-        # ── 9. BM25 function analyzers (Phase 11) ─────────────────
-        # Pre-build an Analyzer for each BM25 function so insert()
-        # can auto-generate sparse vector fields from text input.
-        # _bm25_functions: list of (input_field_name, output_field_name, Analyzer)
-        self._bm25_functions: List[Tuple[str, str, Any]] = []
-        # _embedding_functions: list of (input_field_name, output_field_name, EmbeddingProvider)
-        self._embedding_functions: List[Tuple[str, str, Any]] = []
-        # _rerank_functions: list of (input_field_name, RerankProvider) — semantic rerankers
+        # ── 9. Function chain + search-time helpers ─────────────────
+        from milvus_lite.function.builder import build_ingestion_chain
+
+        field_by_name = {f.name: f for f in schema.fields}
+        self._ingestion_chain = build_ingestion_chain(schema, field_by_name)
+
+        # Search-time query helpers (not part of the chain — they transform
+        # *queries* before vector search, not records or results).
+        self._bm25_analyzers: List[Tuple[str, str, Any]] = []
+        self._embedding_providers: List[Tuple[str, str, Any]] = []
+        # Rerank/decay stay as per-type lists until FC-7 migrates them.
         self._rerank_functions: List[Tuple[str, Any]] = []
-        # _decay_functions: list of (input_field_name, DecayReranker) — decay rerankers
         self._decay_functions: List[Tuple[str, Any]] = []
         if schema.functions:
             from milvus_lite.analyzer.factory import create_analyzer
-            field_by_name = {f.name: f for f in schema.fields}
             for func in schema.functions:
                 if func.function_type == FunctionType.BM25:
                     in_name = func.input_field_names[0]
                     out_name = func.output_field_names[0]
                     in_field = field_by_name[in_name]
                     analyzer = create_analyzer(in_field.analyzer_params)
-                    self._bm25_functions.append((in_name, out_name, analyzer))
+                    self._bm25_analyzers.append((in_name, out_name, analyzer))
                 elif func.function_type == FunctionType.TEXT_EMBEDDING:
                     from milvus_lite.embedding.factory import create_embedding_provider
                     in_name = func.input_field_names[0]
                     out_name = func.output_field_names[0]
                     provider = create_embedding_provider(func.params)
-                    self._embedding_functions.append((in_name, out_name, provider))
+                    self._embedding_providers.append((in_name, out_name, provider))
                 elif func.function_type == FunctionType.RERANK:
                     in_name = func.input_field_names[0]
                     reranker_type = func.params.get("reranker", "").lower()
@@ -299,11 +300,10 @@ class Collection:
                 if self._pk_name not in r or r[self._pk_name] is None:
                     r[self._pk_name] = id_start + i
 
-        # 2. auto-generate function output fields
-        if self._bm25_functions:
-            self._apply_bm25_functions(records)
-        if self._embedding_functions:
-            self._apply_embedding_functions(records)
+        # 2. auto-generate function output fields via ingestion chain
+        if self._ingestion_chain:
+            from milvus_lite.function.dataframe import DataFrame
+            self._ingestion_chain.execute(DataFrame.from_records(records))
 
         # 3. validate every record up-front
         for r in records:
@@ -990,7 +990,7 @@ class Collection:
 
         # Find the embedding provider for this vector field
         provider = None
-        for _in, out, prov in self._embedding_functions:
+        for _in, out, prov in self._embedding_providers:
             if out == vector_field:
                 provider = prov
                 break
@@ -1110,7 +1110,7 @@ class Collection:
             if isinstance(qv, dict):
                 query_sparse.append(qv)
             elif isinstance(qv, str):
-                analyzer = self._bm25_functions[0][2] if self._bm25_functions else None
+                analyzer = self._bm25_analyzers[0][2] if self._bm25_analyzers else None
                 if analyzer is None:
                     raise SchemaValidationError(
                         "Text query requires a BM25 function with an analyzer"
@@ -1891,54 +1891,6 @@ class Collection:
         for key in list(self._segment_cache.keys()):
             if key not in current_keys:
                 del self._segment_cache[key]
-
-    # ── BM25 function auto-generation ────────────────────────────
-
-    def _apply_bm25_functions(self, records: List[dict]) -> None:
-        """Auto-generate sparse vector fields for BM25 functions.
-
-        For each BM25 function, tokenize the input text field and compute
-        term frequencies, then inject the resulting sparse vector dict
-        into each record under the output field name.
-
-        Modifies *records* in place.
-        """
-        from milvus_lite.analyzer.sparse import compute_tf
-
-        for in_name, out_name, analyzer in self._bm25_functions:
-            for r in records:
-                text = r.get(in_name)
-                if text is None or not isinstance(text, str):
-                    # Nullable text → empty sparse vector
-                    r[out_name] = {}
-                else:
-                    term_ids = analyzer.analyze(text)
-                    r[out_name] = compute_tf(term_ids)
-
-    # ── TEXT_EMBEDDING function auto-generation ─────────────────
-
-    def _apply_embedding_functions(self, records: List[dict]) -> None:
-        """Auto-generate dense vector fields for TEXT_EMBEDDING functions.
-
-        Calls the embedding provider's batch API to convert text inputs
-        into float vectors. Modifies *records* in place.
-        """
-        for in_name, out_name, provider in self._embedding_functions:
-            texts = []
-            indices = []
-            for i, r in enumerate(records):
-                text = r.get(in_name)
-                if text is not None and isinstance(text, str) and text:
-                    texts.append(text)
-                    indices.append(i)
-                else:
-                    # Nullable text → zero vector
-                    r[out_name] = [0.0] * provider.dimension
-
-            if texts:
-                vectors = provider.embed_documents(texts)
-                for idx, vec in zip(indices, vectors):
-                    records[idx][out_name] = vec
 
     # ── batch builders ──────────────────────────────────────────
 
