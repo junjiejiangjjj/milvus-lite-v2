@@ -29,7 +29,7 @@ def test_round_none():
     assert result[0][1] == 0.5
 
 
-def test_round_both_stages():
+def test_round_rerank_stage_only():
     expr = RoundDecimalExpr(2)
-    assert expr.is_runnable(STAGE_INGESTION)
     assert expr.is_runnable(STAGE_RERANK)
+    assert not expr.is_runnable(STAGE_INGESTION)

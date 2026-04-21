@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from milvus_lite.function.chain import FuncChain
 from milvus_lite.function.types import (
+    DECAY_SCORE_FIELD,
     ID_FIELD,
     SCORE_FIELD,
     GROUP_SCORE_FIELD,
@@ -207,11 +208,11 @@ def build_single_rerank_chain(
                 decay=p.get("decay", 0.5),
             ),
             [in_name],
-            ["_decay_score"],
+            [DECAY_SCORE_FIELD],
         )
         chain.map(
             ScoreCombineExpr("multiply"),
-            [SCORE_FIELD, "_decay_score"],
+            [SCORE_FIELD, DECAY_SCORE_FIELD],
             [SCORE_FIELD],
         )
 
@@ -282,11 +283,11 @@ def _build_rerank_head(
             offset=rerank_func.params.get("offset", 0.0),
             decay=rerank_func.params.get("decay", 0.5),
         )
-        chain.map(decay_expr, [in_name], ["_decay_score"])
+        chain.map(decay_expr, [in_name], [DECAY_SCORE_FIELD])
         # Map(ScoreCombineExpr)
         chain.map(
             ScoreCombineExpr("multiply"),
-            [SCORE_FIELD, "_decay_score"],
+            [SCORE_FIELD, DECAY_SCORE_FIELD],
             [SCORE_FIELD],
         )
 

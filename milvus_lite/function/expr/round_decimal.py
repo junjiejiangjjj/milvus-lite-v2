@@ -8,7 +8,6 @@ from __future__ import annotations
 from typing import FrozenSet, List
 
 from milvus_lite.function.types import (
-    STAGE_INGESTION,
     STAGE_RERANK,
     FuncContext,
     FunctionExpr,
@@ -19,7 +18,7 @@ class RoundDecimalExpr(FunctionExpr):
     """``$score -> round($score, decimal)``."""
 
     name = "round_decimal"
-    supported_stages: FrozenSet[str] = frozenset({STAGE_INGESTION, STAGE_RERANK})
+    supported_stages: FrozenSet[str] = frozenset({STAGE_RERANK})
 
     def __init__(self, decimal: int) -> None:
         self._decimal = decimal

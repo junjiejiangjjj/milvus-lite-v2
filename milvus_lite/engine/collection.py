@@ -1069,13 +1069,15 @@ class Collection:
         result_df = chain.execute(DataFrame(chain_chunks))
 
         # ── 4. Convert back → {"id", "distance", "entity"} ──
-        strip_fields: set = {"_decay_score"}
+        from milvus_lite.function.types import DECAY_SCORE_FIELD
+        strip_fields: set = {DECAY_SCORE_FIELD}
         if rerank_field_injected and self._rerank_function is not None:
             strip_fields.add(self._rerank_function.input_field_names[0])
         if decay_field_injected and self._decay_function is not None:
             strip_fields.add(self._decay_function.input_field_names[0])
 
-        _virtual = {ID_FIELD, SCORE_FIELD, "$group_score"}
+        from milvus_lite.function.types import GROUP_SCORE_FIELD
+        _virtual = {ID_FIELD, SCORE_FIELD, GROUP_SCORE_FIELD}
         out_results: List[List[dict]] = []
         for ci in range(result_df.num_chunks):
             hits = []

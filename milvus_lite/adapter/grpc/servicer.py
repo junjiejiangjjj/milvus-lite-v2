@@ -872,7 +872,8 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             result_df = chain.execute(*dfs)
 
             # Convert back to {"id", "distance", "entity"} format
-            _virtual = {ID_FIELD, SCORE_FIELD, "$group_score"}
+            from milvus_lite.function.types import GROUP_SCORE_FIELD
+            _virtual = {ID_FIELD, SCORE_FIELD, GROUP_SCORE_FIELD}
             merged = []
             for ci in range(result_df.num_chunks):
                 hits = []

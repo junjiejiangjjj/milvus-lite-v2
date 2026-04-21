@@ -25,6 +25,7 @@ STAGE_RERANK = "rerank"  # search post-processing
 ID_FIELD = "$id"
 SCORE_FIELD = "$score"
 GROUP_SCORE_FIELD = "$group_score"
+DECAY_SCORE_FIELD = "_decay_score"
 
 
 # ---------------------------------------------------------------------------

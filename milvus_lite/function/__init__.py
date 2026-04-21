@@ -10,6 +10,7 @@ from milvus_lite.function.expr import BM25Expr, EmbeddingExpr
 from milvus_lite.function.operator import Operator
 from milvus_lite.function.ops import MapOp
 from milvus_lite.function.types import (
+    DECAY_SCORE_FIELD,
     STAGE_INGESTION,
     STAGE_RERANK,
     ID_FIELD,
@@ -29,6 +30,7 @@ __all__ = [
     "BM25Expr",
     "EmbeddingExpr",
     "build_ingestion_chain",
+    "DECAY_SCORE_FIELD",
     "STAGE_INGESTION",
     "STAGE_RERANK",
     "ID_FIELD",
