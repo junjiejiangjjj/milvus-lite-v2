@@ -1,113 +1,113 @@
-# 深入设计：FuncChain 函数链（Function Chain）
+# Deep Design: FuncChain (Function Chain)
 
-## 1. 概述
+## 1. Overview
 
-LiteVecDB 当前的函数执行逻辑分散在 Collection 类中：4 组 per-type 列表（`_bm25_functions`、`_embedding_functions`、`_rerank_functions`、`_decay_functions`）+ 4 个 apply 方法，每新增一种函数类型都要在初始化、insert、search 三处添加 if/elif 分支。
+The current function execution logic in LiteVecDB is scattered throughout the Collection class: 4 per-type lists (`_bm25_functions`, `_embedding_functions`, `_rerank_functions`, `_decay_functions`) plus 4 apply methods. Adding a new function type requires touching initialization, insert, and search in three separate places with if/elif branches.
 
-**FuncChain 的目标**：参考 Milvus `internal/util/function/chain/` 的设计，用统一的 **Operator 管道** 替代 per-type 分支，让多个 Function 可以 **串行组合** 执行。
+**Goal of FuncChain**: Inspired by Milvus `internal/util/function/chain/`, replace per-type branches with a unified **Operator pipeline** that allows multiple Functions to be **composed and executed in series**.
 
-**为什么现在做**：
-- Milvus 已经用 FuncChain 统一了 reranking 管线（Merge → Map → Sort → Limit → Select），并预留了 `StageIngestion` 用于将 BM25/Embedding 也纳入 chain 体系
-- LiteVecDB 已经积累了 4 种函数类型（BM25、TEXT_EMBEDDING、RERANK、DECAY），分散逻辑的维护成本越来越高
-- 后续要支持更复杂的串联场景（如 text → Embedding A → dense_vec_a → DimReduce → dense_vec_b），需要通用的链式执行框架
+**Why now**:
+- Milvus has already unified reranking with FuncChain (Merge → Map → Sort → Limit → Select), and has reserved `StageIngestion` for migrating BM25/Embedding into the chain system
+- LiteVecDB has accumulated 4 function types (BM25, TEXT_EMBEDDING, RERANK, DECAY); maintaining scattered logic is increasingly costly
+- Future scenarios require serial chaining (e.g., text → Embedding A → dense_vec_a → DimReduce → dense_vec_b), which demands a general-purpose chain execution framework
 
-**核心定位**：与 Milvus chain 保持概念对齐（FunctionExpr / Operator / FuncChain / Stage），但用 Python 原生数据结构（`List[dict]`）替代 Arrow DataFrame，适配嵌入式场景。
+**Core positioning**: Maintain conceptual alignment with Milvus chain (FunctionExpr / Operator / FuncChain / Stage), but use Python native data structures (`List[dict]`) instead of Arrow DataFrame to fit the embedded scenario.
 
 ---
 
-## 2. 与 Milvus chain 的对齐关系
+## 2. Alignment with Milvus Chain
 
-| Milvus (Go) | LiteVecDB (Python) | 差异说明 |
+| Milvus (Go) | LiteVecDB (Python) | Differences |
 |---|---|---|
-| `types.FunctionExpr` interface | `FunctionExpr` ABC | 相同语义：无状态列计算 |
-| `DataFrame` (Arrow Chunked) | `DataFrame` (List[List[dict]]) | Python GC 替代 Arrow Allocator；chunk = per-query 结果 |
-| `Operator` interface | `Operator` ABC | 相同语义：`execute(ctx, df) → df` |
-| `MapOp` + `BaseOp` | `MapOp` | 列映射 + FunctionExpr 调用 |
-| `MergeOp` (5 strategies) | `MergeOp` (RRF/Weighted/Max/Sum/Avg) | 多路搜索结果合并 |
-| `SortOp` (per-chunk sort) | `SortOp` (per-chunk sort) | 按列排序 |
+| `types.FunctionExpr` interface | `FunctionExpr` ABC | Same semantics: stateless column computation |
+| `DataFrame` (Arrow Chunked) | `DataFrame` (List[List[dict]]) | Python GC replaces Arrow Allocator; chunk = per-query results |
+| `Operator` interface | `Operator` ABC | Same semantics: `execute(ctx, df) → df` |
+| `MapOp` + `BaseOp` | `MapOp` | Column mapping + FunctionExpr invocation |
+| `MergeOp` (5 strategies) | `MergeOp` (RRF/Weighted/Max/Sum/Avg) | Multi-path search result merging |
+| `SortOp` (per-chunk sort) | `SortOp` (per-chunk sort) | Sort by column |
 | `LimitOp` (per-chunk) | `LimitOp` (per-chunk) | offset + limit |
-| `SelectOp` | `SelectOp` | 列投影 |
-| `GroupByOp` | `GroupByOp` | 分组搜索 |
-| `FilterOp` | `FilterOp` | 布尔表达式过滤行 |
-| `FuncChain` | `FuncChain` | 有序管道 + stage 校验 + fluent API |
-| `rerank_builder.go` | `builder.py` | 从 schema.functions 构建 chain |
-| `types.FuncContext` | `FuncContext` | 执行上下文（stage） |
-| `types.FunctionFactory` + Registry | `create_function_expr()` factory | 嵌入式不需要动态注册，直接 factory |
-| `StageIngestion / StageL2Rerank / ...` | `STAGE_INGESTION / STAGE_RERANK` | 简化为两个 stage（嵌入式无分布式多级 rerank） |
+| `SelectOp` | `SelectOp` | Column projection |
+| `GroupByOp` | `GroupByOp` | Grouped search |
+| `FilterOp` | `FilterOp` | Boolean expression row filtering |
+| `FuncChain` | `FuncChain` | Ordered pipeline + stage validation + fluent API |
+| `rerank_builder.go` | `builder.py` | Build chain from schema.functions |
+| `types.FuncContext` | `FuncContext` | Execution context (stage) |
+| `types.FunctionFactory` + Registry | `create_function_expr()` factory | Embedded: no need for dynamic registry, direct factory |
+| `StageIngestion / StageL2Rerank / ...` | `STAGE_INGESTION / STAGE_RERANK` | Simplified to 2 stages (embedded has no distributed multi-level rerank) |
 
 ---
 
-## 3. 架构决策
+## 3. Architecture Decisions
 
-### 3.1 数据容器：Python DataFrame（决定）
+### 3.1 Data Container: Python DataFrame (Decision)
 
-**决定：用 `List[List[dict]]` 作为 DataFrame 内部表示，每个内层 list 是一个 chunk（对应一个 query 的结果集）。**
+**Decision: Use `List[List[dict]]` as the DataFrame internal representation, where each inner list is a chunk (corresponding to one query's result set).**
 
-候选方案对比：
+Candidate comparison:
 
-| 维度 | Python List[List[dict]]（选定） | PyArrow Table | 自定义列式结构 |
+| Dimension | Python List[List[dict]] (Selected) | PyArrow Table | Custom Columnar Structure |
 |---|---|---|---|
-| 实现复杂度 | 零依赖，Python 原生 | 需要 Arrow 类型派发 | 需大量样板代码 |
-| 与现有代码对接 | insert records 本身就是 List[dict] | 需要 dict↔Arrow 转换 | 需要 dict↔自定义 转换 |
-| per-chunk 语义 | 二维 list 天然支持 | 需要 ChunkedArray | 需自建 chunk 机制 |
-| 性能 | 足够（嵌入式规模） | 大数据量更优 | 居中 |
-| Operator 实现 | 标准 Python list 操作 | 需 Arrow compute | 视结构而定 |
+| Implementation complexity | Zero dependencies, Python native | Requires Arrow type dispatch | Requires boilerplate code |
+| Integration with existing code | insert records are already List[dict] | Requires dict↔Arrow conversion | Requires dict↔custom conversion |
+| Per-chunk semantics | 2D list naturally supported | Requires ChunkedArray | Must build chunk mechanism |
+| Performance | Sufficient (embedded scale) | Better for large data | Middle ground |
+| Operator implementation | Standard Python list operations | Requires Arrow compute | Depends on structure |
 
-**理由**：
-- LiteVecDB 是嵌入式单进程，数据规模有限，Python 原生结构足够
-- 现有 insert/search 接口已经是 `List[dict]`，无需转换层
-- Operator 实现更直观，调试更容易
+**Rationale**:
+- LiteVecDB is an embedded single-process system with limited data scale; Python native structures are sufficient
+- Existing insert/search interfaces are already `List[dict]`; no conversion layer needed
+- Operator implementations are more intuitive and easier to debug
 
-**chunk 语义**：
-- Ingestion 阶段：单 chunk — `chunks = [records]`
-- Rerank 阶段：nq 个 chunk — `chunks[i]` = 第 i 个 query 的搜索结果
+**Chunk semantics**:
+- Ingestion stage: single chunk — `chunks = [records]`
+- Rerank stage: nq chunks — `chunks[i]` = search results for the i-th query
 
-### 3.2 Stage 设计：两阶段（决定）
+### 3.2 Stage Design: Two Stages (Decision)
 
-**决定：只定义两个 stage — `ingestion` 和 `rerank`。**
+**Decision: Define only two stages — `ingestion` and `rerank`.**
 
-Milvus 有 6 个 stage（Ingestion、L2_Rerank、L1_Rerank、L0_Rerank、PreProcess、PostProcess），因为分布式系统中 reranking 可以在 Proxy / QueryNode / Segment 三层执行。LiteVecDB 是单进程嵌入式，所有 reranking 在同一处完成，无需多级 rerank stage。
+Milvus has 6 stages (Ingestion, L2_Rerank, L1_Rerank, L0_Rerank, PreProcess, PostProcess) because in a distributed system reranking can execute at Proxy / QueryNode / Segment levels. LiteVecDB is a single-process embedded system where all reranking happens in one place; multi-level rerank stages are unnecessary.
 
 ```python
-STAGE_INGESTION = "ingestion"   # insert/upsert 时执行
-STAGE_RERANK    = "rerank"      # search 后处理时执行
+STAGE_INGESTION = "ingestion"   # executed during insert/upsert
+STAGE_RERANK    = "rerank"      # executed during search post-processing
 ```
 
-### 3.3 Operator 集合：6 种（决定）
+### 3.3 Operator Set: 6 Types (Decision)
 
-**决定：实现 Map、Merge、Sort、Limit、Select、GroupBy 六种 Operator。**
+**Decision: Implement Map, Merge, Sort, Limit, Select, and GroupBy — six Operator types.**
 
-这是 Milvus `rerank_builder.go` 实际用到的完整 Operator 集合。以 Decay reranker chain 为例：
+This is the complete Operator set actually used by Milvus `rerank_builder.go`. Taking the Decay reranker chain as an example:
 
 ```
 Merge(strategy) → Map(DecayExpr) → Map(ScoreCombineExpr) → Sort($score, DESC) → Limit(limit, offset) → [Map(RoundDecimal)] → Select($id, $score)
 ```
 
-只有 Map 无法表达 Merge（多路合并）、Sort（排序）、Limit（分页）、Select（投影）这些搜索后处理操作。四种 reranker（RRF / Weighted / Decay / Model）都共用 Sort → Limit → Select 尾部，仅 Merge 策略和中间 Map 步骤不同。
+Map alone cannot express Merge (multi-path merging), Sort (ordering), Limit (pagination), or Select (projection) — these are essential search post-processing operations. All four reranker types (RRF / Weighted / Decay / Model) share the Sort → Limit → Select tail; only the Merge strategy and intermediate Map steps differ.
 
-FilterOp 暂不在 MVP 范围（当前 scalar filter 在搜索侧独立处理），但接口预留。
+FilterOp is not in MVP scope (scalar filtering is currently handled independently on the search side), but the interface is reserved.
 
-### 3.4 FunctionExpr 与 Operator 的分层（决定）
+### 3.4 FunctionExpr vs Operator Layering (Decision)
 
-**决定：FunctionExpr 只负责纯列计算（input columns → output columns），列映射（从 DataFrame 读哪些列、写到哪些列）由 Operator 负责。**
+**Decision: FunctionExpr is responsible only for pure column computation (input columns → output columns). Column mapping (which columns to read from DataFrame, which to write to) is handled by the Operator.**
 
-这与 Milvus 的设计一致：
+This is consistent with Milvus's design:
 
 ```
-MapOp（Operator 层）  ─┬─ 负责：从 DataFrame 读 input_cols，写 output_cols
-                       └─ 调用：FunctionExpr.execute(inputs) → outputs
+MapOp (Operator layer)   ─┬─ Responsible for: reading input_cols from DataFrame, writing output_cols
+                           └─ Invokes: FunctionExpr.execute(inputs) → outputs
 
-FunctionExpr（计算层） ─── 负责：纯计算逻辑（如 BM25 分词、decay 衰减）
-                          不知道 DataFrame 的存在
+FunctionExpr (Compute layer) ── Responsible for: pure computation logic (e.g., BM25 tokenization, decay)
+                                 Unaware of DataFrame existence
 ```
 
-好处：同一个 FunctionExpr 可以用不同的列映射复用（如 DecayExpr 作用于不同字段）。
+Benefit: The same FunctionExpr can be reused with different column mappings (e.g., DecayExpr applied to different fields).
 
 ---
 
-## 4. 核心接口设计
+## 4. Core Interface Design
 
-### 4.1 FunctionExpr — 无状态列计算单元
+### 4.1 FunctionExpr — Stateless Column Computation Unit
 
 ```python
 # function/types.py
@@ -118,47 +118,48 @@ from typing import List, FrozenSet
 STAGE_INGESTION = "ingestion"
 STAGE_RERANK    = "rerank"
 
-# DataFrame 内部使用的虚拟列名
+# Virtual column names used internally by DataFrame
 ID_FIELD    = "$id"
 SCORE_FIELD = "$score"
 
 
 class FunctionExpr(ABC):
-    """无状态的列级计算单元。
+    """Stateless column-level computation unit.
 
-    只负责 input columns → output columns 的纯计算。
-    不感知 DataFrame 结构、列名映射由 MapOp 处理。
+    Responsible only for pure computation: input columns → output columns.
+    Unaware of DataFrame structure; column name mapping is handled by MapOp.
 
-    对应 Milvus: internal/util/function/chain/types.FunctionExpr
+    Corresponds to Milvus: internal/util/function/chain/types.FunctionExpr
     """
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """函数名（如 "bm25", "decay", "score_combine"）。"""
+        """Function name (e.g., "bm25", "decay", "score_combine")."""
 
     @property
     @abstractmethod
     def supported_stages(self) -> FrozenSet[str]:
-        """此函数支持在哪些 stage 执行。"""
+        """Stages where this function can execute."""
 
     @abstractmethod
     def execute(self, inputs: List[list]) -> List[list]:
-        """执行计算。
+        """Execute computation.
 
         Args:
-            inputs: 输入列列表。inputs[i] 是一列值的 list，
-                    长度 = chunk 内记录数。
+            inputs: List of input columns. inputs[i] is a list of values,
+                    length = number of records in the chunk.
         Returns:
-            输出列列表。长度由函数定义（通常 = 输出字段数）。
+            List of output columns. Length defined by the function
+            (typically = number of output fields).
         """
 
     def is_runnable(self, stage: str) -> bool:
-        """检查此函数是否支持指定 stage。"""
+        """Check if this function supports the given stage."""
         return stage in self.supported_stages
 ```
 
-### 4.2 DataFrame — 轻量数据容器
+### 4.2 DataFrame — Lightweight Data Container
 
 ```python
 # function/dataframe.py
@@ -167,14 +168,14 @@ from typing import List, Optional
 
 
 class DataFrame:
-    """轻量级列式数据容器。
+    """Lightweight columnar data container.
 
-    内部存储为 List[List[dict]]，每个内层 list 是一个 chunk。
+    Internal storage is List[List[dict]], where each inner list is a chunk.
 
-    - Ingestion 阶段：单 chunk，chunks = [records]
-    - Rerank 阶段：nq 个 chunk，chunks[i] = 第 i 个 query 的搜索结果
+    - Ingestion stage: single chunk, chunks = [records]
+    - Rerank stage: nq chunks, chunks[i] = search results for the i-th query
 
-    对应 Milvus: internal/util/function/chain/dataframe.go
+    Corresponds to Milvus: internal/util/function/chain/dataframe.go
     """
 
     __slots__ = ("_chunks",)
@@ -182,30 +183,30 @@ class DataFrame:
     def __init__(self, chunks: List[List[dict]]):
         self._chunks = chunks
 
-    # ── 工厂方法 ──
+    # ── Factory Methods ──
 
     @classmethod
     def from_records(cls, records: List[dict]) -> "DataFrame":
-        """从 insert records 创建（单 chunk）。"""
+        """Create from insert records (single chunk)."""
         return cls([records])
 
     @classmethod
     def from_search_results(cls, results: List[List[dict]]) -> "DataFrame":
-        """从 search 返回值创建（per-query chunks）。"""
+        """Create from search return value (per-query chunks)."""
         return cls(results)
 
-    # ── 导出 ──
+    # ── Export ──
 
     def to_records(self) -> List[dict]:
-        """导出为扁平 records（仅限单 chunk）。"""
+        """Export as flat records (single chunk only)."""
         assert len(self._chunks) == 1, "to_records() requires single chunk"
         return self._chunks[0]
 
     def to_search_results(self) -> List[List[dict]]:
-        """导出为 per-query 搜索结果。"""
+        """Export as per-query search results."""
         return self._chunks
 
-    # ── 访问器 ──
+    # ── Accessors ──
 
     @property
     def num_chunks(self) -> int:
@@ -215,30 +216,30 @@ class DataFrame:
         return self._chunks[idx]
 
     def column(self, name: str, chunk_idx: int) -> list:
-        """读取指定 chunk 中某列的所有值。"""
+        """Read all values of a column from the specified chunk."""
         return [r.get(name) for r in self._chunks[chunk_idx]]
 
     def set_column(self, name: str, chunk_idx: int, values: list) -> None:
-        """将一列值写回指定 chunk（就地修改）。"""
+        """Write a column of values back to the specified chunk (in-place)."""
         chunk = self._chunks[chunk_idx]
         for r, v in zip(chunk, values):
             r[name] = v
 
     def column_names(self, chunk_idx: int = 0) -> List[str]:
-        """获取列名集合（取自第一条记录的 keys）。"""
+        """Get column names (from the first record's keys)."""
         chunk = self._chunks[chunk_idx]
         return list(chunk[0].keys()) if chunk else []
 ```
 
-### 4.3 FuncContext — 执行上下文
+### 4.3 FuncContext — Execution Context
 
 ```python
-# function/types.py (续)
+# function/types.py (continued)
 
 class FuncContext:
-    """函数链执行上下文。
+    """Execution context for function chains.
 
-    对应 Milvus: internal/util/function/chain/types.FuncContext
+    Corresponds to Milvus: internal/util/function/chain/types.FuncContext
     """
 
     __slots__ = ("_stage",)
@@ -251,7 +252,7 @@ class FuncContext:
         return self._stage
 ```
 
-### 4.4 Operator — 算子基类
+### 4.4 Operator — Base Class
 
 ```python
 # function/operator.py
@@ -261,32 +262,33 @@ from typing import List
 
 
 class Operator(ABC):
-    """算子基类。
+    """Base class for operators.
 
-    Operator 工作在 DataFrame 上，接收输入 DataFrame、返回输出 DataFrame。
-    每个 Operator 声明自己读取（inputs）和产出（outputs）的列名。
+    Operators work on DataFrames: receive an input DataFrame, return an output DataFrame.
+    Each Operator declares the column names it reads (inputs) and produces (outputs).
 
-    对应 Milvus: internal/util/function/chain/chain.go Operator interface
+    Corresponds to Milvus: internal/util/function/chain/chain.go Operator interface
     """
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """算子名称（如 "Map", "Sort", "Merge"）。"""
+        """Operator name (e.g., "Map", "Sort", "Merge")."""
 
     @abstractmethod
     def execute(self, ctx: FuncContext, df: DataFrame) -> DataFrame:
-        """执行算子。
+        """Execute the operator.
 
         Args:
-            ctx: 执行上下文
-            df:  输入 DataFrame
+            ctx: Execution context
+            df:  Input DataFrame
         Returns:
-            输出 DataFrame（可能是就地修改后的同一对象，也可能是新对象）
+            Output DataFrame (may be the same object modified in-place,
+            or a new object)
         """
 ```
 
-### 4.5 FuncChain — 有序管道
+### 4.5 FuncChain — Ordered Pipeline
 
 ```python
 # function/chain.py
@@ -295,13 +297,13 @@ from typing import List, Optional
 
 
 class FuncChain:
-    """有序的 Operator 管道。
+    """Ordered Operator pipeline.
 
-    - Fluent API：chain.merge(...).map(...).sort(...).limit(...)
-    - Execute 时按顺序执行所有 Operator
-    - 如果第一个 Operator 是 MergeOp，支持多路输入
+    - Fluent API: chain.merge(...).map(...).sort(...).limit(...)
+    - Execute runs all Operators sequentially
+    - If the first Operator is MergeOp, supports multi-path inputs
 
-    对应 Milvus: internal/util/function/chain/chain.go FuncChain
+    Corresponds to Milvus: internal/util/function/chain/chain.go FuncChain
     """
 
     def __init__(self, name: str, stage: str):
@@ -316,13 +318,13 @@ class FuncChain:
     # ── Fluent API ──
 
     def add(self, op: Operator) -> "FuncChain":
-        """添加一个 Operator 到管道末尾。"""
+        """Append an Operator to the end of the pipeline."""
         self._operators.append(op)
         return self
 
     def map(self, expr: FunctionExpr,
             input_cols: List[str], output_cols: List[str]) -> "FuncChain":
-        """添加 MapOp。"""
+        """Add a MapOp."""
         if not expr.is_runnable(self._stage):
             raise ValueError(
                 f"FunctionExpr '{expr.name}' does not support "
@@ -331,34 +333,34 @@ class FuncChain:
         return self.add(MapOp(expr, input_cols, output_cols))
 
     def merge(self, strategy: str, **kwargs) -> "FuncChain":
-        """添加 MergeOp（必须是 chain 的第一个 Operator）。"""
+        """Add a MergeOp (must be the first Operator in the chain)."""
         return self.add(MergeOp(strategy, **kwargs))
 
     def sort(self, column: str, desc: bool = True) -> "FuncChain":
-        """添加 SortOp。"""
+        """Add a SortOp."""
         return self.add(SortOp(column, desc))
 
     def limit(self, limit: int, offset: int = 0) -> "FuncChain":
-        """添加 LimitOp。"""
+        """Add a LimitOp."""
         return self.add(LimitOp(limit, offset))
 
     def select(self, *columns: str) -> "FuncChain":
-        """添加 SelectOp。"""
+        """Add a SelectOp."""
         return self.add(SelectOp(list(columns)))
 
     def group_by(self, field: str, group_size: int,
                  limit: int, offset: int = 0,
                  scorer: str = "max") -> "FuncChain":
-        """添加 GroupByOp。"""
+        """Add a GroupByOp."""
         return self.add(GroupByOp(field, group_size, limit, offset, scorer))
 
-    # ── 执行 ──
+    # ── Execution ──
 
     def execute(self, *inputs: DataFrame) -> DataFrame:
-        """执行整条 chain。
+        """Execute the entire chain.
 
-        如果第一个 Operator 是 MergeOp，接受多路输入；
-        否则只接受单路输入。
+        If the first Operator is MergeOp, accepts multi-path inputs;
+        otherwise accepts only a single input.
         """
         ctx = FuncContext(self._stage)
         start_idx = 0
@@ -379,7 +381,7 @@ class FuncChain:
 
         return result
 
-    # ── 调试 ──
+    # ── Debug ──
 
     def __repr__(self) -> str:
         ops = " → ".join(op.name for op in self._operators)
@@ -388,23 +390,23 @@ class FuncChain:
 
 ---
 
-## 5. Operator 详细设计
+## 5. Operator Detailed Design
 
-### 5.1 MapOp — 列变换
+### 5.1 MapOp — Column Transformation
 
-**职责**：从 DataFrame 读取 input_cols，调用 FunctionExpr.execute()，将结果写入 output_cols。
+**Responsibility**: Read input_cols from DataFrame, call FunctionExpr.execute(), write results to output_cols.
 
-**对应 Milvus**：`operator_map.go`
+**Corresponds to Milvus**: `operator_map.go`
 
 ```python
 class MapOp(Operator):
-    """对每个 chunk 独立执行 FunctionExpr 列变换。
+    """Execute FunctionExpr column transformation independently per chunk.
 
-    input_cols: 从 DataFrame 读取的列名
-    output_cols: 将 FunctionExpr 输出写回 DataFrame 的列名
+    input_cols: column names to read from DataFrame
+    output_cols: column names to write FunctionExpr output back to DataFrame
 
-    output_cols 可以与 input_cols 重叠（如 ScoreCombine 将
-    $score 和 _decay_score 合并后写回 $score）。
+    output_cols may overlap with input_cols (e.g., ScoreCombine merges
+    $score and _decay_score, writes back to $score).
     """
 
     name = "Map"
@@ -417,39 +419,39 @@ class MapOp(Operator):
 
     def execute(self, ctx: FuncContext, df: DataFrame) -> DataFrame:
         for chunk_idx in range(df.num_chunks):
-            # 1. 读取输入列
+            # 1. Read input columns
             inputs = [df.column(col, chunk_idx) for col in self._input_cols]
-            # 2. 执行函数
+            # 2. Execute function
             outputs = self._expr.execute(inputs)
-            # 3. 写回输出列
+            # 3. Write output columns back
             for col_name, col_data in zip(self._output_cols, outputs):
                 df.set_column(col_name, chunk_idx, col_data)
         return df
 ```
 
-### 5.2 MergeOp — 多路合并
+### 5.2 MergeOp — Multi-Path Merging
 
-**职责**：将多路搜索结果合并为一路。这是 hybrid search 的核心 —— 多个 ANN 子搜索返回独立结果，MergeOp 按策略合并并去重。
+**Responsibility**: Merge multiple search result sets into one. This is the core of hybrid search — multiple ANN sub-searches return independent results, and MergeOp merges and deduplicates them by strategy.
 
-**对应 Milvus**：`operator_merge.go`
+**Corresponds to Milvus**: `operator_merge.go`
 
-**5 种合并策略**：
+**5 merge strategies**:
 
-| 策略 | 公式 | 说明 |
+| Strategy | Formula | Description |
 |---|---|---|
-| `rrf` | `score = Σ 1/(k + rank_i)` | 基于排名融合，不依赖分数量纲 |
-| `weighted` | `score = Σ weight_i × normalize(score_i)` | 加权求和，需分数归一化 |
-| `max` | `score = max(score_i)` | 取最高分（如 decay 前置的合并） |
-| `sum` | `score = Σ score_i` | 分数求和 |
-| `avg` | `score = mean(score_i)` | 分数平均 |
+| `rrf` | `score = Σ 1/(k + rank_i)` | Rank-based fusion, independent of score magnitude |
+| `weighted` | `score = Σ weight_i × normalize(score_i)` | Weighted sum, requires score normalization |
+| `max` | `score = max(score_i)` | Take highest score (e.g., pre-merge for decay) |
+| `sum` | `score = Σ score_i` | Sum of scores |
+| `avg` | `score = mean(score_i)` | Average of scores |
 
 ```python
 class MergeOp(Operator):
-    """合并多路搜索结果。
+    """Merge multi-path search results.
 
-    - 必须是 chain 的第一个 Operator
-    - execute_multi() 接收多路 DataFrame，按 pk 去重合并
-    - 对齐 Milvus 的 MergeStrategy
+    - Must be the first Operator in the chain
+    - execute_multi() accepts multiple DataFrames, deduplicates by pk and merges
+    - Aligned with Milvus MergeStrategy
     """
 
     name = "Merge"
@@ -466,10 +468,10 @@ class MergeOp(Operator):
 
     def execute_multi(self, ctx: FuncContext,
                       inputs: List[DataFrame]) -> DataFrame:
-        """合并多路 DataFrame。
+        """Merge multiple DataFrames.
 
-        每路 DataFrame 的 chunk 数应相同（= nq）。
-        同一 pk 出现在多路中时，按 strategy 合并分数。
+        Each input DataFrame should have the same number of chunks (= nq).
+        When the same pk appears in multiple paths, scores are merged by strategy.
         """
         if not inputs:
             raise ValueError("MergeOp requires at least one input")
@@ -480,8 +482,8 @@ class MergeOp(Operator):
         merged_chunks = []
 
         for q in range(nq):
-            # 收集所有路的 (pk, score, hit) + 该路的 rank
-            pk_map = {}  # pk → {hit, scores: [(路idx, score, rank)]}
+            # Collect (pk, score, hit) + rank from all paths
+            pk_map = {}  # pk → {hit, entries: [(path_idx, score, rank)]}
             for path_idx, inp in enumerate(inputs):
                 chunk = inp.chunk(q)
                 for rank, hit in enumerate(chunk):
@@ -492,7 +494,7 @@ class MergeOp(Operator):
                         (path_idx, hit.get(SCORE_FIELD, 0.0), rank)
                     )
 
-            # 按 strategy 计算最终 score
+            # Compute final score by strategy
             results = []
             for pk, info in pk_map.items():
                 score = self._compute_score(info["entries"], len(inputs))
@@ -505,7 +507,7 @@ class MergeOp(Operator):
         return DataFrame(merged_chunks)
 
     def _compute_score(self, entries, num_paths):
-        """按策略计算合并分数。"""
+        """Compute merged score by strategy."""
         if self._strategy == "rrf":
             return sum(1.0 / (self._rrf_k + rank) for _, _, rank in entries)
         elif self._strategy == "weighted":
@@ -525,18 +527,18 @@ class MergeOp(Operator):
             raise ValueError(f"Unknown merge strategy: {self._strategy}")
 ```
 
-### 5.3 SortOp — 排序
+### 5.3 SortOp — Sorting
 
-**职责**：对每个 chunk 内的记录按指定列排序。
+**Responsibility**: Sort records within each chunk by a specified column.
 
-**对应 Milvus**：`operator_sort.go`
+**Corresponds to Milvus**: `operator_sort.go`
 
 ```python
 class SortOp(Operator):
-    """per-chunk 排序。
+    """Per-chunk sorting.
 
-    每个 chunk（query）独立排序。
-    支持 tie-break by $id ASC（与 Milvus 对齐）。
+    Each chunk (query) is sorted independently.
+    Supports tie-break by $id ASC (aligned with Milvus).
     """
 
     name = "Sort"
@@ -561,21 +563,21 @@ class SortOp(Operator):
 
     @staticmethod
     def _sort_key(val):
-        """None 排到最后。"""
+        """None sorts to the end."""
         if val is None:
-            return (1, 0)  # (is_none=1, val) — 保证 None 排末尾
+            return (1, 0)  # (is_none=1, val) — ensures None goes last
         return (0, val)
 ```
 
-### 5.4 LimitOp — 分页截取
+### 5.4 LimitOp — Pagination
 
-**职责**：对每个 chunk 应用 offset + limit。
+**Responsibility**: Apply offset + limit to each chunk.
 
-**对应 Milvus**：`operator_limit.go`
+**Corresponds to Milvus**: `operator_limit.go`
 
 ```python
 class LimitOp(Operator):
-    """per-chunk offset + limit。"""
+    """Per-chunk offset + limit."""
 
     name = "Limit"
 
@@ -593,15 +595,15 @@ class LimitOp(Operator):
         return DataFrame(new_chunks)
 ```
 
-### 5.5 SelectOp — 列投影
+### 5.5 SelectOp — Column Projection
 
-**职责**：只保留指定的列，移除其余字段。
+**Responsibility**: Keep only specified columns, remove all other fields.
 
-**对应 Milvus**：`operator_select.go`
+**Corresponds to Milvus**: `operator_select.go`
 
 ```python
 class SelectOp(Operator):
-    """保留指定列，移除其余字段。"""
+    """Keep specified columns, remove all others."""
 
     name = "Select"
 
@@ -619,22 +621,22 @@ class SelectOp(Operator):
         return DataFrame(new_chunks)
 ```
 
-### 5.6 GroupByOp — 分组搜索
+### 5.6 GroupByOp — Grouped Search
 
-**职责**：按字段分组，每组保留 top-N，返回前 limit 个组。
+**Responsibility**: Group by field, keep top-N per group, return the first `limit` groups.
 
-**对应 Milvus**：`operator_group_by.go`
+**Corresponds to Milvus**: `operator_group_by.go`
 
 ```python
 class GroupByOp(Operator):
-    """per-chunk 分组搜索。
+    """Per-chunk grouped search.
 
-    1. 按 group_by_field 分组
-    2. 每组内按 $score DESC 排序，保留 top group_size
-    3. 用 scorer 计算每组的 group_score（max/sum/avg）
-    4. 组间按 group_score DESC 排序
-    5. 跳过 offset 组，取 limit 组
-    6. 添加 $group_score 列
+    1. Group by group_by_field
+    2. Within each group, sort by $score DESC, keep top group_size
+    3. Compute group_score using scorer (max/sum/avg)
+    4. Sort groups by group_score DESC
+    5. Skip offset groups, take limit groups
+    6. Add $group_score column
     """
 
     name = "GroupBy"
@@ -653,13 +655,13 @@ class GroupByOp(Operator):
         for chunk_idx in range(df.num_chunks):
             chunk = df.chunk(chunk_idx)
 
-            # 1. 分组
+            # 1. Group
             groups = {}  # field_val → [hits]
             for hit in chunk:
                 key = hit.get(self._field)
                 groups.setdefault(key, []).append(hit)
 
-            # 2. 每组内排序 + 截取 top group_size
+            # 2. Sort within group + truncate to top group_size
             scored_groups = []
             for key, hits in groups.items():
                 hits.sort(key=lambda r: r.get(SCORE_FIELD, 0), reverse=True)
@@ -667,11 +669,11 @@ class GroupByOp(Operator):
                 group_score = self._compute_group_score(top_hits)
                 scored_groups.append((group_score, key, top_hits))
 
-            # 3. 组间排序 + offset + limit
+            # 3. Sort groups + offset + limit
             scored_groups.sort(key=lambda g: g[0], reverse=True)
             selected = scored_groups[self._offset:self._offset + self._limit]
 
-            # 4. 展平 + 添加 $group_score
+            # 4. Flatten + add $group_score
             result = []
             for group_score, key, hits in selected:
                 for hit in hits:
@@ -696,9 +698,9 @@ class GroupByOp(Operator):
 
 ---
 
-## 6. FunctionExpr 实现
+## 6. FunctionExpr Implementations
 
-### 6.1 BM25Expr — 文本 → 稀疏向量（Ingestion）
+### 6.1 BM25Expr — Text → Sparse Vector (Ingestion)
 
 ```python
 class BM25Expr(FunctionExpr):
@@ -723,7 +725,7 @@ class BM25Expr(FunctionExpr):
         return [sparse_vecs]
 ```
 
-### 6.2 EmbeddingExpr — 文本 → 密集向量（Ingestion）
+### 6.2 EmbeddingExpr — Text → Dense Vector (Ingestion)
 
 ```python
 class EmbeddingExpr(FunctionExpr):
@@ -737,7 +739,7 @@ class EmbeddingExpr(FunctionExpr):
 
     def execute(self, inputs: List[list]) -> List[list]:
         texts = inputs[0]
-        # 批量处理非空文本
+        # Batch process non-null texts
         indices = []
         batch = []
         for i, text in enumerate(texts):
@@ -751,7 +753,7 @@ class EmbeddingExpr(FunctionExpr):
             for i, emb in zip(indices, embeddings):
                 vectors[i] = emb
 
-        # 空值填零向量
+        # Fill null values with zero vectors
         zero_vec = [0.0] * self._provider.dimension
         for i in range(len(vectors)):
             if vectors[i] is None:
@@ -760,15 +762,15 @@ class EmbeddingExpr(FunctionExpr):
         return [vectors]
 ```
 
-### 6.3 DecayExpr — 数值 → 衰减因子（Rerank）
+### 6.3 DecayExpr — Numeric → Decay Factor (Rerank)
 
-**对应 Milvus**：`expr/decay_expr.go`
+**Corresponds to Milvus**: `expr/decay_expr.go`
 
 ```python
 class DecayExpr(FunctionExpr):
     """numeric column → decay factor [0, 1]
 
-    三种衰减函数（与 Milvus 一致）：
+    Three decay functions (aligned with Milvus):
     - gauss:  exp(-0.5 * ((max(0, |val-origin|-offset)) / scale)^2)
     - exp:    exp(ln(decay) * max(0, |val-origin|-offset) / scale)
     - linear: max(0, (scale - max(0, |val-origin|-offset)) / scale)
@@ -808,16 +810,16 @@ class DecayExpr(FunctionExpr):
         return [factors]
 ```
 
-### 6.4 ScoreCombineExpr — 分数合并（Rerank）
+### 6.4 ScoreCombineExpr — Score Combination (Rerank)
 
-**对应 Milvus**：`expr/score_combine_expr.go`
+**Corresponds to Milvus**: `expr/score_combine_expr.go`
 
 ```python
 class ScoreCombineExpr(FunctionExpr):
     """($score, factor) → $score * factor
 
-    将多列分数合并为一个最终分数。
-    mode="multiply" 是 decay reranker 的默认行为。
+    Combine multiple score columns into a single final score.
+    mode="multiply" is the default behavior for decay reranker.
     """
 
     name = "score_combine"
@@ -852,9 +854,9 @@ class ScoreCombineExpr(FunctionExpr):
         return [results]
 ```
 
-### 6.5 RoundDecimalExpr — 距离四舍五入（Rerank）
+### 6.5 RoundDecimalExpr — Distance Rounding (Rerank)
 
-**对应 Milvus**：`expr/round_decimal_expr.go`
+**Corresponds to Milvus**: `expr/round_decimal_expr.go`
 
 ```python
 class RoundDecimalExpr(FunctionExpr):
@@ -872,14 +874,14 @@ class RoundDecimalExpr(FunctionExpr):
                  for s in scores]]
 ```
 
-### 6.6 RerankModelExpr — 语义重排序（Rerank）
+### 6.6 RerankModelExpr — Semantic Reranking (Rerank)
 
 ```python
 class RerankModelExpr(FunctionExpr):
     """document_text column → relevance_score column
 
-    调用外部 rerank 模型（如 Cohere rerank）重新评分。
-    需要在创建时绑定 query texts。
+    Calls an external rerank model (e.g., Cohere rerank) to rescore.
+    Query texts must be bound at creation time.
     """
 
     name = "rerank_model"
@@ -892,10 +894,10 @@ class RerankModelExpr(FunctionExpr):
     def execute(self, inputs: List[list]) -> List[list]:
         # inputs[0] = document texts for this chunk
         doc_texts = inputs[0]
-        # 简化实现：假设每次 execute 处理一个 chunk
-        # query_text 需要从 FuncContext 或外部传入
-        # 这里通过 _query_texts[chunk_idx] 获取
-        # 实际实现时需要通过 FuncContext 传递 chunk_idx
+        # Simplified: assumes each execute call processes one chunk.
+        # query_text must come from FuncContext or external binding.
+        # Here accessed via _query_texts[chunk_idx].
+        # Implementation should pass chunk_idx via FuncContext.
         rerank_results = self._provider.rerank(
             self._query_texts[0], doc_texts, top_n=len(doc_texts)
         )
@@ -905,11 +907,11 @@ class RerankModelExpr(FunctionExpr):
         return [scores]
 ```
 
-> **注意**：RerankModelExpr 需要知道当前 chunk 对应哪个 query text。两种方式：(1) FuncContext 携带 chunk_idx → query_texts 映射；(2) 创建 chain 时为每个 nq 创建独立 expr。实现时选择方式 (1)，给 FuncContext 增加 chunk_idx 字段。
+> **Note**: RerankModelExpr needs to know which query text corresponds to the current chunk. Two approaches: (1) FuncContext carries chunk_idx → query_texts mapping; (2) create a separate expr for each nq when building the chain. Implementation will use approach (1), adding a chunk_idx field to FuncContext.
 
 ---
 
-## 7. Chain Builder — 从 schema.functions 构建 chain
+## 7. Chain Builder — Build Chains from schema.functions
 
 ### 7.1 Ingestion Chain Builder
 
@@ -917,13 +919,13 @@ class RerankModelExpr(FunctionExpr):
 # function/builder.py
 
 def build_ingestion_chain(schema, field_by_name) -> Optional[FuncChain]:
-    """从 schema.functions 构建 ingestion chain。
+    """Build ingestion chain from schema.functions.
 
-    遍历 schema 中所有 function，将支持 ingestion stage
-    的 function 按声明顺序添加到 chain。
+    Iterates all functions in the schema, adding those that support
+    the ingestion stage to the chain in declaration order.
 
     Returns:
-        FuncChain 或 None（无 ingestion function 时）
+        FuncChain or None (when no ingestion functions exist)
     """
     if not schema.functions:
         return None
@@ -947,24 +949,24 @@ def build_ingestion_chain(schema, field_by_name) -> Optional[FuncChain]:
             chain.map(EmbeddingExpr(provider), [in_name], [out_name])
             has_steps = True
 
-        # 未来扩展：其他 ingestion-stage function
+        # Future: other ingestion-stage functions
 
     return chain if has_steps else None
 ```
 
 ### 7.2 Rerank Chain Builder
 
-**直接参照 Milvus `rerank_builder.go` 的 4 种 chain 模式**：
+**Directly mirrors the 4 chain patterns from Milvus `rerank_builder.go`**:
 
 ```python
 def build_rerank_chain(
     schema,
     search_params: dict,      # {limit, offset, round_decimal, group_by_field, group_size}
-    search_metrics: List[str], # 各路搜索的 metric type
+    search_metrics: List[str], # metric type for each search path
 ) -> Optional[FuncChain]:
-    """从 schema.functions 中的 RERANK/DECAY function 构建 rerank chain。
+    """Build rerank chain from RERANK/DECAY functions in schema.functions.
 
-    4 种 chain 模式（与 Milvus rerank_builder.go 对齐）：
+    4 chain patterns (aligned with Milvus rerank_builder.go):
 
     RRF:      Merge(RRF) → Sort → Limit → [RoundDecimal] → Select
     Weighted: Merge(Weighted) → Sort → Limit → [RoundDecimal] → Select
@@ -978,7 +980,7 @@ def build_rerank_chain(
     chain = FuncChain("rerank", STAGE_RERANK)
     reranker_type = _get_reranker_type(rerank_func)
 
-    # ── 头部：Merge ──
+    # ── Head: Merge ──
     if reranker_type == "rrf":
         rrf_k = rerank_func.params.get("k", 60.0)
         chain.merge("rrf", rrf_k=rrf_k)
@@ -1010,10 +1012,10 @@ def build_rerank_chain(
         chain.merge("max")
         in_name = rerank_func.input_field_names[0]
         provider = create_rerank_provider(rerank_func.params)
-        model_expr = RerankModelExpr(provider, query_texts=[])  # query_texts 在 execute 时注入
+        model_expr = RerankModelExpr(provider, query_texts=[])  # query_texts injected at execute time
         chain.map(model_expr, [in_name], [SCORE_FIELD])
 
-    # ── 尾部：Sort / GroupBy → [RoundDecimal] → Select ──
+    # ── Tail: Sort / GroupBy → [RoundDecimal] → Select ──
     group_by_field = search_params.get("group_by_field")
     limit = search_params.get("limit", 10)
     offset = search_params.get("offset", 0)
@@ -1040,13 +1042,13 @@ def build_rerank_chain(
 
 ---
 
-## 8. Collection 重构
+## 8. Collection Refactoring
 
-### 8.1 初始化：4 组列表 → 2 条 chain
+### 8.1 Initialization: 4 Lists → 2 Chains
 
 **Before**:
 ```python
-# Collection.__init__ 中约 40 行 if/elif 分支
+# ~40 lines of if/elif branches in Collection.__init__
 self._bm25_functions: List[Tuple[str, str, Any]] = []
 self._embedding_functions: List[Tuple[str, str, Any]] = []
 self._rerank_functions: List[Tuple[str, Any]] = []
@@ -1066,14 +1068,14 @@ from milvus_lite.function.builder import build_ingestion_chain
 
 field_by_name = {f.name: f for f in schema.fields}
 self._ingestion_chain = build_ingestion_chain(schema, field_by_name)
-# rerank chain 在 search 时按需构建（因为依赖 search_params）
+# rerank chain is built on-demand at search time (depends on search_params)
 ```
 
-### 8.2 Insert：4 行 apply → 1 行 execute
+### 8.2 Insert: 4 Lines of Apply → 1 Line of Execute
 
 **Before**:
 ```python
-# insert() 中
+# in insert()
 if self._bm25_functions:
     self._apply_bm25_functions(records)
 if self._embedding_functions:
@@ -1082,44 +1084,44 @@ if self._embedding_functions:
 
 **After**:
 ```python
-# insert() 中
+# in insert()
 if self._ingestion_chain:
     df = DataFrame.from_records(records)
     self._ingestion_chain.execute(df)
-    # records 已就地修改，无需额外操作
+    # records are modified in-place, no additional work needed
 ```
 
-### 8.3 Search 后处理：分散的 rerank/decay → rerank chain
+### 8.3 Search Post-Processing: Scattered Rerank/Decay → Rerank Chain
 
 **Before**:
 ```python
-# search() 中约 30 行
+# ~30 lines in search()
 if self._query_texts is not None:
     raw_results = self._apply_rerank(raw_results, self._query_texts, ...)
     scores_replaced = True
 if self._decay_functions:
     raw_results = self._apply_decay(raw_results, metric_type, scores_replaced)
     scores_replaced = True
-# + group_by 后处理
-# + offset 处理
+# + group_by post-processing
+# + offset handling
 ```
 
 **After**:
 ```python
-# search() 中 — rerank chain（Hybrid Search 场景）
+# in search() — rerank chain (Hybrid Search scenario)
 if rerank_chain:
-    # 多路搜索结果 → DataFrame
+    # Multi-path search results → DataFrames
     dfs = [DataFrame.from_search_results(r) for r in per_path_results]
     merged = rerank_chain.execute(*dfs)
     raw_results = merged.to_search_results()
-    # Sort + Limit + GroupBy + RoundDecimal + Select 全在 chain 内完成
+    # Sort + Limit + GroupBy + RoundDecimal + Select all handled within the chain
 ```
 
-### 8.4 可删除的方法
+### 8.4 Methods to Remove
 
-chain 重构后，以下 Collection 方法可以删除：
+After chain refactoring, the following Collection methods can be deleted:
 
-| 方法 | 替代 |
+| Method | Replacement |
 |---|---|
 | `_apply_bm25_functions()` | `BM25Expr` + `MapOp` |
 | `_apply_embedding_functions()` | `EmbeddingExpr` + `MapOp` |
@@ -1128,12 +1130,12 @@ chain 重构后，以下 Collection 方法可以删除：
 
 ---
 
-## 9. 数据流图
+## 9. Data Flow Diagrams
 
-### 9.1 Ingestion Chain 数据流
+### 9.1 Ingestion Chain Data Flow
 
 ```
-用户 records: [{"text": "hello world", "id": 1}, ...]
+User records: [{"text": "hello world", "id": 1}, ...]
     │
     ▼
 DataFrame.from_records(records)
@@ -1149,58 +1151,58 @@ DataFrame.from_records(records)
     │   │  compute: EmbeddingExpr.execute([texts]) → [vectors]
     │   │  write:   records[i]["dense_vec"] = vectors[i]
     │   ▼
-    ├─ [未来: MapOp(DimReduceExpr, ["dense_vec"] → ["reduced_vec"])]
-    │   │  串联：消费上一步的 dense_vec 输出
+    ├─ [Future: MapOp(DimReduceExpr, ["dense_vec"] → ["reduced_vec"])]
+    │   │  chaining: consumes dense_vec output from previous step
     │   ▼
     │
-df.to_records() → 修改后的 records，继续走 validate → WAL → MemTable
+df.to_records() → modified records, continue to validate → WAL → MemTable
 ```
 
-### 9.2 Rerank Chain 数据流（Decay 示例）
+### 9.2 Rerank Chain Data Flow (Decay Example)
 
 ```
-多路搜索结果:
+Multi-path search results:
   path_0: [[{$id: 1, $score: 0.9, ts: 100}, {$id: 2, $score: 0.8, ts: 200}], ...]  (dense)
   path_1: [[{$id: 2, $score: -3.5, ts: 200}, {$id: 3, $score: -4.1, ts: 50}], ...]  (BM25)
     │
     ▼
 MergeOp(strategy="max", metric_types=["COSINE", "BM25"])
-    │  per-query: pk 去重 + 按 max 策略取最高 $score
+    │  per-query: deduplicate by pk + take highest $score via max strategy
     │  result: [[{$id: 1, $score: 0.9, ts: 100}, {$id: 2, $score: 0.8, ts: 200}, {$id: 3, ...}], ...]
     ▼
 MapOp(DecayExpr(gauss, origin=now, scale=86400), ["ts"] → ["_decay_score"])
     │  per-row: _decay_score = gauss(|ts - now|)
-    │  result: 每条 hit 新增 _decay_score 字段
+    │  result: each hit gains a _decay_score field
     ▼
 MapOp(ScoreCombineExpr("multiply"), ["$score", "_decay_score"] → ["$score"])
     │  per-row: $score = $score * _decay_score
-    │  result: $score 已更新
+    │  result: $score updated
     ▼
 SortOp("$score", desc=True)
-    │  per-chunk: 按 $score 降序排列
+    │  per-chunk: sort by $score descending
     ▼
 LimitOp(limit=10, offset=0)
-    │  per-chunk: 取前 10 条
+    │  per-chunk: take first 10
     ▼
-MapOp(RoundDecimalExpr(4), ["$score"] → ["$score"])     [可选]
+MapOp(RoundDecimalExpr(4), ["$score"] → ["$score"])     [optional]
     │  per-row: $score = round($score, 4)
     ▼
 SelectOp("$id", "$score")
-    │  per-row: 只保留 $id 和 $score
+    │  per-row: keep only $id and $score
     ▼
-DataFrame.to_search_results() → 最终返回值
+DataFrame.to_search_results() → final return value
 ```
 
 ---
 
-## 10. 模块结构
+## 10. Module Structure
 
-### 新增 `function/` 包
+### New `function/` Package
 
 ```
 milvus_lite/function/
-├── __init__.py           # 公开 API: FuncChain, build_ingestion_chain, build_rerank_chain
-├── types.py              # FunctionExpr ABC, FuncContext, Stage 常量, 列名常量
+├── __init__.py           # Public API: FuncChain, build_ingestion_chain, build_rerank_chain
+├── types.py              # FunctionExpr ABC, FuncContext, Stage constants, column name constants
 ├── dataframe.py          # DataFrame
 ├── chain.py              # FuncChain
 ├── operator.py           # Operator ABC
@@ -1223,45 +1225,45 @@ milvus_lite/function/
 └── builder.py            # build_ingestion_chain, build_rerank_chain
 ```
 
-### 修改的现有模块
+### Modified Existing Modules
 
-| 模块 | 变更 |
+| Module | Changes |
 |---|---|
-| `engine/collection.py` | 删除 4 组 function 列表 + 4 个 apply 方法；改用 `_ingestion_chain` |
-| `engine/collection.py` | search 后处理逻辑重构为 rerank chain 调用 |
+| `engine/collection.py` | Remove 4 function lists + 4 apply methods; use `_ingestion_chain` instead |
+| `engine/collection.py` | Refactor search post-processing logic to use rerank chain |
 
 ---
 
-## 11. 子阶段拆分
+## 11. Sub-Phase Breakdown
 
-| 子阶段 | 内容 | 交付物 |
+| Sub-Phase | Content | Deliverables |
 |---|---|---|
-| **FC-1** | 基础框架 | `types.py`（FunctionExpr, FuncContext, constants）、`dataframe.py`（DataFrame）、`operator.py`（Operator ABC）、`chain.py`（FuncChain）、单测 |
-| **FC-2** | MapOp + Ingestion Exprs | `ops/map_op.py`、`expr/bm25_expr.py`、`expr/embedding_expr.py`、`builder.py`（build_ingestion_chain）、单测 |
-| **FC-3** | Collection insert 重构 | 删除 `_bm25_functions` / `_embedding_functions` / `_apply_*` 方法，改用 ingestion chain；**回归测试全绿** |
-| **FC-4** | Rerank Operators | `ops/merge_op.py`、`ops/sort_op.py`、`ops/limit_op.py`、`ops/select_op.py`、`ops/group_by_op.py`、单测 |
-| **FC-5** | Rerank Exprs | `expr/decay_expr.py`、`expr/score_combine.py`、`expr/round_decimal.py`、`expr/rerank_model.py`、单测 |
-| **FC-6** | Rerank Chain Builder | `builder.py`（build_rerank_chain）、4 种 chain 模式的集成测试 |
-| **FC-7** | Collection search 重构 | 删除 `_apply_rerank` / `_apply_decay` / 内联 group_by / offset 逻辑，改用 rerank chain；**回归测试全绿** |
-| **FC-8** | gRPC Hybrid Search 对接 | `servicer.py` HybridSearch RPC 使用 rerank chain 替代内联 reranker；pymilvus 端到端测试 |
+| **FC-1** | Core framework | `types.py` (FunctionExpr, FuncContext, constants), `dataframe.py` (DataFrame), `operator.py` (Operator ABC), `chain.py` (FuncChain), unit tests |
+| **FC-2** | MapOp + Ingestion Exprs | `ops/map_op.py`, `expr/bm25_expr.py`, `expr/embedding_expr.py`, `builder.py` (build_ingestion_chain), unit tests |
+| **FC-3** | Collection insert refactor | Remove `_bm25_functions` / `_embedding_functions` / `_apply_*` methods, use ingestion chain instead; **all regression tests green** |
+| **FC-4** | Rerank Operators | `ops/merge_op.py`, `ops/sort_op.py`, `ops/limit_op.py`, `ops/select_op.py`, `ops/group_by_op.py`, unit tests |
+| **FC-5** | Rerank Exprs | `expr/decay_expr.py`, `expr/score_combine.py`, `expr/round_decimal.py`, `expr/rerank_model.py`, unit tests |
+| **FC-6** | Rerank Chain Builder | `builder.py` (build_rerank_chain), integration tests for all 4 chain patterns |
+| **FC-7** | Collection search refactor | Remove `_apply_rerank` / `_apply_decay` / inline group_by / offset logic, use rerank chain instead; **all regression tests green** |
+| **FC-8** | gRPC Hybrid Search integration | `servicer.py` HybridSearch RPC uses rerank chain instead of inline reranker; pymilvus end-to-end tests |
 
-### 验证策略
+### Verification Strategy
 
-| 子阶段 | 测试要点 |
+| Sub-Phase | Test Focus |
 |---|---|
-| FC-1 | DataFrame 创建/导出/列读写；FuncChain 空 chain / 单 op / 多 op 执行 |
-| FC-2 | BM25Expr 分词+TF 正确；EmbeddingExpr 批量 + 空值处理；MapOp 列映射正确 |
-| FC-3 | **所有已有 insert 相关测试不回归**（BM25 insert、embedding insert、mixed insert） |
-| FC-4 | MergeOp 5 种策略的去重+合并分数正确；SortOp 正序/逆序/None 处理；LimitOp offset 边界；SelectOp 列过滤；GroupByOp 分组+scorer |
-| FC-5 | DecayExpr 三种衰减函数与手算对比；ScoreCombineExpr multiply/sum/max；RoundDecimalExpr 精度 |
-| FC-6 | 4 种 rerank chain（RRF/Weighted/Decay/Model）端到端输入输出验证 |
-| FC-7 | **所有已有 search/rerank 测试不回归**；chain 路径与原始路径结果一致 |
-| FC-8 | pymilvus hybrid_search 端到端测试 |
+| FC-1 | DataFrame create/export/column read-write; FuncChain empty chain / single op / multi op execution |
+| FC-2 | BM25Expr tokenization+TF correctness; EmbeddingExpr batch + null handling; MapOp column mapping correctness |
+| FC-3 | **All existing insert-related tests pass without regression** (BM25 insert, embedding insert, mixed insert) |
+| FC-4 | MergeOp 5 strategies: dedup + score merging correctness; SortOp ascending/descending/None handling; LimitOp offset boundaries; SelectOp column filtering; GroupByOp grouping + scorer |
+| FC-5 | DecayExpr 3 decay functions compared with hand-computed values; ScoreCombineExpr multiply/sum/max; RoundDecimalExpr precision |
+| FC-6 | 4 rerank chains (RRF/Weighted/Decay/Model) end-to-end input/output verification |
+| FC-7 | **All existing search/rerank tests pass without regression**; chain path results match original path results |
+| FC-8 | pymilvus hybrid_search end-to-end tests |
 
-### 完成标志
+### Completion Criteria
 
-- `milvus_lite/function/` 包完整实现
-- Collection 中无 per-type function 分支代码
-- 4 种 rerank chain（RRF / Weighted / Decay / Model）可由 builder 自动构建
-- 新增 function 类型只需：新增 FunctionExpr 子类 + 注册到 builder
-- **1529+ 测试全绿，0 回归**
+- `milvus_lite/function/` package fully implemented
+- No per-type function branch code in Collection
+- 4 rerank chains (RRF / Weighted / Decay / Model) automatically built by builder
+- Adding a new function type requires only: new FunctionExpr subclass + registration in builder
+- **1529+ tests green, 0 regressions**
