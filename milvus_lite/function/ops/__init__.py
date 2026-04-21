@@ -1,1 +1,3 @@
-# Operator implementations are added incrementally (FC-2 through FC-4).
+from milvus_lite.function.ops.map_op import MapOp
+
+__all__ = ["MapOp"]
