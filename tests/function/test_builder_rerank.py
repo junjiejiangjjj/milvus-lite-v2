@@ -120,7 +120,8 @@ def test_build_hybrid_rrf():
     names = _op_names(chain)
     assert names[0] == "Merge"
     assert "Sort" in names
-    assert "Select" in names
+    # Hybrid chains skip SelectOp (caller handles field filtering)
+    assert "Select" not in names
 
 
 def test_build_hybrid_weighted():

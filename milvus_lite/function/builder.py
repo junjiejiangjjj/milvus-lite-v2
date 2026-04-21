@@ -151,7 +151,9 @@ def build_hybrid_rerank_chain(
     else:
         raise ValueError(f"Unsupported hybrid rerank strategy: {strategy!r}")
 
-    _build_rerank_tail(chain, search_params)
+    # skip_select=True: HybridSearch caller handles field filtering
+    # during format conversion (entity fields must pass through).
+    _build_rerank_tail(chain, search_params, skip_select=True)
     return chain
 
 
@@ -241,8 +243,19 @@ def _build_rerank_head(
         raise ValueError(f"Unknown reranker type: {reranker_type!r}")
 
 
-def _build_rerank_tail(chain: FuncChain, search_params: Dict[str, Any]) -> None:
-    """Build the common tail: Sort/GroupBy -> [RoundDecimal] -> Select."""
+def _build_rerank_tail(
+    chain: FuncChain,
+    search_params: Dict[str, Any],
+    *,
+    skip_select: bool = False,
+) -> None:
+    """Build the common tail: Sort/GroupBy -> [RoundDecimal] -> [Select].
+
+    Args:
+        skip_select: if True, omit the final SelectOp.  Used by
+            ``build_hybrid_rerank_chain`` where the caller handles
+            field filtering during format conversion.
+    """
     from milvus_lite.function.expr.round_decimal import RoundDecimalExpr
 
     group_by_field = search_params.get("group_by_field")
@@ -263,7 +276,8 @@ def _build_rerank_tail(chain: FuncChain, search_params: Dict[str, Any]) -> None:
             RoundDecimalExpr(round_decimal), [SCORE_FIELD], [SCORE_FIELD]
         )
 
-    select_cols = [ID_FIELD, SCORE_FIELD]
-    if group_by_field:
-        select_cols.extend([group_by_field, GROUP_SCORE_FIELD])
-    chain.select(*select_cols)
+    if not skip_select:
+        select_cols = [ID_FIELD, SCORE_FIELD]
+        if group_by_field:
+            select_cols.extend([group_by_field, GROUP_SCORE_FIELD])
+        chain.select(*select_cols)

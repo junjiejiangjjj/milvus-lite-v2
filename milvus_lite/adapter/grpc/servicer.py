@@ -800,11 +800,14 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         """Multi-route ANN search with reranking fusion.
 
         Parses each sub-SearchRequest independently, dispatches to
-        Collection.search(), then merges results via WeightedRanker
-        or RRFRanker.
+        Collection.search(), then merges results via FuncChain
+        (MergeOp + Sort/GroupBy + Limit + Select).
         """
         try:
-            from milvus_lite.adapter.grpc.reranker import parse_rank_params, rerank
+            from milvus_lite.adapter.grpc.reranker import parse_rank_params
+            from milvus_lite.function.builder import build_hybrid_rerank_chain
+            from milvus_lite.function.dataframe import DataFrame
+            from milvus_lite.function.types import ID_FIELD, SCORE_FIELD
 
             col = self._db.get_collection(request.collection_name)
             all_specs = col._index_specs or {}  # noqa: SLF001
@@ -815,9 +818,6 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             # Execute each sub-request independently
             all_results = []
             for sub_req in request.requests:
-                # Resolve per-field default metric from the field's own
-                # index spec so BM25 sparse and COSINE dense sub-requests
-                # each get the correct metric.
                 sub_anns = _extract_anns_field(sub_req)
                 if sub_anns and sub_anns in all_specs:
                     sub_default_metric = all_specs[sub_anns].metric_type
@@ -825,8 +825,6 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     first_spec = next(iter(all_specs.values()), None)
                     sub_default_metric = first_spec.metric_type if first_spec else "COSINE"
                 parsed = parse_search_request(sub_req, default_metric_type=sub_default_metric)
-                # When group_by is applied post-rerank, increase sub-search top_k
-                # to ensure enough diverse groups are fetched for the final merge.
                 sub_top_k = parsed["top_k"]
                 gb_field = rp.get("group_by_field")
                 if gb_field is not None:
@@ -845,22 +843,47 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 )
                 all_results.append(results)
 
-            # Rerank
-            merged = rerank(
+            # Convert each route to DataFrame with $id/$score virtual columns
+            dfs = []
+            for route_results in all_results:
+                chunks = []
+                for query_hits in route_results:
+                    chunk = []
+                    for hit in query_hits:
+                        flat = {ID_FIELD: hit["id"], SCORE_FIELD: -hit["distance"]}
+                        flat.update(hit.get("entity", {}))
+                        chunk.append(flat)
+                    chunks.append(chunk)
+                dfs.append(DataFrame(chunks))
+
+            # Build and execute rerank chain
+            gb_field = rp.get("group_by_field")
+            search_params = {
+                "limit": rp["limit"],
+                "offset": rp["offset"],
+                "group_by_field": gb_field,
+                "group_size": rp.get("group_size") or 1,
+            }
+            chain = build_hybrid_rerank_chain(
                 strategy=rp["strategy"],
                 params=rp["params"],
-                all_results=all_results,
-                limit=rp["limit"],
-                offset=rp["offset"],
+                search_params=search_params,
             )
+            result_df = chain.execute(*dfs)
 
-            # Apply group_by if specified in rank_params
-            gb_field = rp.get("group_by_field")
-            if gb_field is not None:
-                from milvus_lite.engine.collection import _apply_group_by
-                gb_size = rp.get("group_size") or 1
-                gb_strict = rp.get("strict_group_size") or False
-                merged = _apply_group_by(merged, gb_field, rp["limit"], gb_size, gb_strict)
+            # Convert back to {"id", "distance", "entity"} format
+            _virtual = {ID_FIELD, SCORE_FIELD, "$group_score"}
+            merged = []
+            for ci in range(result_df.num_chunks):
+                hits = []
+                for row in result_df.chunk(ci):
+                    entity = {k: v for k, v in row.items() if k not in _virtual}
+                    hits.append({
+                        "id": row[ID_FIELD],
+                        "distance": -row[SCORE_FIELD],
+                        "entity": entity,
+                    })
+                merged.append(hits)
 
             # Build response
             output_fields = list(request.output_fields) or None
