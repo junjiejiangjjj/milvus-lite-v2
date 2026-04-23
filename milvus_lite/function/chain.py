@@ -40,6 +40,10 @@ class FuncChain:
 
     def add(self, op: Operator) -> FuncChain:
         """Append an Operator to the end of the pipeline."""
+        from milvus_lite.function.ops.merge_op import MergeOp
+
+        if isinstance(op, MergeOp) and self._operators:
+            raise ValueError("MergeOp must be the first operator in the chain")
         self._operators.append(op)
         return self
 

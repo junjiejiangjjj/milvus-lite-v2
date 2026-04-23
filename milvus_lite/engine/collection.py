@@ -1041,18 +1041,24 @@ class Collection:
         # ── 2. Use pre-built chain + append per-search tail ──
         # The pre-built self._rerank_chain has Map steps only (Decay/Model).
         # Clone it and append Sort/Limit (which depend on per-search params).
+        # Deep-copy RerankModelExpr to avoid mutating the shared pre-built chain.
+        import copy
+
+        from milvus_lite.function.expr.rerank_model import RerankModelExpr
+        from milvus_lite.function.ops.map_op import MapOp
+
         chain = FuncChain("single_rerank", STAGE_RERANK)
         for op in self._rerank_chain.operators:
-            chain.add(op)
-
-        # Inject query_texts into RerankModelExpr if present
-        if query_texts is not None:
-            from milvus_lite.function.expr.rerank_model import RerankModelExpr
-            for op in chain.operators:
-                from milvus_lite.function.ops.map_op import MapOp
-                if isinstance(op, MapOp) and isinstance(op.expr, RerankModelExpr):
-                    op.expr.query_texts = query_texts
-                    break
+            if (
+                isinstance(op, MapOp)
+                and isinstance(op.expr, RerankModelExpr)
+                and query_texts is not None
+            ):
+                new_expr = copy.copy(op.expr)
+                new_expr.query_texts = query_texts
+                chain.add(MapOp(new_expr, op._input_cols, op._output_cols))
+            else:
+                chain.add(op)
 
         # Append sort + limit (or group_by)
         if group_by_field is not None:

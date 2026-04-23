@@ -37,8 +37,6 @@ class MergeOp(Operator):
         self._strategy = strategy
         self._weights: List[float] = kwargs.get("weights", [])
         self._rrf_k: float = kwargs.get("rrf_k", 60.0)
-        self._metric_types: List[str] = kwargs.get("metric_types", [])
-        self._normalize: bool = kwargs.get("normalize", False)
 
     def execute(self, ctx: FuncContext, df: DataFrame) -> DataFrame:
         raise RuntimeError("MergeOp requires execute_multi()")

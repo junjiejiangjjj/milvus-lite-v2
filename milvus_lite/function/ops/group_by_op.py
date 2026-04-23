@@ -23,6 +23,8 @@ class GroupByOp(Operator):
 
     name = "GroupBy"
 
+    _VALID_SCORERS = frozenset({"max", "sum", "avg"})
+
     def __init__(
         self,
         field: str,
@@ -31,6 +33,8 @@ class GroupByOp(Operator):
         offset: int = 0,
         scorer: str = "max",
     ) -> None:
+        if scorer not in self._VALID_SCORERS:
+            raise ValueError(f"Unknown group scorer: {scorer!r}")
         self._field = field
         self._group_size = group_size
         self._limit = limit
@@ -80,4 +84,4 @@ class GroupByOp(Operator):
             return sum(scores)
         elif self._scorer == "avg":
             return sum(scores) / len(scores)
-        return max(scores)
+        raise ValueError(f"Unknown group scorer: {self._scorer!r}")

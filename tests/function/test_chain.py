@@ -137,3 +137,25 @@ def test_chain_operators_property():
     # operators returns a copy
     chain.operators.append(op)
     assert len(chain.operators) == 1
+
+
+# ── MergeOp position validation via add() ────────────────────
+
+
+def test_add_merge_op_at_non_first_position_rejected():
+    from milvus_lite.function.ops.merge_op import MergeOp
+
+    chain = FuncChain("test", STAGE_RERANK)
+    chain.add(_AddColumnOp("x", 1))
+    with pytest.raises(ValueError, match="MergeOp must be the first"):
+        chain.add(MergeOp("rrf"))
+
+
+# ── GroupByOp scorer validation ──────────────────────────────
+
+
+def test_group_by_rejects_unknown_scorer():
+    from milvus_lite.function.ops.group_by_op import GroupByOp
+
+    with pytest.raises(ValueError, match="Unknown group scorer"):
+        GroupByOp("field", group_size=1, limit=10, scorer="invalid")
