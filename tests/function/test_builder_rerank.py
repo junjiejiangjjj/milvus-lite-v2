@@ -1,8 +1,11 @@
-"""Tests for build_rerank_chain and build_hybrid_rerank_chain."""
+"""Tests for build_rerank_chain, build_hybrid_rerank_chain, build_single_rerank_chain."""
+
+import pytest
 
 from milvus_lite.function.builder import (
     build_hybrid_rerank_chain,
     build_rerank_chain,
+    build_single_rerank_chain,
 )
 from milvus_lite.function.ops.group_by_op import GroupByOp
 from milvus_lite.function.ops.limit_op import LimitOp
@@ -139,3 +142,46 @@ def test_build_hybrid_with_group_by():
     names = _op_names(chain)
     assert "GroupBy" in names
     assert "Sort" not in names
+
+
+def test_build_hybrid_rejects_unknown_strategy():
+    with pytest.raises(ValueError, match="Unsupported hybrid rerank strategy"):
+        build_hybrid_rerank_chain("unknown", {}, {"limit": 10})
+
+
+# ── build_single_rerank_chain ────────────────────────────────
+
+
+def test_build_single_rerank_chain_both_none():
+    """No rerank_func and no decay_func → empty chain (no ops)."""
+    chain = build_single_rerank_chain(rerank_func=None, decay_func=None)
+    assert chain.operators == []
+
+
+def test_build_single_rerank_chain_decay_only():
+    func = Function(
+        name="decay_fn",
+        function_type=FunctionType.RERANK,
+        input_field_names=["ts"],
+        output_field_names=[],
+        params={
+            "reranker": "decay", "function": "gauss",
+            "origin": 0, "scale": 100, "decay": 0.5,
+        },
+    )
+    chain = build_single_rerank_chain(decay_func=func)
+    names = _op_names(chain)
+    # Map(Decay) → Map(ScoreCombine), no Sort/Limit
+    assert names == ["Map", "Map"]
+
+
+# ── _build_rerank_tail: limit=0 ──────────────────────────────
+
+
+def test_build_rerank_tail_limit_zero_skips_limit_op():
+    """When limit=0, LimitOp should not be added."""
+    schema = _schema_with_rerank(strategy="rrf")
+    chain = build_rerank_chain(schema, {"limit": 0})
+    names = _op_names(chain)
+    assert "Sort" in names
+    assert "Limit" not in names

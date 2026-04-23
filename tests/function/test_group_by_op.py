@@ -82,3 +82,48 @@ def test_group_by_group_size_truncates():
     assert len(result.chunk(0)) == 2
     pks = {h[ID_FIELD] for h in result.chunk(0)}
     assert pks == {1, 2}
+
+
+# ── Missing group field → None key ──────────────────────────
+
+
+def test_group_by_missing_field_groups_as_none():
+    """Records without the group field are grouped under None key."""
+    df = DataFrame([[
+        {ID_FIELD: 1, SCORE_FIELD: 0.9},           # no "cat"
+        {ID_FIELD: 2, SCORE_FIELD: 0.8},           # no "cat"
+        {ID_FIELD: 3, SCORE_FIELD: 0.7, "cat": "A"},
+    ]])
+    op = GroupByOp("cat", group_size=2, limit=10)
+    result = op.execute(_ctx(), df)
+    chunk = result.chunk(0)
+    # 2 groups: None (pk1, pk2) and "A" (pk3)
+    assert len(chunk) == 3
+    none_hits = [h for h in chunk if h.get("cat") is None]
+    assert len(none_hits) == 2
+
+
+# ── Offset >= number of groups → empty ──────────────────────
+
+
+def test_group_by_offset_exceeds_groups():
+    df = DataFrame([[_hit(1, 0.9, "A"), _hit(2, 0.7, "B")]])
+    op = GroupByOp("cat", group_size=1, limit=10, offset=5)
+    result = op.execute(_ctx(), df)
+    assert result.chunk(0) == []
+
+
+# ── Missing $score defaults to 0 ────────────────────────────
+
+
+def test_group_by_missing_score_defaults_to_zero():
+    df = DataFrame([[
+        {ID_FIELD: 1, "cat": "A"},  # no $score
+        {ID_FIELD: 2, "cat": "A", SCORE_FIELD: 0.5},
+    ]])
+    op = GroupByOp("cat", group_size=2, limit=1)
+    result = op.execute(_ctx(), df)
+    chunk = result.chunk(0)
+    # sorted by score desc → pk2 (0.5) before pk1 (0)
+    assert chunk[0][ID_FIELD] == 2
+    assert chunk[1][ID_FIELD] == 1

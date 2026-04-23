@@ -128,3 +128,52 @@ def test_merge_execute_raises():
     op = MergeOp("rrf")
     with pytest.raises(RuntimeError):
         op.execute(_ctx(), _df([[_hit(1, 0.5)]]))
+
+
+# ── Weighted: all scores identical (range=0) ─────────────────
+
+
+def test_merge_weighted_identical_scores():
+    """When all scores in a route are the same, range=0 → norm defaults to 1.0."""
+    path0 = _df([[_hit(1, 5.0), _hit(2, 5.0)]])
+    path1 = _df([[_hit(1, 3.0)]])
+    op = MergeOp("weighted", weights=[0.6, 0.4])
+    result = op.execute_multi(_ctx(), [path0, path1])
+    chunk = result.chunk(0)
+    pk1 = next(h for h in chunk if h[ID_FIELD] == 1)
+    pk2 = next(h for h in chunk if h[ID_FIELD] == 2)
+    # path0 range=0 → norm=1.0 for both; path1 single → norm=1.0
+    # pk1 = 0.6*1.0 + 0.4*1.0 = 1.0
+    # pk2 = 0.6*1.0 = 0.6
+    assert abs(pk1[SCORE_FIELD] - 1.0) < 1e-9
+    assert abs(pk2[SCORE_FIELD] - 0.6) < 1e-9
+
+
+# ── Inputs with mismatched num_chunks ────────────────────────
+
+
+def test_merge_mismatched_num_chunks():
+    """path0 has 2 queries, path1 has 1 → query 1 uses empty chunk for path1."""
+    path0 = _df([[_hit(1, 0.9)], [_hit(2, 0.8)]])
+    path1 = _df([[_hit(3, 0.7)]])  # only 1 query
+    op = MergeOp("rrf")
+    result = op.execute_multi(_ctx(), [path0, path1])
+    assert result.num_chunks == 2
+    # query 0: pk1 + pk3
+    assert len(result.chunk(0)) == 2
+    # query 1: only pk2 (path1 has no chunk 1 → treated as empty)
+    assert len(result.chunk(1)) == 1
+    assert result.chunk(1)[0][ID_FIELD] == 2
+
+
+# ── Weights longer than routes ───────────────────────────────
+
+
+def test_merge_weighted_extra_weights_ignored():
+    """Extra weights beyond num_routes are silently ignored."""
+    path0 = _df([[_hit(1, 0.8)]])
+    path1 = _df([[_hit(1, 0.4)]])
+    op = MergeOp("weighted", weights=[0.7, 0.3, 0.5])  # 3 weights, 2 routes
+    result = op.execute_multi(_ctx(), [path0, path1])
+    chunk = result.chunk(0)
+    assert len(chunk) == 1

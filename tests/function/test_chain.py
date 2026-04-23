@@ -159,3 +159,69 @@ def test_group_by_rejects_unknown_scorer():
 
     with pytest.raises(ValueError, match="Unknown group scorer"):
         GroupByOp("field", group_size=1, limit=10, scorer="invalid")
+
+
+# ── Merge → Sort → Limit full pipeline ──────────────────────
+
+
+def test_merge_sort_limit_pipeline():
+    """MergeOp as first op followed by Sort and Limit."""
+    from milvus_lite.function.types import ID_FIELD, SCORE_FIELD
+
+    chain = FuncChain("test", STAGE_RERANK)
+    chain.merge("rrf", rrf_k=60)
+    chain.sort(SCORE_FIELD, desc=True)
+    chain.limit(2)
+
+    path0 = DataFrame([
+        [
+            {ID_FIELD: 1, SCORE_FIELD: 0.9},
+            {ID_FIELD: 2, SCORE_FIELD: 0.8},
+            {ID_FIELD: 3, SCORE_FIELD: 0.7},
+        ]
+    ])
+    path1 = DataFrame([
+        [
+            {ID_FIELD: 2, SCORE_FIELD: 0.6},
+            {ID_FIELD: 4, SCORE_FIELD: 0.5},
+        ]
+    ])
+    result = chain.execute(path0, path1)
+    chunk = result.chunk(0)
+    # limit=2
+    assert len(chunk) == 2
+    # sorted desc by $score
+    assert chunk[0][SCORE_FIELD] >= chunk[1][SCORE_FIELD]
+    # pk=2 appears in both routes → highest RRF
+    assert chunk[0][ID_FIELD] == 2
+
+
+def test_merge_map_sort_limit_pipeline():
+    """MergeOp → MapOp → SortOp → LimitOp end-to-end."""
+    from milvus_lite.function.types import ID_FIELD, SCORE_FIELD
+
+    class _NegateScoreExpr(FunctionExpr):
+        name = "negate"
+        supported_stages = frozenset({STAGE_RERANK})
+
+        def execute(self, ctx, inputs):
+            return [[-v for v in inputs[0]]]
+
+    chain = FuncChain("test", STAGE_RERANK)
+    chain.merge("max")
+    chain.map(_NegateScoreExpr(), [SCORE_FIELD], [SCORE_FIELD])
+    chain.sort(SCORE_FIELD, desc=True)
+    chain.limit(1)
+
+    path0 = DataFrame([
+        [{ID_FIELD: 1, SCORE_FIELD: 0.9}, {ID_FIELD: 2, SCORE_FIELD: 0.1}]
+    ])
+    path1 = DataFrame([
+        [{ID_FIELD: 1, SCORE_FIELD: 0.5}]
+    ])
+    result = chain.execute(path0, path1)
+    chunk = result.chunk(0)
+    assert len(chunk) == 1
+    # After max merge: pk1=0.9, pk2=0.1. After negate: pk1=-0.9, pk2=-0.1.
+    # Sort desc → pk2 first (-0.1 > -0.9). Limit 1 → pk2.
+    assert chunk[0][ID_FIELD] == 2
