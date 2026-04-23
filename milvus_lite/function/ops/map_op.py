@@ -38,6 +38,14 @@ class MapOp(Operator):
     def expr(self) -> FunctionExpr:
         return self._expr
 
+    @property
+    def input_cols(self) -> List[str]:
+        return self._input_cols
+
+    @property
+    def output_cols(self) -> List[str]:
+        return self._output_cols
+
     def execute(self, ctx: FuncContext, df: DataFrame) -> DataFrame:
         for chunk_idx in range(df.num_chunks):
             ctx.chunk_idx = chunk_idx

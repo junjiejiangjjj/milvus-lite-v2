@@ -25,6 +25,7 @@ storage layer free of engine-layer types.
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import threading
@@ -1041,22 +1042,22 @@ class Collection:
         # ── 2. Use pre-built chain + append per-search tail ──
         # The pre-built self._rerank_chain has Map steps only (Decay/Model).
         # Clone it and append Sort/Limit (which depend on per-search params).
-        # Deep-copy RerankModelExpr to avoid mutating the shared pre-built chain.
-        import copy
-
+        # Shallow-copy RerankModelExpr to bind query_texts without mutating
+        # the shared pre-built chain (provider is stateless, safe to share).
         from milvus_lite.function.expr.rerank_model import RerankModelExpr
         from milvus_lite.function.ops.map_op import MapOp
 
+        clone_rerank = query_texts is not None
         chain = FuncChain("single_rerank", STAGE_RERANK)
         for op in self._rerank_chain.operators:
             if (
-                isinstance(op, MapOp)
+                clone_rerank
+                and isinstance(op, MapOp)
                 and isinstance(op.expr, RerankModelExpr)
-                and query_texts is not None
             ):
                 new_expr = copy.copy(op.expr)
                 new_expr.query_texts = query_texts
-                chain.add(MapOp(new_expr, op._input_cols, op._output_cols))
+                chain.add(MapOp(new_expr, op.input_cols, op.output_cols))
             else:
                 chain.add(op)
 
