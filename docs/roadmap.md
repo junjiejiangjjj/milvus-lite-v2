@@ -820,7 +820,6 @@ Search → top-N candidates → group by group_by_field → top group_size per g
 
 | RPC | Reason |
 |-----|------|
-| CreateAlias / DropAlias | Aliases not in MVP scope |
 | AlterCollection | Schema is immutable |
 | LoadPartitions / ReleasePartitions | Only collection-level load/release supported |
 
@@ -873,10 +872,10 @@ Search → top-N candidates → group by group_by_field → top group_size per g
 
 | Feature | Corresponding Milvus API | Description | Effort |
 |------|-----------------|------|--------|
-| Alias management | create/drop/alter/describe/list_aliases | Collection aliases, commonly used for version switching | Small |
-| Truncate Collection | truncate_collection | Clear collection data, preserve schema | Small |
-| list_indexes | list_indexes | List all indexes of a collection | Small |
-| get_partition_stats | get_partition_stats | Partition-level statistics (num_entities) | Small |
+| Alias management | create/drop/alter/describe/list_aliases | **Completed** — collection aliases persisted in `aliases.json` and accepted by read/write APIs | Small |
+| Truncate Collection | truncate_collection | **Completed** — clears collection data while preserving schema | Small |
+| list_indexes | list_indexes | **Completed** — returns field-name index names via DescribeIndex for pymilvus iterator compatibility | Small |
+| get_partition_stats | get_partition_stats | **Completed** — partition-level `row_count` | Small |
 | Search Iterator | search_iterator | Large result set paginated traversal (server-side cursor) | Medium |
 | Query Iterator | query_iterator | Query result paginated traversal (distinct from offset/limit) | Medium |
 

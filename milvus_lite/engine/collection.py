@@ -1489,6 +1489,15 @@ class Collection:
             return field_name in self._index_specs
         return bool(self._index_specs)
 
+    def list_indexes(self) -> List[str]:
+        """Return index names for this collection.
+
+        pymilvus's search_iterator v1 matches ``index_name`` against
+        ``anns_field``, so MilvusLite reports the field name as the
+        public index name.
+        """
+        return sorted(self._index_specs)
+
     def get_index_info(self, field_name: Optional[str] = None) -> Optional[dict]:
         """Return IndexSpec as dict. If field_name is None, returns first."""
         if field_name is not None:
@@ -1576,10 +1585,21 @@ class Collection:
         This is the value pymilvus's get_collection_stats reports as
         ``row_count``.
         """
+        return self._num_entities(partition_names=None)
+
+    def partition_num_entities(self, partition_name: str) -> int:
+        """Approximate live row count for one partition."""
+        if not self._manifest.has_partition(partition_name):
+            raise PartitionNotFoundError(partition_name)
+        return self._num_entities(partition_names=[partition_name])
+
+    def _num_entities(self, partition_names: Optional[List[str]]) -> int:
         pk_chunks: List[List[Any]] = []
         seq_chunks: List[np.ndarray] = []
 
         for seg in self._segments_snapshot():
+            if partition_names is not None and seg.partition not in partition_names:
+                continue
             if seg.num_rows == 0:
                 continue
             pk_chunks.append(list(seg.pks))
@@ -1587,7 +1607,7 @@ class Collection:
 
         mt_pks, mt_seqs, _vecs, _records = self._memtable.to_search_arrays(
             vector_field=self._vector_name,
-            partition_names=None,
+            partition_names=partition_names,
         )
         if mt_pks:
             pk_chunks.append(mt_pks)

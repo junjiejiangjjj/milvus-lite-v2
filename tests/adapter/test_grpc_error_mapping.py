@@ -105,8 +105,8 @@ def test_hybrid_search_unimplemented(milvus_client):
     assert hasattr(MilvusServicer, "HybridSearch")
 
 
-def test_create_alias_unimplemented(milvus_client):
+def test_create_alias_nonexistent_collection_reports_not_found(milvus_client):
     with pytest.raises(Exception) as exc_info:
         milvus_client.create_alias("demo", "al")
     msg = str(exc_info.value).lower()
-    assert "alias" in msg or "implement" in msg
+    assert "collection" in msg and "not exist" in msg

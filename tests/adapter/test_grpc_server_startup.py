@@ -79,10 +79,10 @@ def test_unimplemented_rpc_raises_clean_error(milvus_client):
     pymilvus exception that wraps gRPC's UNIMPLEMENTED status, NOT
     crash the connection or silent-fail.
 
-    We use ``create_alias`` because it's intentionally
-    UNIMPLEMENTED — aliases are not in MVP scope."""
+    We use ``load_partitions`` because partition-level load/release is
+    intentionally outside the current support surface."""
     with pytest.raises(Exception) as exc_info:
-        milvus_client.create_alias("col", "alias")
+        milvus_client.load_partitions("col", ["_default"])
     assert "implement" in str(exc_info.value).lower() or "not support" in str(exc_info.value).lower()
 
 
@@ -93,7 +93,7 @@ def test_connection_survives_unimplemented_call(grpc_server, milvus_client):
 
     # Trigger an UNIMPLEMENTED error via a still-unimplemented RPC
     with pytest.raises(Exception):
-        milvus_client.create_alias("col", "alias")
+        milvus_client.load_partitions("col", ["_default"])
 
     # Connection-level RPCs should still work on a fresh connection
     from pymilvus import connections, utility

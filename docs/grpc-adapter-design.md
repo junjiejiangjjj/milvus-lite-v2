@@ -100,6 +100,8 @@ grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 | `list_collections()` | `ShowCollections` | `db.list_collections()` | Direct mapping |
 | `get_collection_stats(name)` | `GetCollectionStatistics` | `col.num_entities` | Wrapped as `KeyValuePair[("row_count", str(n))]` |
 | `rename_collection(old, new)` | `RenameCollection` | `db.rename_collection(old, new)` | Direct mapping |
+| Aliases (`create/drop/alter/describe/list_aliases`) | `CreateAlias` / `DropAlias` / `AlterAlias` / `DescribeAlias` / `ListAliases` | `db.*_alias()` | Persisted in `aliases.json`; aliases are resolved before opening a Collection |
+| `truncate_collection(name)` | `TruncateCollection` | `db.truncate_collection(name)` | Clears data while preserving schema and aliases |
 | `alter_collection_properties` | `AlterCollection` | Schema is immutable | UNIMPLEMENTED |
 
 ### 4.2 Partition
@@ -110,7 +112,7 @@ grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 | `drop_partition(collection, partition)` | `DropPartition` | `col.drop_partition(name)` | API added in Phase 9.1 |
 | `has_partition(collection, partition)` | `HasPartition` | `partition in col.list_partitions()` | bool wrapper |
 | `list_partitions(collection)` | `ShowPartitions` | `col.list_partitions()` | Direct mapping |
-| `get_partition_stats` | `GetPartitionStatistics` | `col.partition_num_entities(name)` | Optionally added in Phase 9.1 |
+| `get_partition_stats` | `GetPartitionStatistics` | `col.partition_num_entities(name)` | Returns partition-level `row_count` |
 | `load_partitions` / `release_partitions` | `LoadPartitions` / `ReleasePartitions` | Engine load/release is at Collection level | UNIMPLEMENTED or mapped to collection load/release |
 
 ### 4.3 Data CRUD
@@ -139,7 +141,7 @@ grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 | `create_index(collection, index_params)` | `CreateIndex` | `col.create_index(field, params)` | Translator converts IndexParams' KeyValuePair list to IndexSpec |
 | `drop_index(collection, field_name, index_name)` | `DropIndex` | `col.drop_index(field)` | index_name is ignored (engine only supports one index per field) |
 | `describe_index(collection, field_name)` | `DescribeIndex` | `col.get_index_info()` | IndexSpec → IndexDescription proto |
-| `list_indexes(collection)` | `ListIndexedField` (Milvus internal RPC, pymilvus client has a wrapper) | `col.list_indexes()` | Engine adds a helper method |
+| `list_indexes(collection)` | `DescribeIndex` (pymilvus wrapper) | `col.list_indexes()` / `DescribeIndex` | Returns field-name index names for pymilvus iterator compatibility |
 | `get_index_state` / `get_index_build_progress` | `GetIndexState` / `GetIndexBuildProgress` | Engine build is synchronous, always returns `Finished` / `100%` | Trivial implementation |
 
 ### 4.6 Load / Release
@@ -159,7 +161,6 @@ grpc = ["grpcio>=1.50", "protobuf>=4.21"]
 | `compact(collection)` | `ManualCompaction` | `col.compact()` | Engine adds a manual compact trigger method |
 | `list_databases()` | `ListDatabases` | Stub returns `["default"]` | MilvusLite has no multi-database instances |
 | `using_database(name)` | `UseDatabase` | Only accepts "default", returns error otherwise | Trivial |
-| Aliases (`create_alias`, etc.) | `CreateAlias`, etc. | Engine does not support | UNIMPLEMENTED |
 | User / Role / Privilege | `CreateCredential`, etc. | Embedded mode has no RBAC | Always returns OK with empty results (so pymilvus won't crash) |
 | Backup / Restore | Various | Not supported | UNIMPLEMENTED |
 | Resource Group | `CreateResourceGroup`, etc. | Not supported | UNIMPLEMENTED |
@@ -518,9 +519,6 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         context.set_details(msg)
         return common_pb2.Status(code=2, reason=msg)
 
-    def CreateAlias(self, request, context):
-        return self._unimplemented(context, "CreateAlias", "aliases are not in MVP scope")
-
     def HybridSearch(self, request, context):
         # Phase 12: Multi-route search + WeightedRanker/RRFRanker fusion
         # Parse each sub-SearchRequest → col.search() → reranker.rerank()
@@ -811,7 +809,6 @@ milvus_lite-grpc = "milvus_lite.adapter.grpc.cli:main"
 | Backup / Restore RPCs | Future |
 | Bulk insert / Import | Future |
 | Replica / Resource Group | Future (not needed for single process) |
-| Aliases | Future |
 | Hybrid search (multi-vector) | Future |
 | Search iterator / pagination | Future (just need to add offset parameter to engine) |
 | Database concept (multiple db instances) | Future |

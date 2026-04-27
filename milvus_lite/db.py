@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import sys
 import shutil
+import json
 from typing import Any, Dict, List, Optional
 
 from milvus_lite.engine.collection import Collection
@@ -44,6 +45,7 @@ from milvus_lite.schema.validation import validate_schema
 COLLECTIONS_DIRNAME = "collections"
 LOCK_FILENAME = "LOCK"
 SCHEMA_FILENAME = "schema.json"
+ALIASES_FILENAME = "aliases.json"
 
 
 class MilvusLite:
@@ -81,6 +83,7 @@ class MilvusLite:
         # Cache of opened Collections, keyed by name. Collections are
         # only created when explicitly requested (lazy load on get).
         self._collections: Dict[str, Collection] = {}
+        self._aliases: Dict[str, str] = self._load_aliases()
         self._closed = False
 
     # ── public API ──────────────────────────────────────────────
@@ -124,6 +127,7 @@ class MilvusLite:
         """Open an existing Collection. Subsequent calls return the same
         cached instance."""
         self._check_open()
+        name = self.resolve_collection_name(name)
         if name in self._collections:
             return self._collections[name]
         if not self.has_collection(name):
@@ -140,6 +144,7 @@ class MilvusLite:
     def drop_collection(self, name: str) -> None:
         """Close and delete a Collection. No-op if it does not exist."""
         self._check_open()
+        name = self.resolve_collection_name(name)
         if not self.has_collection(name):
             return
 
@@ -152,6 +157,11 @@ class MilvusLite:
         shutil.rmtree(col_dir, ignore_errors=False)
         # Only remove from cache after successful rmtree
         self._collections.pop(name, None)
+        removed = [alias for alias, target in self._aliases.items() if target == name]
+        for alias in removed:
+            del self._aliases[alias]
+        if removed:
+            self._save_aliases()
 
     def rename_collection(self, old_name: str, new_name: str) -> None:
         """Rename a collection on disk and in the cache."""
@@ -180,8 +190,14 @@ class MilvusLite:
         _name, schema = load_schema(schema_path)
         save_schema(schema, new_name, schema_path)
 
+        for alias, target in list(self._aliases.items()):
+            if target == old_name:
+                self._aliases[alias] = new_name
+        self._save_aliases()
+
     def has_collection(self, name: str) -> bool:
         """True iff a Collection with this name exists on disk."""
+        name = self.resolve_collection_name(name)
         return os.path.exists(
             os.path.join(self._collection_dir(name), SCHEMA_FILENAME)
         )
@@ -211,6 +227,88 @@ class MilvusLite:
         """
         col = self.get_collection(name)
         return {"row_count": col.num_entities}
+
+    def get_partition_stats(self, collection_name: str, partition_name: str) -> Dict[str, Any]:
+        """Return basic stats for one partition."""
+        col = self.get_collection(collection_name)
+        return {"row_count": col.partition_num_entities(partition_name)}
+
+    def truncate_collection(self, name: str) -> None:
+        """Delete all data in a collection while preserving schema and aliases."""
+        self._check_open()
+        name = self.resolve_collection_name(name)
+        if not self.has_collection(name):
+            raise CollectionNotFoundError(f"collection {name!r} does not exist")
+
+        col_dir = self._collection_dir(name)
+        _schema_name, schema = load_schema(os.path.join(col_dir, SCHEMA_FILENAME))
+        if name in self._collections:
+            self._collections[name].close()
+            del self._collections[name]
+
+        shutil.rmtree(col_dir, ignore_errors=False)
+        os.makedirs(col_dir, exist_ok=False)
+        save_schema(schema, name, os.path.join(col_dir, SCHEMA_FILENAME))
+
+    def create_alias(self, collection_name: str, alias: str) -> None:
+        """Create a collection alias."""
+        self._check_open()
+        collection_name = self.resolve_collection_name(collection_name)
+        self._validate_name(alias)
+        if not self.has_collection(collection_name):
+            raise CollectionNotFoundError(
+                f"collection {collection_name!r} does not exist"
+            )
+        if os.path.exists(os.path.join(self._collection_dir(alias), SCHEMA_FILENAME)):
+            raise CollectionAlreadyExistsError(
+                f"alias {alias!r} conflicts with an existing collection"
+            )
+        if alias in self._aliases:
+            raise CollectionAlreadyExistsError(f"alias {alias!r} already exists")
+        self._aliases[alias] = collection_name
+        self._save_aliases()
+
+    def alter_alias(self, collection_name: str, alias: str) -> None:
+        """Point an existing alias at another collection."""
+        self._check_open()
+        collection_name = self.resolve_collection_name(collection_name)
+        if alias not in self._aliases:
+            raise CollectionNotFoundError(f"alias {alias!r} does not exist")
+        if not self.has_collection(collection_name):
+            raise CollectionNotFoundError(
+                f"collection {collection_name!r} does not exist"
+            )
+        self._aliases[alias] = collection_name
+        self._save_aliases()
+
+    def drop_alias(self, alias: str) -> None:
+        """Drop an alias. No-op if it does not exist, matching drop_collection."""
+        self._check_open()
+        if alias in self._aliases:
+            del self._aliases[alias]
+            self._save_aliases()
+
+    def describe_alias(self, alias: str) -> Dict[str, str]:
+        """Return alias metadata."""
+        self._check_open()
+        if alias not in self._aliases:
+            raise CollectionNotFoundError(f"alias {alias!r} does not exist")
+        return {"alias": alias, "collection": self._aliases[alias]}
+
+    def list_aliases(self, collection_name: Optional[str] = None) -> List[str]:
+        """Return aliases, optionally filtered by target collection."""
+        self._check_open()
+        if collection_name:
+            collection_name = self.resolve_collection_name(collection_name)
+            return sorted(
+                alias for alias, target in self._aliases.items()
+                if target == collection_name
+            )
+        return sorted(self._aliases)
+
+    def resolve_collection_name(self, name: str) -> str:
+        """Resolve a collection alias to its target collection name."""
+        return self._aliases.get(name, name)
 
     def close(self) -> None:
         """Close every cached Collection and release the LOCK.
@@ -258,6 +356,30 @@ class MilvusLite:
 
     def _collection_dir(self, name: str) -> str:
         return os.path.join(self._collections_root(), name)
+
+    def _aliases_path(self) -> str:
+        return os.path.join(self._data_dir, ALIASES_FILENAME)
+
+    def _load_aliases(self) -> Dict[str, str]:
+        path = self._aliases_path()
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        return {
+            str(alias): str(target)
+            for alias, target in data.items()
+            if isinstance(alias, str) and isinstance(target, str)
+        }
+
+    def _save_aliases(self) -> None:
+        path = self._aliases_path()
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(self._aliases, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(tmp_path, path)
 
     @staticmethod
     def _validate_name(name: str) -> None:

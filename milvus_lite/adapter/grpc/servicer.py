@@ -793,6 +793,47 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
             )
 
+    def GetPartitionStatistics(self, request, context):
+        """Return row_count for one partition."""
+        try:
+            stats = self._db.get_partition_stats(
+                request.collection_name, request.partition_name
+            )
+            kv_pairs = [
+                common_pb2.KeyValuePair(key=str(k), value=str(v))
+                for k, v in stats.items()
+            ]
+            return milvus_pb2.GetPartitionStatisticsResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                stats=kv_pairs,
+            )
+        except MilvusLiteError as e:
+            return milvus_pb2.GetPartitionStatisticsResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("GetPartitionStatistics failed: %s", e)
+            return milvus_pb2.GetPartitionStatisticsResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    def TruncateCollection(self, request, context):
+        """Clear collection data while preserving schema and aliases."""
+        try:
+            self._db.truncate_collection(request.collection_name)
+            return milvus_pb2.TruncateCollectionResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+            )
+        except MilvusLiteError as e:
+            return milvus_pb2.TruncateCollectionResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("TruncateCollection failed: %s", e)
+            return milvus_pb2.TruncateCollectionResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
     def ListDatabases(self, request, context):
         """MilvusLite has no database concept; return a single default."""
         return milvus_pb2.ListDatabasesResponse(
@@ -941,10 +982,75 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
 
     def CreateAlias(self, request, context):
-        return self._unimplemented(context, "CreateAlias", "aliases are not in MVP scope")
+        try:
+            self._db.create_alias(request.collection_name, request.alias)
+            return common_pb2.Status(**success_status_kwargs())
+        except MilvusLiteError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("CreateAlias failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def AlterAlias(self, request, context):
+        try:
+            self._db.alter_alias(request.collection_name, request.alias)
+            return common_pb2.Status(**success_status_kwargs())
+        except MilvusLiteError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("AlterAlias failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
 
     def DropAlias(self, request, context):
-        return self._unimplemented(context, "DropAlias", "aliases are not in MVP scope")
+        try:
+            self._db.drop_alias(request.alias)
+            return common_pb2.Status(**success_status_kwargs())
+        except MilvusLiteError as e:
+            return common_pb2.Status(**to_status_kwargs(e))
+        except Exception as e:
+            logger.exception("DropAlias failed: %s", e)
+            return common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e))
+
+    def DescribeAlias(self, request, context):
+        try:
+            info = self._db.describe_alias(request.alias)
+            return milvus_pb2.DescribeAliasResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                alias=info["alias"],
+                collection=info["collection"],
+            )
+        except MilvusLiteError as e:
+            return milvus_pb2.DescribeAliasResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("DescribeAlias failed: %s", e)
+            return milvus_pb2.DescribeAliasResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
+
+    def ListAliases(self, request, context):
+        try:
+            collection_name = request.collection_name or None
+            aliases = self._db.list_aliases(collection_name)
+            resolved = (
+                self._db.resolve_collection_name(collection_name)
+                if collection_name else ""
+            )
+            return milvus_pb2.ListAliasesResponse(
+                status=common_pb2.Status(**success_status_kwargs()),
+                collection_name=resolved,
+                aliases=aliases,
+            )
+        except MilvusLiteError as e:
+            return milvus_pb2.ListAliasesResponse(
+                status=common_pb2.Status(**to_status_kwargs(e)),
+            )
+        except Exception as e:
+            logger.exception("ListAliases failed: %s", e)
+            return milvus_pb2.ListAliasesResponse(
+                status=common_pb2.Status(code=_UNEXPECTED_ERROR, reason=str(e)),
+            )
 
     def AlterCollection(self, request, context):
         return self._unimplemented(

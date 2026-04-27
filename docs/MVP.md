@@ -1183,7 +1183,7 @@ The current storage design already provides underlying support for the following
 | `get_collection_stats` | Supported | row_count |
 | `hybrid_search` (multi-vector) | UNIMPLEMENTED | Engine does not support multiple vector fields |
 | `search_iterator / pagination` | UNIMPLEMENTED | Engine does not yet support offset |
-| Aliases (`create_alias` etc.) | UNIMPLEMENTED | |
+| Aliases (`create_alias` etc.) | Supported | Persisted in `aliases.json`; aliases resolve to collections for CRUD/search |
 | Backup / Restore | UNIMPLEMENTED | |
 | RBAC / User / Role / Privilege | Stub OK | Embedded mode defaults to single user, stubs return success to avoid pymilvus crash |
 | Resource Group / Replica | UNIMPLEMENTED | Not needed for single process |

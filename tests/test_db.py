@@ -207,6 +207,43 @@ def test_get_collection_stats_unknown_raises(db):
 
 
 # ---------------------------------------------------------------------------
+# Alias + truncate (P0 compatibility)
+# ---------------------------------------------------------------------------
+
+def test_alias_persists_across_reopen(tmp_path, schema):
+    data_dir = str(tmp_path / "data")
+    db = MilvusLite(data_dir)
+    db.create_collection("docs", schema)
+    db.create_alias("docs", "current")
+    db.close()
+
+    db2 = MilvusLite(data_dir)
+    try:
+        assert db2.describe_alias("current") == {
+            "alias": "current",
+            "collection": "docs",
+        }
+        assert db2.get_collection("current").name == "docs"
+    finally:
+        db2.close()
+
+
+def test_truncate_collection_preserves_schema_and_alias(db, schema):
+    col = db.create_collection("docs", schema)
+    db.create_alias("docs", "current")
+    col.insert([_make_record(i) for i in range(3)])
+    assert db.get_collection_stats("docs")["row_count"] == 3
+
+    db.truncate_collection("current")
+    assert db.get_collection_stats("docs")["row_count"] == 0
+    assert db.describe_alias("current")["collection"] == "docs"
+
+    fresh = db.get_collection("docs")
+    fresh.insert([_make_record(9)])
+    assert db.get_collection_stats("current")["row_count"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Name validation
 # ---------------------------------------------------------------------------
 
