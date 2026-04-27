@@ -9,7 +9,6 @@
 <p align="center">
     <a href="https://github.com/milvus-io/milvus-lite/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License"></a>
     <img src="https://img.shields.io/badge/python-3.10%2B-blue" alt="Python">
-    <img src="https://img.shields.io/badge/built%20with-vibe%20coding-ff69b4" alt="Vibe Coding">
 </p>
 
 # Introduction
@@ -18,24 +17,22 @@ Milvus Lite is the next-generation lightweight version of [Milvus](https://githu
 
 The original milvus-lite wraps the full C++ Milvus core via CGo bindings, inheriting its heavy build chain, platform restrictions (no Windows, no Alpine), and opaque debugging experience. Milvus Lite takes a different approach: a clean-room Python implementation with an LSM-tree storage engine, delivering the same pymilvus-compatible API in a package that is easy to install, inspect, and extend.
 
-This project is entirely **vibe coded** — designed, implemented, and tested through conversational AI pair programming with [Claude Code](https://claude.ai/code). From architecture decisions to 2100+ test cases, every line of code was produced through human-AI collaboration, demonstrating that complex database systems can be built effectively with the vibe coding workflow.
-
 ### Why replace milvus-lite?
 
 | | milvus-lite (v1) | Milvus Lite |
 |---|---|---|
 | Language | C++ core + CGo + Python wrapper | Pure Python |
 | Install | `pip install` downloads ~200MB binary | `pip install` pulls lightweight Python packages |
-| Platform | Linux/macOS only, no Windows/Alpine | Windows, macOS, Linux — anywhere Python runs |
+| Platform | Linux/macOS only, no Windows/Alpine | Windows, macOS, Linux where Python dependencies are available |
 | Debugging | Opaque C++ core, segfaults | Pure Python stack traces |
 | Extensibility | Requires rebuilding C++ | Standard Python, easy to fork and modify |
-| Index | FLAT, IVF_FLAT | HNSW, HNSW_SQ, IVF_FLAT, IVF_SQ8 (FAISS), FLAT, BM25 sparse inverted |
+| Index | FLAT, IVF_FLAT | HNSW, HNSW_SQ, IVF_FLAT, IVF_SQ8 (FAISS), FLAT, AUTOINDEX, BM25 sparse inverted |
 | Full text search | Tantivy (C++ binding) | Pure Python BM25 with pluggable analyzers |
 
 # Requirements
 
 - Python >= 3.10
-- Any platform: macOS, Linux, Windows
+- macOS, Linux, or Windows where Python dependencies are available
 
 # Installation
 
@@ -43,7 +40,7 @@ This project is entirely **vibe coded** — designed, implemented, and tested th
 pip install milvus-lite
 ```
 
-Default install includes FAISS (HNSW/IVF_FLAT indexes), pymilvus, and gRPC — everything needed for `MilvusClient("./demo.db")` to work out of the box.
+Default install includes FAISS (HNSW, HNSW_SQ, IVF_FLAT, IVF_SQ8, FLAT/BRUTE_FORCE, AUTOINDEX), pymilvus, and gRPC — everything needed for `MilvusClient("./demo.db")` to work out of the box.
 
 > **Note:** If you have the original `milvus-lite` installed, uninstall it first to avoid conflicts — both packages provide the `milvus_lite` Python module:
 > ```bash
@@ -328,11 +325,13 @@ client.query("col", filter="scores[0] > 90", limit=10)
 | Index types | `HNSW`, `HNSW_SQ`, `IVF_FLAT`, `IVF_SQ8` (FAISS), `FLAT` / `BRUTE_FORCE` / `AUTOINDEX`, `SPARSE_INVERTED_INDEX` |
 | Metrics | `COSINE`, `L2`, `IP`, `BM25` |
 | Scalar types | `INT8/16/32/64`, `FLOAT`, `DOUBLE`, `VARCHAR`, `BOOL`, `JSON`, `ARRAY` |
-| Search | Dense ANN, sparse BM25, hybrid (multi-vector + reranker), range search, group-by |
+| Search | Dense ANN, sparse BM25, hybrid (multi-vector + reranker), range search, group-by, `round_decimal` |
 | Filter | Comparison, logical, IN, LIKE, arithmetic, IS NULL, $meta, text_match, array ops, chained JSON path |
-| CRUD | Insert, upsert (partial update), delete (by ID or filter), get, query, search |
+| CRUD | Insert, upsert (partial update), delete (by ID or filter), get, query, search, truncate |
 | Partition key | `is_partition_key=True` — auto-bucket routing by field value hash |
 | Partitions | Create, drop, list, per-partition insert/search |
+| Aliases | Create, alter, drop, describe, and list collection aliases |
+| Statistics | Collection/partition row counts, `query(output_fields=["count(*)"])` |
 | Pagination | `offset` parameter, query/search iterators |
 | Auto ID | `auto_id=True` on INT64 primary key |
 | Default values | `default_value` on schema fields, auto-filled on insert |
@@ -342,7 +341,7 @@ client.query("col", filter="scores[0] > 90", limit=10)
 | Rerank | `Function(type=RERANK)` — semantic reranking (Cohere API) and decay reranking (gauss/exp/linear) |
 | Nullable fields | Nullable scalars and vectors |
 | Rename collection | `client.rename_collection("old", "new")` |
-| gRPC | 25+ Milvus RPCs, pymilvus fully compatible |
+| gRPC | 30+ Milvus RPCs, pymilvus-compatible local `.db` and standalone server modes |
 
 # Performance Benchmark
 
@@ -375,7 +374,8 @@ Benchmarked using the Cohere 100K dataset from [VectorDBBench](https://github.co
 # Known Limitations
 
 - **Single-process only** — one process per `data_dir` (file-level lock)
-- **Synchronous flush** — no background compaction or async writes
+- **Local synchronous durability** — WAL/flush persistence is synchronous; compaction and segment index maintenance run in a best-effort background worker
+- **Single database namespace** — `ListDatabases` exposes the default namespace only; multiple logical databases are not implemented
 - **No authentication / RBAC**
 - **No binary / float16 / bfloat16 vectors**
 - **No PQ indexes** — no Product Quantization; SQ is supported via IVF_SQ8 and HNSW_SQ
@@ -389,7 +389,7 @@ pymilvus client
       v
 +---------------------------------------------------+
 | adapter/grpc/  MilvusServicer                      |
-|   25+ RPCs, schema/search/records translators      |
+|   30+ RPCs, schema/search/records translators      |
 +---------------------------------------------------+
       |
 +---------------------------------------------------+
@@ -426,19 +426,7 @@ pymilvus client
 +---------------------------------------------------+
 ```
 
-Storage is LSM-tree style: WAL (Arrow IPC) -> MemTable -> immutable Parquet segments. Vector indexes are segment-level (one `.idx` per Parquet file). Manifest is the single source of truth, updated atomically via tmp+rename.
-
-# Built with Vibe Coding
-
-This entire project — architecture design, implementation, test suite, documentation — was built through conversational AI pair programming using [Claude Code](https://claude.ai/code).
-
-The development process:
-1. **Design** — discuss architecture in natural language, produce design docs
-2. **Implement** — describe what to build, review and iterate on generated code
-3. **Test** — 2100+ tests including recall validation and Milvus compatibility suites
-4. **Iterate** — fix bugs, optimize performance, add features — all through conversation
-
-No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human with a vision and an AI that codes.
+Storage is LSM-tree style: WAL (Arrow IPC) -> MemTable -> immutable Parquet segments. Flush persists WAL/memtable data synchronously, while compaction and segment index maintenance run on a single background worker. Vector indexes are segment-level (one `.idx` per Parquet file). Manifest is the single source of truth, updated atomically via tmp+rename.
 
 # Testing
 
