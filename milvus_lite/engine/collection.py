@@ -831,7 +831,7 @@ class Collection:
                 if pk not in global_pk_seq or seq > global_pk_seq[pk]:
                     global_pk_seq[pk] = seq
         # Memtable pks always win (highest seq)
-        for pk, (_, _, seq) in self._memtable._pk_index.items():
+        for pk, (_, _, seq) in self._memtable.pk_index_snapshot():
             global_pk_seq[pk] = max(seq, global_pk_seq.get(pk, -1))
 
         # ── Per-segment search (cached indexes) ──────────────────
@@ -895,18 +895,15 @@ class Collection:
         mt_pks: list = []
         mt_sparse: list = []
         mt_refs: list = []
-        for pk, (batch_idx, row_idx, seq) in mt._pk_index.items():
-            batch = mt._insert_batches[batch_idx]
-            if partition_filter is not None:
-                part = batch.column("_partition")[row_idx].as_py()
-                if part not in partition_filter:
-                    continue
-            raw = batch.column(vector_field)[row_idx].as_py()
+        for pk, seq, record in mt.active_record_snapshots(
+            partition_names=partition_names
+        ):
+            raw = record.get(vector_field)
             mt_pks.append(pk)
             mt_sparse.append(
                 bytes_to_sparse(raw) if isinstance(raw, bytes) else (raw or {})
             )
-            mt_refs.append((batch, row_idx))
+            mt_refs.append((record, seq))
 
         if mt_pks:
             mt_valid = np.ones(len(mt_pks), dtype=bool)
@@ -916,13 +913,8 @@ class Collection:
                 from milvus_lite.search.filter.eval.python_backend import _eval_row
                 for i in range(len(mt_pks)):
                     if mt_valid[i]:
-                        tbl, row_i = mt_refs[i]
-                        rec = {
-                            col: tbl.column(col)[row_i].as_py()
-                            for col in tbl.column_names
-                            if col not in ("_seq", "_partition")
-                        }
-                        if not _eval_row(compiled.ast, rec):
+                        record, _seq = mt_refs[i]
+                        if not _eval_row(compiled.ast, record):
                             mt_valid[i] = False
 
             mt_idx = SparseInvertedIndex(k1=bm25_k1, b=bm25_b)
@@ -940,33 +932,56 @@ class Collection:
         # ── Global merge + dedup + materialize ────────────────────
         # Dedup: if same pk appears from segment + memtable, keep
         # the one with the highest seq (latest version).
+        def _is_memtable_sparse_ref(source: Any) -> bool:
+            return isinstance(source, tuple) and bool(source) and isinstance(source[0], dict)
+
         results: List[List[dict]] = []
         for qi in range(nq):
             candidates = per_query_candidates[qi]
             # First, deduplicate by pk keeping the latest version (highest seq).
             pk_best: dict = {}  # pk → (dist, pk, (tbl, row_i))
             for cand in candidates:
-                dist, pk, (tbl, row_i) = cand
-                seq = int(tbl.column("_seq")[row_i].as_py())
+                dist, pk, source = cand
+                if _is_memtable_sparse_ref(source):
+                    _record, seq = source
+                    seq = int(seq)
+                else:
+                    tbl, row_i = source
+                    seq = int(tbl.column("_seq")[row_i].as_py())
                 if pk not in pk_best or seq > pk_best[pk][0]:
                     pk_best[pk] = (seq, cand)
             deduped = [v[1] for v in pk_best.values()]
             # Sort by distance ascending (smaller = better)
             deduped.sort(key=lambda c: c[0])
             hits: list = []
-            for dist, pk, (tbl, row_i) in deduped:
+            for dist, pk, source in deduped:
                 # Deferred materialization
                 entity = {}
-                if output_fields is None:
-                    for col in tbl.column_names:
-                        if col in ("_seq", "_partition") or col in _exclude_fields:
-                            continue
-                        entity[col] = tbl.column(col)[row_i].as_py()
-                elif output_fields:
-                    for fname in output_fields:
-                        if fname == self._pk_name:
-                            continue
-                        entity[fname] = tbl.column(fname)[row_i].as_py()
+                if _is_memtable_sparse_ref(source):
+                    source, _seq = source
+                    if output_fields is None:
+                        entity = {
+                            k: v for k, v in source.items()
+                            if k not in ("_seq", "_partition") and k not in _exclude_fields
+                        }
+                    elif output_fields:
+                        entity = {
+                            fname: source[fname]
+                            for fname in output_fields
+                            if fname != self._pk_name and fname in source
+                        }
+                else:
+                    tbl, row_i = source
+                    if output_fields is None:
+                        for col in tbl.column_names:
+                            if col in ("_seq", "_partition") or col in _exclude_fields:
+                                continue
+                            entity[col] = tbl.column(col)[row_i].as_py()
+                    elif output_fields:
+                        for fname in output_fields:
+                            if fname == self._pk_name:
+                                continue
+                            entity[fname] = tbl.column(fname)[row_i].as_py()
                 hits.append({"id": pk, "distance": dist, "entity": entity})
                 if len(hits) >= top_k:
                     break

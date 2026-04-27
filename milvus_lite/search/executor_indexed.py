@@ -152,7 +152,7 @@ def execute_search_with_index(
 
     # MemTable-local tombstones for pks already flushed to segments —
     # not yet in delta_index (folded at next flush). See issue #21.
-    mt_deletes = memtable._delete_index  # {pk: (seq, partition)}
+    mt_deletes = memtable.delete_index_snapshot()  # {pk: (seq, partition)}
 
     def _build_local_mask(
         pks: List[Any],

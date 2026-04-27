@@ -82,7 +82,7 @@ def build_valid_mask(
     # MemTable's local _delete_index holds tombstones applied but not
     # yet folded into delta_index (which happens at flush time). We
     # must also consult it so recent deletes are visible to readers.
-    mt_deletes = memtable._delete_index if memtable is not None else {}
+    mt_deletes = memtable.delete_index_snapshot() if memtable is not None else {}
     mask = np.zeros(n, dtype=bool)
     for i in range(n):
         pk = all_pks[i]

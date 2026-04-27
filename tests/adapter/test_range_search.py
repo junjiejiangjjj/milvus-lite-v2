@@ -209,3 +209,41 @@ def test_grpc_range_empty(milvus_client):
     )
     assert len(results[0]) == 0
     milvus_client.drop_collection("rs_empty")
+
+
+def test_grpc_range_search_ip_bounds(milvus_client):
+    """Range search with IP keeps scores in (radius, range_filter].
+
+    Adapted from Milvus python_client range-search coverage; existing local
+    tests only covered COSINE semantics.
+    """
+    schema = MilvusClient.create_schema(auto_id=False)
+    schema.add_field("id", DataType.INT64, is_primary=True)
+    schema.add_field("vec", DataType.FLOAT_VECTOR, dim=4)
+    milvus_client.create_collection("rs_ip", schema=schema)
+    milvus_client.insert("rs_ip", [
+        {"id": 1, "vec": [1.0, 0.0, 0.0, 0.0]},
+        {"id": 2, "vec": [0.8, 0.0, 0.0, 0.0]},
+        {"id": 3, "vec": [0.4, 0.0, 0.0, 0.0]},
+        {"id": 4, "vec": [-1.0, 0.0, 0.0, 0.0]},
+    ])
+    idx = milvus_client.prepare_index_params()
+    idx.add_index(field_name="vec", index_type="BRUTE_FORCE",
+                  metric_type="IP", params={})
+    milvus_client.create_index("rs_ip", idx)
+    milvus_client.load_collection("rs_ip")
+
+    results = milvus_client.search(
+        "rs_ip",
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        search_params={
+            "metric_type": "IP",
+            "params": {"radius": 0.5, "range_filter": 0.9},
+        },
+        limit=10,
+        output_fields=["id"],
+    )
+    assert [hit["entity"]["id"] for hit in results[0]] == [2]
+    for hit in results[0]:
+        assert 0.5 < hit["distance"] <= 0.9
+    milvus_client.drop_collection("rs_ip")

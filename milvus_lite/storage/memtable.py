@@ -22,6 +22,7 @@ replays operations out of physical order.
 
 from __future__ import annotations
 
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
@@ -63,6 +64,7 @@ class MemTable:
         self._insert_batches: List[pa.RecordBatch] = []
         self._pk_index: Dict[Any, _PkPos] = {}
         self._delete_index: Dict[Any, _DeleteEntry] = {}
+        self._lock = threading.RLock()
 
     # ── write path ──────────────────────────────────────────────
 
@@ -78,33 +80,34 @@ class MemTable:
             return
         self._validate_insert_schema(batch)
 
-        batch_idx = len(self._insert_batches)
-        pk_col = batch.column(self._pk_name)
-        seq_col = batch.column("_seq")
+        with self._lock:
+            batch_idx = len(self._insert_batches)
+            pk_col = batch.column(self._pk_name)
+            seq_col = batch.column("_seq")
 
-        any_kept = False
-        for row_idx in range(batch.num_rows):
-            pk = pk_col[row_idx].as_py()
-            seq = seq_col[row_idx].as_py()
+            any_kept = False
+            for row_idx in range(batch.num_rows):
+                pk = pk_col[row_idx].as_py()
+                seq = seq_col[row_idx].as_py()
 
-            # seq-aware: a newer delete blocks this insert
-            existing_delete = self._delete_index.get(pk)
-            if existing_delete is not None and existing_delete[0] >= seq:
-                continue
+                # seq-aware: a newer delete blocks this insert
+                existing_delete = self._delete_index.get(pk)
+                if existing_delete is not None and existing_delete[0] >= seq:
+                    continue
 
-            # seq-aware: a newer insert blocks this insert
-            existing_pos = self._pk_index.get(pk)
-            if existing_pos is not None and existing_pos[2] >= seq:
-                continue
+                # seq-aware: a newer insert blocks this insert
+                existing_pos = self._pk_index.get(pk)
+                if existing_pos is not None and existing_pos[2] >= seq:
+                    continue
 
-            # take effect
-            self._pk_index[pk] = (batch_idx, row_idx, seq)
-            # our seq > existing_delete (we passed the check above)
-            self._delete_index.pop(pk, None)
-            any_kept = True
+                # take effect
+                self._pk_index[pk] = (batch_idx, row_idx, seq)
+                # our seq > existing_delete (we passed the check above)
+                self._delete_index.pop(pk, None)
+                any_kept = True
 
-        if any_kept:
-            self._insert_batches.append(batch)
+            if any_kept:
+                self._insert_batches.append(batch)
 
     def apply_delete(self, batch: pa.RecordBatch) -> None:
         """Apply a wal_delta RecordBatch.
@@ -118,29 +121,30 @@ class MemTable:
             return
         self._validate_delete_schema(batch)
 
-        pk_col = batch.column(self._pk_name)
-        seq_col = batch.column("_seq")
-        partition_col = batch.column("_partition")
-        # delete batches share one seq and one partition; read from row 0.
-        seq = seq_col[0].as_py()
-        partition = partition_col[0].as_py()
+        with self._lock:
+            pk_col = batch.column(self._pk_name)
+            seq_col = batch.column("_seq")
+            partition_col = batch.column("_partition")
+            # delete batches share one seq and one partition; read from row 0.
+            seq = seq_col[0].as_py()
+            partition = partition_col[0].as_py()
 
-        for row_idx in range(batch.num_rows):
-            pk = pk_col[row_idx].as_py()
+            for row_idx in range(batch.num_rows):
+                pk = pk_col[row_idx].as_py()
 
-            # seq-aware: a newer insert blocks this delete
-            existing_pos = self._pk_index.get(pk)
-            if existing_pos is not None and existing_pos[2] >= seq:
-                continue
+                # seq-aware: a newer insert blocks this delete
+                existing_pos = self._pk_index.get(pk)
+                if existing_pos is not None and existing_pos[2] >= seq:
+                    continue
 
-            # update delete watermark to the larger seq
-            existing_delete = self._delete_index.get(pk)
-            if existing_delete is None or seq > existing_delete[0]:
-                self._delete_index[pk] = (seq, partition)
+                # update delete watermark to the larger seq
+                existing_delete = self._delete_index.get(pk)
+                if existing_delete is None or seq > existing_delete[0]:
+                    self._delete_index[pk] = (seq, partition)
 
-            # if pk_index entry exists with smaller seq, evict it
-            if existing_pos is not None and existing_pos[2] < seq:
-                self._pk_index.pop(pk, None)
+                # if pk_index entry exists with smaller seq, evict it
+                if existing_pos is not None and existing_pos[2] < seq:
+                    self._pk_index.pop(pk, None)
 
     # ── read path ───────────────────────────────────────────────
 
@@ -150,19 +154,20 @@ class MemTable:
         Returns the live record dict (without _seq / _partition) or None
         if the pk is unknown, has been deleted, or is not in partition_filter.
         """
-        pos = self._pk_index.get(pk_value)
-        if pos is None:
-            return None
-        # _pk_index entries are guaranteed to NOT be shadowed by a delete:
-        # apply_delete pops the entry, apply_insert pops the delete entry.
-        # So we can return directly without re-checking _delete_index.
-        batch_idx, row_idx, _ = pos
-        batch = self._insert_batches[batch_idx]
-        if partition_filter is not None:
-            partition = batch.column("_partition")[row_idx].as_py()
-            if partition not in partition_filter:
+        with self._lock:
+            pos = self._pk_index.get(pk_value)
+            if pos is None:
                 return None
-        return self._row_to_dict(batch, row_idx)
+            # _pk_index entries are guaranteed to NOT be shadowed by a delete:
+            # apply_delete pops the entry, apply_insert pops the delete entry.
+            # So we can return directly without re-checking _delete_index.
+            batch_idx, row_idx, _ = pos
+            batch = self._insert_batches[batch_idx]
+            if partition_filter is not None:
+                partition = batch.column("_partition")[row_idx].as_py()
+                if partition not in partition_filter:
+                    return None
+            return self._row_to_dict(batch, row_idx)
 
     def get_active_records(
         self, partition_names: Optional[List[str]] = None
@@ -177,13 +182,14 @@ class MemTable:
         if partition_names is not None:
             partition_filter = set(partition_names)
 
-        for pk, (batch_idx, row_idx, _seq) in self._pk_index.items():
-            batch = self._insert_batches[batch_idx]
-            if partition_filter is not None:
-                partition = batch.column("_partition")[row_idx].as_py()
-                if partition not in partition_filter:
-                    continue
-            out.append(self._row_to_dict(batch, row_idx))
+        with self._lock:
+            for pk, (batch_idx, row_idx, _seq) in self._pk_index.items():
+                batch = self._insert_batches[batch_idx]
+                if partition_filter is not None:
+                    partition = batch.column("_partition")[row_idx].as_py()
+                    if partition not in partition_filter:
+                        continue
+                out.append(self._row_to_dict(batch, row_idx))
         return out
 
     def to_search_arrays(
@@ -213,17 +219,18 @@ class MemTable:
         if partition_names is not None:
             partition_filter = set(partition_names)
 
-        for pk, (batch_idx, row_idx, seq) in self._pk_index.items():
-            batch = self._insert_batches[batch_idx]
-            if partition_filter is not None:
-                partition = batch.column("_partition")[row_idx].as_py()
-                if partition not in partition_filter:
-                    continue
-            pks.append(pk)
-            seqs.append(seq)
-            if vector_field is not None:
-                vecs.append(batch.column(vector_field)[row_idx].as_py())
-            row_refs.append((batch_idx, row_idx))
+        with self._lock:
+            for pk, (batch_idx, row_idx, seq) in self._pk_index.items():
+                batch = self._insert_batches[batch_idx]
+                if partition_filter is not None:
+                    partition = batch.column("_partition")[row_idx].as_py()
+                    if partition not in partition_filter:
+                        continue
+                pks.append(pk)
+                seqs.append(seq)
+                if vector_field is not None:
+                    vecs.append(batch.column(vector_field)[row_idx].as_py())
+                row_refs.append((batch_idx, row_idx))
 
         seqs_arr = np.asarray(seqs, dtype=np.uint64)
         if vecs:
@@ -244,7 +251,8 @@ class MemTable:
         Used by executor for deferred materialization — only called
         for top-k winners, not all memtable rows.
         """
-        return self._row_to_dict(self._insert_batches[batch_idx], row_idx)
+        with self._lock:
+            return self._row_to_dict(self._insert_batches[batch_idx], row_idx)
 
     def is_locally_deleted(self, pk_value: Any) -> bool:
         """True iff *pk_value* has a tombstone in this MemTable's local
@@ -254,7 +262,8 @@ class MemTable:
         Used by Collection.get to short-circuit a segment scan when the
         in-memory state already says the pk is deleted.
         """
-        return pk_value in self._delete_index
+        with self._lock:
+            return pk_value in self._delete_index
 
     def to_arrow_table(
         self,
@@ -271,30 +280,34 @@ class MemTable:
         Returns an empty Table (with the data_schema layout) if there
         are no live rows in scope.
         """
-        if not self._insert_batches:
-            return self._data_schema.empty_table()
+        with self._lock:
+            if not self._insert_batches:
+                return self._data_schema.empty_table()
 
-        # Concatenate all stored batches into one full Table.
-        full = pa.Table.from_batches(self._insert_batches)
+            batches = tuple(self._insert_batches)
+            pk_items = tuple(self._pk_index.items())
 
-        # Compute global row offsets so we can convert (batch_idx, row_idx)
-        # → flat index for pa.Table.take.
-        offsets = [0]
-        for b in self._insert_batches:
-            offsets.append(offsets[-1] + b.num_rows)
+            # Concatenate all stored batches into one full Table.
+            full = pa.Table.from_batches(batches)
 
-        partition_filter: Optional[set] = None
-        if partition_names is not None:
-            partition_filter = set(partition_names)
+            # Compute global row offsets so we can convert (batch_idx, row_idx)
+            # → flat index for pa.Table.take.
+            offsets = [0]
+            for b in batches:
+                offsets.append(offsets[-1] + b.num_rows)
 
-        indices: list[int] = []
-        for pk, (batch_idx, row_idx, _seq) in self._pk_index.items():
-            if partition_filter is not None:
-                batch = self._insert_batches[batch_idx]
-                partition = batch.column("_partition")[row_idx].as_py()
-                if partition not in partition_filter:
-                    continue
-            indices.append(offsets[batch_idx] + row_idx)
+            partition_filter: Optional[set] = None
+            if partition_names is not None:
+                partition_filter = set(partition_names)
+
+            indices: list[int] = []
+            for pk, (batch_idx, row_idx, _seq) in pk_items:
+                if partition_filter is not None:
+                    batch = batches[batch_idx]
+                    partition = batch.column("_partition")[row_idx].as_py()
+                    if partition not in partition_filter:
+                        continue
+                indices.append(offsets[batch_idx] + row_idx)
 
         if not indices:
             return self._data_schema.empty_table()
@@ -306,6 +319,36 @@ class MemTable:
                 result = result.drop(col_name)
         return result
 
+    def pk_index_snapshot(self) -> Tuple[Tuple[Any, _PkPos], ...]:
+        """Return a stable snapshot of the live pk index."""
+        with self._lock:
+            return tuple(self._pk_index.items())
+
+    def delete_index_snapshot(self) -> Dict[Any, _DeleteEntry]:
+        """Return a stable snapshot of the live delete index."""
+        with self._lock:
+            return dict(self._delete_index)
+
+    def active_record_snapshots(
+        self,
+        partition_names: Optional[List[str]] = None,
+    ) -> List[Tuple[Any, int, dict]]:
+        """Return stable ``(pk, seq, record)`` snapshots for live rows."""
+        out: List[Tuple[Any, int, dict]] = []
+        partition_filter: Optional[set] = None
+        if partition_names is not None:
+            partition_filter = set(partition_names)
+
+        with self._lock:
+            for pk, (batch_idx, row_idx, seq) in self._pk_index.items():
+                batch = self._insert_batches[batch_idx]
+                if partition_filter is not None:
+                    partition = batch.column("_partition")[row_idx].as_py()
+                    if partition not in partition_filter:
+                        continue
+                out.append((pk, seq, self._row_to_dict(batch, row_idx)))
+        return out
+
     def size(self) -> int:
         """Active pk count + tombstone count.
 
@@ -313,7 +356,8 @@ class MemTable:
         _insert_batches — that includes shadowed rows that no longer
         contribute to the visible state.
         """
-        return len(self._pk_index) + len(self._delete_index)
+        with self._lock:
+            return len(self._pk_index) + len(self._delete_index)
 
     # ── flush ───────────────────────────────────────────────────
 
@@ -343,38 +387,39 @@ class MemTable:
         flush pipeline) is expected to discard the frozen MemTable
         after consuming the result.
         """
-        # ── 1. data tables ──────────────────────────────────────
-        # Walk _pk_index to find live rows, group by their _partition.
-        live_rows_per_partition: Dict[str, List[Tuple[int, int]]] = {}
-        for pk, (batch_idx, row_idx, _seq) in self._pk_index.items():
-            batch = self._insert_batches[batch_idx]
-            partition = batch.column("_partition")[row_idx].as_py()
-            live_rows_per_partition.setdefault(partition, []).append((batch_idx, row_idx))
+        with self._lock:
+            # ── 1. data tables ──────────────────────────────────────
+            # Walk _pk_index to find live rows, group by their _partition.
+            live_rows_per_partition: Dict[str, List[Tuple[int, int]]] = {}
+            for pk, (batch_idx, row_idx, _seq) in self._pk_index.items():
+                batch = self._insert_batches[batch_idx]
+                partition = batch.column("_partition")[row_idx].as_py()
+                live_rows_per_partition.setdefault(partition, []).append((batch_idx, row_idx))
 
-        data_tables: Dict[str, pa.Table] = {}
-        for partition, rows in live_rows_per_partition.items():
-            data_tables[partition] = self._build_data_table(rows)
+            data_tables: Dict[str, pa.Table] = {}
+            for partition, rows in live_rows_per_partition.items():
+                data_tables[partition] = self._build_data_table(rows)
 
-        # ── 2. delta tables ─────────────────────────────────────
-        # Group _delete_index entries by their target partition.
-        deletes_per_partition: Dict[str, List[Tuple[Any, int]]] = {}
-        for pk, (delete_seq, partition) in self._delete_index.items():
-            deletes_per_partition.setdefault(partition, []).append((pk, delete_seq))
+            # ── 2. delta tables ─────────────────────────────────────
+            # Group _delete_index entries by their target partition.
+            deletes_per_partition: Dict[str, List[Tuple[Any, int]]] = {}
+            for pk, (delete_seq, partition) in self._delete_index.items():
+                deletes_per_partition.setdefault(partition, []).append((pk, delete_seq))
 
-        # Cross-partition deletes: replicate into every known partition.
-        all_part_deletes = deletes_per_partition.pop(ALL_PARTITIONS, None)
-        if all_part_deletes:
-            if known_partitions is None:
-                # Caller did not pass partition list — preserve the _all
-                # bucket as-is so the test/caller can see it.
-                deletes_per_partition[ALL_PARTITIONS] = all_part_deletes
-            else:
-                for p in known_partitions:
-                    deletes_per_partition.setdefault(p, []).extend(all_part_deletes)
+            # Cross-partition deletes: replicate into every known partition.
+            all_part_deletes = deletes_per_partition.pop(ALL_PARTITIONS, None)
+            if all_part_deletes:
+                if known_partitions is None:
+                    # Caller did not pass partition list — preserve the _all
+                    # bucket as-is so the test/caller can see it.
+                    deletes_per_partition[ALL_PARTITIONS] = all_part_deletes
+                else:
+                    for p in known_partitions:
+                        deletes_per_partition.setdefault(p, []).extend(all_part_deletes)
 
-        delta_tables: Dict[str, pa.Table] = {}
-        for partition, entries in deletes_per_partition.items():
-            delta_tables[partition] = self._build_delta_table(entries)
+            delta_tables: Dict[str, pa.Table] = {}
+            for partition, entries in deletes_per_partition.items():
+                delta_tables[partition] = self._build_delta_table(entries)
 
         # ── 3. merge per-partition results ──────────────────────
         result: Dict[str, Tuple[Optional[pa.Table], Optional[pa.Table]]] = {}
@@ -415,14 +460,15 @@ class MemTable:
 
         Used by flush.execute_flush to bump manifest.current_seq.
         """
-        max_s = -1
-        for _, _, seq in self._pk_index.values():
-            if seq > max_s:
-                max_s = seq
-        for delete_seq, _ in self._delete_index.values():
-            if delete_seq > max_s:
-                max_s = delete_seq
-        return max_s
+        with self._lock:
+            max_s = -1
+            for _, _, seq in self._pk_index.values():
+                if seq > max_s:
+                    max_s = seq
+            for delete_seq, _ in self._delete_index.values():
+                if delete_seq > max_s:
+                    max_s = delete_seq
+            return max_s
 
     # ── introspection (test/debug) ──────────────────────────────
 
@@ -433,7 +479,8 @@ class MemTable:
     def num_physical_rows(self) -> int:
         """Total rows physically retained in _insert_batches.
         Includes shadowed rows. For test/debug only."""
-        return sum(b.num_rows for b in self._insert_batches)
+        with self._lock:
+            return sum(b.num_rows for b in self._insert_batches)
 
     # ── internal helpers ────────────────────────────────────────
 
