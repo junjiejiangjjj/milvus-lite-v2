@@ -7,6 +7,7 @@ from milvus_lite.function.builder import (
     build_rerank_chain,
     build_single_rerank_chain,
 )
+from milvus_lite.function.dataframe import DataFrame
 from milvus_lite.function.ops.group_by_op import GroupByOp
 from milvus_lite.function.ops.limit_op import LimitOp
 from milvus_lite.function.ops.merge_op import MergeOp
@@ -20,6 +21,7 @@ from milvus_lite.schema.types import (
     Function,
     FunctionType,
 )
+from milvus_lite.function.types import ID_FIELD, SCORE_FIELD
 
 
 def _schema_with_rerank(**params):
@@ -113,6 +115,26 @@ def test_build_rerank_no_round_decimal_when_negative():
     chain = build_rerank_chain(schema, {"limit": 10, "round_decimal": -1})
     map_ops = [op for op in chain.operators if isinstance(op, MapOp)]
     assert not any(op.expr.name == "round_decimal" for op in map_ops)
+
+
+def test_build_weighted_chain_honors_norm_score_false():
+    schema = _schema_with_rerank(
+        strategy="weighted", weights=[0.25, 0.75], norm_score=False
+    )
+    chain = build_rerank_chain(schema, {"limit": 10})
+    path0 = DataFrame([[
+        {ID_FIELD: 1, SCORE_FIELD: 10.0},
+        {ID_FIELD: 2, SCORE_FIELD: 1.0},
+    ]])
+    path1 = DataFrame([[
+        {ID_FIELD: 1, SCORE_FIELD: 3.0},
+        {ID_FIELD: 2, SCORE_FIELD: 5.0},
+    ]])
+
+    result = chain.execute(path0, path1).chunk(0)
+
+    assert result[0] == {ID_FIELD: 1, SCORE_FIELD: 4.75}
+    assert result[1] == {ID_FIELD: 2, SCORE_FIELD: 4.0}
 
 
 # ── build_hybrid_rerank_chain ────────────────────────────────

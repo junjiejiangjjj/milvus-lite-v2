@@ -69,6 +69,19 @@ def _extract_anns_field(sub_req) -> str | None:
     return None
 
 
+def _hit_score_for_chain(hit: dict, metric_type: str) -> float:
+    """Convert Collection.search() hit distance to chain score.
+
+    Collection.search() returns IP hits as raw dot-product scores, while
+    other metrics keep lower-is-better distances. FuncChain expects higher
+    scores to sort first.
+    """
+    distance = hit["distance"]
+    if metric_type == "IP":
+        return distance
+    return -distance
+
+
 class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
     """Maps Milvus RPCs onto MilvusLite engine calls.
 
@@ -817,6 +830,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
 
             # Execute each sub-request independently
             all_results = []
+            route_metrics = []
             for sub_req in request.requests:
                 sub_anns = _extract_anns_field(sub_req)
                 if sub_anns and sub_anns in all_specs:
@@ -842,15 +856,19 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     anns_field=parsed.get("anns_field"),
                 )
                 all_results.append(results)
+                route_metrics.append(parsed["metric_type"])
 
             # Convert each route to DataFrame with $id/$score virtual columns
             dfs = []
-            for route_results in all_results:
+            for route_results, metric_type in zip(all_results, route_metrics):
                 chunks = []
                 for query_hits in route_results:
                     chunk = []
                     for hit in query_hits:
-                        flat = {ID_FIELD: hit["id"], SCORE_FIELD: -hit["distance"]}
+                        flat = {
+                            ID_FIELD: hit["id"],
+                            SCORE_FIELD: _hit_score_for_chain(hit, metric_type),
+                        }
                         flat.update(hit.get("entity", {}))
                         chunk.append(flat)
                     chunks.append(chunk)

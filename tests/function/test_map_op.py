@@ -1,5 +1,7 @@
 """Tests for MapOp."""
 
+import pytest
+
 from milvus_lite.function.dataframe import DataFrame
 from milvus_lite.function.ops.map_op import MapOp
 from milvus_lite.function.types import (
@@ -81,3 +83,19 @@ def test_map_op_sets_chunk_idx_on_context():
     ctx = FuncContext(STAGE_INGESTION)
     op.execute(ctx, df)
     assert seen_idxs == [0, 1, 2]
+
+
+def test_map_op_rejects_output_column_count_mismatch():
+    class _NoOutputExpr(FunctionExpr):
+        name = "no_output"
+        supported_stages = frozenset({STAGE_INGESTION})
+
+        def execute(self, ctx, inputs):
+            return []
+
+    op = MapOp(_NoOutputExpr(), ["x"], ["y"])
+    df = DataFrame.from_records([{"x": 1}])
+    ctx = FuncContext(STAGE_INGESTION)
+
+    with pytest.raises(ValueError, match="expected 1 output columns"):
+        op.execute(ctx, df)

@@ -129,6 +129,12 @@ class TestRerankerUnit:
         result = rerank("rrf", {"k": 60}, [route], limit=2, offset=1)
         assert result[0][0]["id"] == 2
 
+    def test_chain_score_conversion_keeps_ip_direction(self):
+        from milvus_lite.adapter.grpc.servicer import _hit_score_for_chain
+
+        assert _hit_score_for_chain({"distance": 0.9}, "IP") == 0.9
+        assert _hit_score_for_chain({"distance": 0.1}, "COSINE") == -0.1
+
 
 # ---------------------------------------------------------------------------
 # gRPC integration tests

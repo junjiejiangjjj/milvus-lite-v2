@@ -53,6 +53,12 @@ class MapOp(Operator):
             inputs = [df.column(col, chunk_idx) for col in self._input_cols]
             # 2. Execute function
             outputs = self._expr.execute(ctx, inputs)
+            if len(outputs) != len(self._output_cols):
+                raise ValueError(
+                    f"MapOp({self._expr.name}): expected "
+                    f"{len(self._output_cols)} output columns but got "
+                    f"{len(outputs)}"
+                )
             # 3. Write output columns back
             for col_name, col_data in zip(self._output_cols, outputs):
                 df.set_column(col_name, chunk_idx, col_data)

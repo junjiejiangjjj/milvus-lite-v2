@@ -149,21 +149,28 @@ def test_merge_weighted_identical_scores():
     assert abs(pk2[SCORE_FIELD] - 0.6) < 1e-9
 
 
+def test_merge_weighted_without_normalization():
+    path0 = _df([[_hit(1, 10.0), _hit(2, 1.0)]])
+    path1 = _df([[_hit(1, 3.0), _hit(2, 5.0)]])
+    op = MergeOp("weighted", weights=[0.25, 0.75], normalize=False)
+    result = op.execute_multi(_ctx(), [path0, path1])
+    chunk = result.chunk(0)
+    pk1 = next(h for h in chunk if h[ID_FIELD] == 1)
+    pk2 = next(h for h in chunk if h[ID_FIELD] == 2)
+    assert abs(pk1[SCORE_FIELD] - 4.75) < 1e-9
+    assert abs(pk2[SCORE_FIELD] - 4.0) < 1e-9
+
+
 # ── Inputs with mismatched num_chunks ────────────────────────
 
 
 def test_merge_mismatched_num_chunks():
-    """path0 has 2 queries, path1 has 1 → query 1 uses empty chunk for path1."""
+    """All routes must have the same query chunk count."""
     path0 = _df([[_hit(1, 0.9)], [_hit(2, 0.8)]])
     path1 = _df([[_hit(3, 0.7)]])  # only 1 query
     op = MergeOp("rrf")
-    result = op.execute_multi(_ctx(), [path0, path1])
-    assert result.num_chunks == 2
-    # query 0: pk1 + pk3
-    assert len(result.chunk(0)) == 2
-    # query 1: only pk2 (path1 has no chunk 1 → treated as empty)
-    assert len(result.chunk(1)) == 1
-    assert result.chunk(1)[0][ID_FIELD] == 2
+    with pytest.raises(ValueError, match="same number of chunks"):
+        op.execute_multi(_ctx(), [path0, path1])
 
 
 # ── Weights longer than routes ───────────────────────────────

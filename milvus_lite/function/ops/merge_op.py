@@ -37,6 +37,7 @@ class MergeOp(Operator):
         self._strategy = strategy
         self._weights: List[float] = kwargs.get("weights", [])
         self._rrf_k: float = kwargs.get("rrf_k", 60.0)
+        self._normalize: bool = kwargs.get("normalize", True)
 
     def execute(self, ctx: FuncContext, df: DataFrame) -> DataFrame:
         raise RuntimeError("MergeOp requires execute_multi()")
@@ -50,6 +51,13 @@ class MergeOp(Operator):
             return inputs[0]
 
         nq = inputs[0].num_chunks
+        for idx, inp in enumerate(inputs[1:], start=1):
+            if inp.num_chunks != nq:
+                raise ValueError(
+                    "MergeOp requires all inputs to have the same number "
+                    f"of chunks: input 0 has {nq}, input {idx} has "
+                    f"{inp.num_chunks}"
+                )
         merged_chunks: List[List[dict]] = []
 
         for q in range(nq):
@@ -129,9 +137,15 @@ class MergeOp(Operator):
             final = 0.0
             for r in range(num_routes):
                 if scores[r] is not None:
-                    rng = route_maxs[r] - route_mins[r]
-                    norm = (scores[r] - route_mins[r]) / rng if rng > 0 else 1.0
-                    final += weights[r] * norm
+                    if self._normalize:
+                        rng = route_maxs[r] - route_mins[r]
+                        score = (
+                            (scores[r] - route_mins[r]) / rng
+                            if rng > 0 else 1.0
+                        )
+                    else:
+                        score = scores[r]
+                    final += weights[r] * score
             merged = pk_entity[pk]
             merged[SCORE_FIELD] = final
             results.append(merged)
