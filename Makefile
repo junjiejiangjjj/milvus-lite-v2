@@ -4,7 +4,7 @@ BIN    := $(VENV)/bin
 PYTEST := $(BIN)/pytest
 PYTEST_ARGS ?= --tb=short -q
 
-.PHONY: venv install dev test test-fast test-core test-compat test-stability test-all benchmark lint clean
+.PHONY: venv install dev test test-fast test-core test-compat test-stability test-soak test-all benchmark lint clean
 
 # Create virtual environment
 venv:
@@ -22,17 +22,17 @@ dev: venv
 	$(BIN)/pip install --upgrade pip
 	$(BIN)/pip install -e ".[dev]"
 
-# Run the full functional suite, excluding performance benchmark
+# Run the regular functional suite, excluding slow tests and benchmark
 test:
-	$(PYTEST) $(PYTEST_ARGS) --ignore=tests/benchmark
+	$(PYTEST) $(PYTEST_ARGS) -m "not slow and not soak" --ignore=tests/benchmark
 
 # Run a fast pre-commit suite: no slow tests, no benchmark
 test-fast:
-	$(PYTEST) $(PYTEST_ARGS) -m "not slow" --ignore=tests/benchmark
+	$(PYTEST) $(PYTEST_ARGS) -m "not slow and not soak" --ignore=tests/benchmark
 
 # Run core engine/storage/search/index tests without gRPC compatibility tests
 test-core:
-	$(PYTEST) $(PYTEST_ARGS) tests/schema tests/storage tests/search tests/index tests/analyzer tests/engine tests/function tests/rerank tests/embedding tests/test_db.py tests/test_smoke_e2e.py
+	$(PYTEST) $(PYTEST_ARGS) -m "not soak" tests/schema tests/storage tests/search tests/index tests/analyzer tests/engine tests/function tests/rerank tests/embedding tests/test_db.py tests/test_smoke_e2e.py
 
 # Run gRPC adapter and pymilvus compatibility tests
 test-compat:
@@ -40,11 +40,15 @@ test-compat:
 
 # Run stability-oriented long tests, excluding the performance benchmark
 test-stability:
-	$(PYTEST) $(PYTEST_ARGS) -m slow --ignore=tests/benchmark
+	$(PYTEST) $(PYTEST_ARGS) -m "slow and not soak" --ignore=tests/benchmark
+
+# Run very large scale soak tests explicitly
+test-soak:
+	MILVUS_LITE_RUN_SOAK=1 $(PYTEST) $(PYTEST_ARGS) -m soak --ignore=tests/benchmark
 
 # Run all tests including benchmark
 test-all:
-	$(PYTEST) $(PYTEST_ARGS) --ignore=tests/benchmark
+	$(PYTEST) $(PYTEST_ARGS) -m "not soak" --ignore=tests/benchmark
 	$(PYTEST) tests/benchmark/ -v -s
 
 # Run benchmark only
@@ -53,7 +57,7 @@ benchmark:
 
 # Run tests with coverage
 coverage:
-	$(PYTEST) --cov=milvus_lite --cov-report=term-missing -q --ignore=tests/benchmark
+	$(PYTEST) --cov=milvus_lite --cov-report=term-missing -q -m "not slow and not soak" --ignore=tests/benchmark
 
 # Start gRPC server
 serve:

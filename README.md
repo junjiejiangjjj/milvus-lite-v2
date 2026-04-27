@@ -443,11 +443,12 @@ No boilerplate was hand-typed. No Stack Overflow was consulted. Just a human wit
 # Testing
 
 ```bash
-make test          # full functional suite, excluding benchmark
+make test          # regular functional suite, excluding slow tests and benchmark
 make test-fast     # fast local suite, excluding slow tests and benchmark
 make test-core     # engine/storage/search/index/function tests
 make test-compat   # gRPC adapter + pymilvus compatibility tests
 make test-stability  # slow crash/long-run stability tests
+make test-soak     # explicit large-scale soak tests
 make benchmark     # performance benchmark
 make coverage      # coverage report
 ```

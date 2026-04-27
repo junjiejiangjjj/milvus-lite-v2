@@ -24,10 +24,10 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run full functional suite
-        run: pytest -q --tb=short --ignore=tests/benchmark
+        run: pytest -q --tb=short -m "not slow and not soak" --ignore=tests/benchmark
 
       - name: Run slow stability tests
-        run: pytest -q --tb=short -m slow --ignore=tests/benchmark
+        run: pytest -q --tb=short -m "slow and not soak" --ignore=tests/benchmark
 
       - name: Run performance benchmark
         run: pytest tests/benchmark/ -v -s

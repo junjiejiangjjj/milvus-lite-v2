@@ -59,4 +59,5 @@ packages = ["milvus_lite"]
 testpaths = ["tests"]
 markers = [
     "slow: long-running tests that exercise resource boundedness over many ops",
+    "soak: very large scale soak tests; run explicitly with MILVUS_LITE_RUN_SOAK=1",
 ]
