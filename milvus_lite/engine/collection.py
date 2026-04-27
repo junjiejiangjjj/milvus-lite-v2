@@ -585,6 +585,7 @@ class Collection:
         radius: Optional[float] = None,
         range_filter: Optional[float] = None,
         offset: int = 0,
+        ranker: Optional[dict] = None,
     ) -> List[List[dict]]:
         """Vector top-k search.
 
@@ -604,6 +605,7 @@ class Collection:
             radius: optional distance lower bound (exclusive).
             range_filter: optional distance upper bound (inclusive).
             offset: number of results to skip before returning (default 0).
+            ranker: optional request-level Boost Ranker spec.
 
         Returns:
             List of length nq. Each inner list has dicts of shape
@@ -648,6 +650,8 @@ class Collection:
             effective_top_k = max((top_k + offset) * group_size * 3, (top_k + offset) * 10)
         if radius is not None or range_filter is not None:
             effective_top_k = max(effective_top_k, (top_k + offset) * 5)
+        if ranker is not None:
+            effective_top_k = max(effective_top_k, (top_k + offset) * 10)
 
         # Resolve the target vector field
         vector_field = self._resolve_anns_field(anns_field)
@@ -704,9 +708,22 @@ class Collection:
 
         # Apply range filter (before group_by)
         if radius is not None or range_filter is not None:
+            range_limit = effective_top_k if ranker is not None else top_k + offset
             raw_results = _apply_range_filter(
-                raw_results, radius, range_filter, top_k + offset,
+                raw_results, radius, range_filter, range_limit,
                 metric_type=metric_type,
+            )
+
+        if ranker is not None:
+            from milvus_lite.rerank.boost import apply_boost_ranker
+
+            raw_results = apply_boost_ranker(
+                raw_results,
+                ranker,
+                metric_type=metric_type,
+                pk_name=self._pk_name,
+                compile_filter=self._compile_filter,
+                row_matches_filter=_row_matches_filter,
             )
 
         # Apply reranking / decay via FuncChain (or legacy path for no-function collections)
@@ -732,6 +749,8 @@ class Collection:
                 )
             if offset > 0:
                 raw_results = [hits[offset:offset + top_k] for hits in raw_results]
+            elif ranker is not None:
+                raw_results = [hits[:top_k] for hits in raw_results]
             # Convert IP distances to Milvus convention
             if metric_type == "IP":
                 for hits in raw_results:

@@ -440,7 +440,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 metric_type=parsed["metric_type"],
                 partition_names=parsed["partition_names"],
                 expr=parsed["expr"],
-                output_fields=parsed["output_fields"],
+                output_fields=None if parsed.get("ranker") else parsed["output_fields"],
                 anns_field=parsed.get("anns_field"),
                 group_by_field=group_by_field,
                 group_size=group_size,
@@ -448,6 +448,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 radius=parsed.get("radius"),
                 range_filter=parsed.get("range_filter"),
                 offset=parsed.get("offset", 0),
+                ranker=parsed.get("ranker"),
             )
 
             # Apply round_decimal to distance values
@@ -893,8 +894,11 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                         list(request.partition_names) or None
                     ),
                     expr=parsed["expr"],
-                    output_fields=list(request.output_fields) or None,
+                    output_fields=None if parsed.get("ranker") else (
+                        list(request.output_fields) or None
+                    ),
                     anns_field=parsed.get("anns_field"),
+                    ranker=parsed.get("ranker"),
                 )
                 all_results.append(results)
                 route_metrics.append(parsed["metric_type"])
