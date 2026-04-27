@@ -29,8 +29,8 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest -x -q --tb=short
+        run: pytest -x -q --tb=short --ignore=tests/benchmark
 
       - name: Run tests with coverage
         if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
-        run: pytest --cov=milvus_lite --cov-report=term-missing -q
+        run: pytest --cov=milvus_lite --cov-report=term-missing -q --ignore=tests/benchmark

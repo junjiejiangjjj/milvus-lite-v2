@@ -1,8 +1,10 @@
 PYTHON ?= python3
 VENV   := .venv
 BIN    := $(VENV)/bin
+PYTEST := $(BIN)/pytest
+PYTEST_ARGS ?= --tb=short -q
 
-.PHONY: venv install dev test test-all benchmark lint clean
+.PHONY: venv install dev test test-fast test-core test-compat test-stability test-all benchmark lint clean
 
 # Create virtual environment
 venv:
@@ -20,22 +22,38 @@ dev: venv
 	$(BIN)/pip install --upgrade pip
 	$(BIN)/pip install -e ".[dev]"
 
-# Run tests (excludes benchmark, real-time output)
+# Run the full functional suite, excluding performance benchmark
 test:
-	$(BIN)/pytest --tb=short -v
+	$(PYTEST) $(PYTEST_ARGS) --ignore=tests/benchmark
+
+# Run a fast pre-commit suite: no slow tests, no benchmark
+test-fast:
+	$(PYTEST) $(PYTEST_ARGS) -m "not slow" --ignore=tests/benchmark
+
+# Run core engine/storage/search/index tests without gRPC compatibility tests
+test-core:
+	$(PYTEST) $(PYTEST_ARGS) tests/schema tests/storage tests/search tests/index tests/analyzer tests/engine tests/function tests/rerank tests/embedding tests/test_db.py tests/test_smoke_e2e.py
+
+# Run gRPC adapter and pymilvus compatibility tests
+test-compat:
+	$(PYTEST) $(PYTEST_ARGS) tests/adapter tests/compatibility
+
+# Run stability-oriented long tests, excluding the performance benchmark
+test-stability:
+	$(PYTEST) $(PYTEST_ARGS) -m slow --ignore=tests/benchmark
 
 # Run all tests including benchmark
 test-all:
-	$(BIN)/pytest --tb=short -q tests/
-	$(BIN)/pytest tests/benchmark/ -v -s
+	$(PYTEST) $(PYTEST_ARGS) --ignore=tests/benchmark
+	$(PYTEST) tests/benchmark/ -v -s
 
 # Run benchmark only
 benchmark:
-	$(BIN)/pytest tests/benchmark/ -v -s
+	$(PYTEST) tests/benchmark/ -v -s
 
 # Run tests with coverage
 coverage:
-	$(BIN)/pytest --cov=milvus_lite --cov-report=term-missing -q
+	$(PYTEST) --cov=milvus_lite --cov-report=term-missing -q --ignore=tests/benchmark
 
 # Start gRPC server
 serve:
