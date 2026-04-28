@@ -440,7 +440,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 metric_type=parsed["metric_type"],
                 partition_names=parsed["partition_names"],
                 expr=parsed["expr"],
-                output_fields=None if parsed.get("ranker") else parsed["output_fields"],
+                output_fields=parsed["output_fields"],
                 anns_field=parsed.get("anns_field"),
                 group_by_field=group_by_field,
                 group_size=group_size,
@@ -860,15 +860,41 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         """
         try:
             from milvus_lite.adapter.grpc.reranker import parse_rank_params
-            from milvus_lite.function.builder import build_hybrid_rerank_chain
+            from milvus_lite.function.builder import (
+                build_hybrid_function_score_chain,
+                build_hybrid_rerank_chain,
+            )
             from milvus_lite.function.dataframe import DataFrame
             from milvus_lite.function.types import ID_FIELD, SCORE_FIELD
+            from milvus_lite.rerank.boost import (
+                decode_hybrid_function_score,
+                merge_boost_rankers,
+            )
 
             col = self._db.get_collection(request.collection_name)
             all_specs = col._index_specs or {}  # noqa: SLF001
 
             # Parse rank_params
             rp = parse_rank_params(request.rank_params)
+            function_score = decode_hybrid_function_score(request.function_score)
+            top_level_l0_ranker = function_score.get("boost")
+            top_level_l2_func = function_score.get("rerank")
+            requested_output_fields = list(request.output_fields) or None
+
+            gb_field = rp.get("group_by_field")
+            internal_output_fields = []
+            if gb_field is not None:
+                internal_output_fields.append(gb_field)
+            if top_level_l2_func is not None:
+                internal_output_fields.extend(
+                    list(getattr(top_level_l2_func, "input_field_names", []))
+                )
+            if requested_output_fields is None:
+                route_output_fields = None
+            else:
+                route_output_fields = list(dict.fromkeys(
+                    requested_output_fields + internal_output_fields
+                ))
 
             # Execute each sub-request independently
             all_results = []
@@ -881,11 +907,16 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     first_spec = next(iter(all_specs.values()), None)
                     sub_default_metric = first_spec.metric_type if first_spec else "COSINE"
                 parsed = parse_search_request(sub_req, default_metric_type=sub_default_metric)
+                sub_ranker = merge_boost_rankers(
+                    parsed.get("ranker"),
+                    top_level_l0_ranker,
+                )
                 sub_top_k = parsed["top_k"]
-                gb_field = rp.get("group_by_field")
                 if gb_field is not None:
                     gb_size = rp.get("group_size") or 1
                     sub_top_k = max(sub_top_k, rp["limit"] * gb_size * 3)
+                if sub_ranker is not None:
+                    sub_top_k = max(sub_top_k, rp["limit"] * 10)
                 results = col.search(
                     query_vectors=parsed["query_vectors"],
                     top_k=sub_top_k,
@@ -894,11 +925,9 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                         list(request.partition_names) or None
                     ),
                     expr=parsed["expr"],
-                    output_fields=None if parsed.get("ranker") else (
-                        list(request.output_fields) or None
-                    ),
+                    output_fields=route_output_fields,
                     anns_field=parsed.get("anns_field"),
-                    ranker=parsed.get("ranker"),
+                    ranker=sub_ranker,
                 )
                 all_results.append(results)
                 route_metrics.append(parsed["metric_type"])
@@ -920,18 +949,24 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 dfs.append(DataFrame(chunks))
 
             # Build and execute rerank chain
-            gb_field = rp.get("group_by_field")
             search_params = {
                 "limit": rp["limit"],
                 "offset": rp["offset"],
                 "group_by_field": gb_field,
                 "group_size": rp.get("group_size") or 1,
             }
-            chain = build_hybrid_rerank_chain(
-                strategy=rp["strategy"],
-                params=rp["params"],
-                search_params=search_params,
-            )
+            if top_level_l2_func is not None:
+                chain = build_hybrid_function_score_chain(
+                    top_level_l2_func,
+                    search_params=search_params,
+                    search_metrics=route_metrics,
+                )
+            else:
+                chain = build_hybrid_rerank_chain(
+                    strategy=rp["strategy"],
+                    params=rp["params"],
+                    search_params=search_params,
+                )
             result_df = chain.execute(*dfs)
 
             # Convert back to {"id", "distance", "entity"} format
@@ -942,15 +977,18 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 hits = []
                 for row in result_df.chunk(ci):
                     entity = {k: v for k, v in row.items() if k not in _virtual}
-                    hits.append({
+                    hit = {
                         "id": row[ID_FIELD],
                         "distance": -row[SCORE_FIELD],
                         "entity": entity,
-                    })
+                    }
+                    if gb_field is not None and gb_field in row:
+                        hit["_group_by_value"] = row[gb_field]
+                    hits.append(hit)
                 merged.append(hits)
 
             # Build response
-            output_fields = list(request.output_fields) or None
+            output_fields = requested_output_fields
             result_data = build_search_result_data(
                 results=merged,
                 schema=col.schema,

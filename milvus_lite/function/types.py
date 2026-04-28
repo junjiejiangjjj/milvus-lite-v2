@@ -16,7 +16,9 @@ from typing import FrozenSet, List
 # ---------------------------------------------------------------------------
 
 STAGE_INGESTION = "ingestion"  # insert / upsert
-STAGE_RERANK = "rerank"  # search post-processing
+STAGE_L0_RERANK = "l0_rerank"  # segment / route-level search rerank
+STAGE_L2_RERANK = "rerank"  # search / proxy-level post-processing
+STAGE_RERANK = STAGE_L2_RERANK  # backwards-compatible alias
 
 # ---------------------------------------------------------------------------
 # Virtual column names used by the chain
@@ -24,6 +26,7 @@ STAGE_RERANK = "rerank"  # search post-processing
 
 ID_FIELD = "$id"
 SCORE_FIELD = "$score"
+DISTANCE_FIELD = "$distance"
 GROUP_SCORE_FIELD = "$group_score"
 DECAY_SCORE_FIELD = "_decay_score"
 

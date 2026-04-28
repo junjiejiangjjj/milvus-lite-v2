@@ -12,6 +12,7 @@ request-level rank_params (RRF/Weighted, no schema functions involved).
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 from milvus_lite.function.chain import FuncChain
@@ -148,12 +149,36 @@ def build_hybrid_rerank_chain(
         chain.merge("rrf", rrf_k=rrf_k)
     elif strategy == "weighted":
         weights = params.get("weights", [])
-        chain.merge("weighted", weights=weights)
+        normalize = params.get("norm_score", True)
+        chain.merge("weighted", weights=weights, normalize=normalize)
     else:
         raise ValueError(f"Unsupported hybrid rerank strategy: {strategy!r}")
 
     # skip_select=True: HybridSearch caller handles field filtering
     # during format conversion (entity fields must pass through).
+    _build_rerank_tail(chain, search_params, skip_select=True)
+    return chain
+
+
+def build_hybrid_function_score_chain(
+    rerank_func,
+    search_params: Dict[str, Any],
+    search_metrics: Optional[List[str]] = None,
+) -> FuncChain:
+    """Build the L2 HybridSearch chain from FunctionScore.reranker."""
+    chain = FuncChain("hybrid_rerank", STAGE_RERANK)
+    reranker_type = _get_reranker_type(rerank_func)
+    query_texts = None
+    if reranker_type == "model":
+        query_texts = _extract_model_queries(rerank_func)
+    _build_rerank_head(chain, reranker_type, rerank_func, search_metrics or [])
+    if reranker_type == "model":
+        from milvus_lite.function.expr.rerank_model import RerankModelExpr
+        from milvus_lite.function.ops.map_op import MapOp
+
+        for op in chain.operators:
+            if isinstance(op, MapOp) and isinstance(op.expr, RerankModelExpr):
+                op.expr.query_texts = query_texts
     _build_rerank_tail(chain, search_params, skip_select=True)
     return chain
 
@@ -234,9 +259,28 @@ def _find_rerank_function(schema):
     return None
 
 
+def _extract_model_queries(func) -> List[str]:
+    params = getattr(func, "params", {}) or {}
+    if "queries" not in params:
+        raise ValueError("model reranker requires params.queries")
+    queries = params["queries"]
+    if isinstance(queries, str):
+        try:
+            queries = json.loads(queries)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise ValueError("model reranker params.queries must be a JSON array")
+    if not isinstance(queries, list) or not queries:
+        raise ValueError("model reranker params.queries must be a non-empty array")
+    if not all(isinstance(q, str) for q in queries):
+        raise ValueError("model reranker params.queries must contain only strings")
+    return list(queries)
+
+
 def _get_reranker_type(func) -> str:
     """Determine reranker type from function params."""
     reranker = func.params.get("reranker", "").lower()
+    if reranker in ("rrf", "weighted", "decay", "model"):
+        return reranker
     if reranker == "decay":
         return "decay"
     provider = func.params.get("provider", "").lower()

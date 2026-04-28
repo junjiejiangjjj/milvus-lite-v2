@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from milvus_lite.exceptions import SchemaValidationError
@@ -56,6 +57,75 @@ def decode_boost_function_score(function_score) -> Optional[dict]:
     }
 
 
+def decode_hybrid_function_score(function_score) -> dict:
+    """Split HybridSearch FunctionScore into query-node and proxy rerankers.
+
+    Boost rankers execute as L0 functions at the route/engine level.
+    RRF/Weighted/Decay/Model execute as L2 functions at the global
+    hybrid merge level.
+    """
+    score_params = _normalize_function_score_params(
+        decode_kv_pairs(getattr(function_score, "params", []))
+    )
+    boost_functions = []
+    l2_func = None
+
+    for fn in getattr(function_score, "functions", []):
+        params = decode_kv_pairs(fn.params)
+        reranker = str(params.get("reranker", "")).lower()
+
+        if reranker == "boost":
+            if list(getattr(fn, "input_field_names", [])):
+                raise SchemaValidationError(
+                    f"Boost Ranker function {fn.name!r} requires empty input_field_names"
+                )
+            boost_functions.append({
+                "name": fn.name,
+                "params": _validate_boost_params(fn.name, params),
+            })
+            continue
+
+        if l2_func is not None:
+            raise SchemaValidationError(
+                "Hybrid FunctionScore supports at most one non-boost "
+                "rerank function"
+            )
+
+        if reranker not in ("rrf", "weighted", "decay", "model") and not params.get("provider"):
+            raise SchemaValidationError(
+                f"Unsupported Hybrid FunctionScore reranker {reranker!r}"
+            )
+        l2_func = SimpleNamespace(
+            name=fn.name,
+            input_field_names=list(getattr(fn, "input_field_names", [])),
+            output_field_names=list(getattr(fn, "output_field_names", [])),
+            params=_normalize_l2_params(reranker, params),
+        )
+
+    boost = None
+    if boost_functions:
+        boost = {"functions": boost_functions, "params": score_params}
+
+    return {"boost": boost, "rerank": l2_func}
+
+
+def merge_boost_rankers(*rankers: Optional[dict]) -> Optional[dict]:
+    """Combine route-level and top-level boost specs."""
+    functions = []
+    params = None
+    for ranker in rankers:
+        if not ranker:
+            continue
+        functions.extend(ranker.get("functions") or [])
+        params = ranker.get("params") or params
+    if not functions:
+        return None
+    return {
+        "functions": functions,
+        "params": params or {"boost_mode": "multiply", "function_mode": "multiply"},
+    }
+
+
 def apply_boost_ranker(
     results: List[List[dict]],
     ranker: dict,
@@ -65,54 +135,56 @@ def apply_boost_ranker(
     compile_filter,
     row_matches_filter,
 ) -> List[List[dict]]:
-    """Apply Boost Ranker to candidate hits and sort by adjusted score."""
+    """Apply Boost Ranker through the L0 FuncChain."""
     if not ranker:
         return results
 
-    functions = ranker.get("functions") or []
-    params = ranker.get("params") or {}
-    boost_mode = params.get("boost_mode", "multiply")
-    function_mode = params.get("function_mode", "multiply")
+    from milvus_lite.function.chain import FuncChain
+    from milvus_lite.function.dataframe import DataFrame
+    from milvus_lite.function.ops.boost_op import BoostOp
+    from milvus_lite.function.types import (
+        DISTANCE_FIELD,
+        ID_FIELD,
+        STAGE_L0_RERANK,
+    )
 
-    compiled_filters: Dict[str, Any] = {}
-    for fn in functions:
-        filt = fn["params"].get("filter")
-        if filt:
-            compiled_filters[filt] = compile_filter(filt)
-
-    boosted: List[List[dict]] = []
+    chain_chunks: List[List[dict]] = []
     for hits in results:
-        adjusted_hits = []
+        chunk = []
         for hit in hits:
-            values = []
-            for fn in functions:
-                fn_params = fn["params"]
-                filt = fn_params.get("filter")
-                if filt:
-                    row = dict(hit.get("entity") or {})
-                    row[pk_name] = hit.get("id")
-                    if not row_matches_filter(row, compiled_filters[filt]):
-                        continue
+            flat = {
+                ID_FIELD: hit["id"],
+                DISTANCE_FIELD: hit["distance"],
+            }
+            flat.update(hit.get("entity") or {})
+            chunk.append(flat)
+        chain_chunks.append(chunk)
 
-                value = float(fn_params["weight"])
-                random_score = fn_params.get("random_score")
-                if random_score is not None:
-                    value *= _stable_random_score(hit, random_score, pk_name)
-                values.append(value)
+    chain = FuncChain("l0_rerank", STAGE_L0_RERANK)
+    chain.add(
+        BoostOp(
+            ranker,
+            metric_type=metric_type,
+            pk_name=pk_name,
+            compile_filter=compile_filter,
+            row_matches_filter=row_matches_filter,
+        )
+    )
+    chain.sort(DISTANCE_FIELD, desc=False)
+    result_df = chain.execute(DataFrame(chain_chunks))
 
-            if not values:
-                adjusted_hits.append(hit)
-                continue
-
-            combined = _combine(values, function_mode)
-            new_hit = dict(hit)
-            new_hit["distance"] = _apply_boost_to_distance(
-                float(hit["distance"]), combined, boost_mode, metric_type
-            )
-            adjusted_hits.append(new_hit)
-
-        adjusted_hits.sort(key=lambda h: h["distance"])
-        boosted.append(adjusted_hits)
+    virtual = {ID_FIELD, DISTANCE_FIELD}
+    boosted: List[List[dict]] = []
+    for ci in range(result_df.num_chunks):
+        out_hits = []
+        for row in result_df.chunk(ci):
+            entity = {k: v for k, v in row.items() if k not in virtual}
+            out_hits.append({
+                "id": row[ID_FIELD],
+                "distance": row[DISTANCE_FIELD],
+                "entity": entity,
+            })
+        boosted.append(out_hits)
 
     return boosted
 
@@ -169,6 +241,90 @@ def _normalize_function_score_params(params: Dict[str, Any]) -> Dict[str, str]:
             )
         out[key] = value
     return out
+
+
+def _normalize_l2_params(reranker: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(params)
+    if reranker == "rrf":
+        if "k" in out:
+            out["k"] = float(out["k"])
+        return out
+
+    if reranker == "weighted":
+        weighted = _normalize_proxy_params(reranker, out)
+        out.update(weighted)
+        out.setdefault("norm_score", True)
+        return out
+
+    if reranker == "model" or out.get("provider"):
+        out["queries"] = _parse_model_queries(out)
+        return out
+
+    return out
+
+
+def _normalize_proxy_params(reranker: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    if reranker == "rrf":
+        out = {}
+        if "k" in params:
+            out["k"] = float(params["k"])
+        return out
+
+    out = {}
+    if "weights" in params:
+        weights = params["weights"]
+        if isinstance(weights, str):
+            try:
+                weights = json.loads(weights)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                raise SchemaValidationError(
+                    "Weighted reranker params.weights must be an array"
+                )
+        if not isinstance(weights, list):
+            raise SchemaValidationError(
+                "Weighted reranker params.weights must be an array"
+            )
+        out["weights"] = [float(w) for w in weights]
+    if "norm_score" in params:
+        out["norm_score"] = _parse_bool(params["norm_score"])
+    return out
+
+
+def _parse_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        if value.lower() == "true":
+            return True
+        if value.lower() == "false":
+            return False
+    raise SchemaValidationError("Weighted reranker params.norm_score must be bool")
+
+
+def _parse_model_queries(params: Dict[str, Any]) -> List[str]:
+    if "queries" not in params:
+        raise SchemaValidationError(
+            "Model reranker requires params.queries"
+        )
+
+    queries = params["queries"]
+    if isinstance(queries, str):
+        try:
+            queries = json.loads(queries)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            raise SchemaValidationError(
+                "Model reranker params.queries must be a JSON array"
+            )
+
+    if not isinstance(queries, list) or not queries:
+        raise SchemaValidationError(
+            "Model reranker params.queries must be a non-empty array"
+        )
+    if not all(isinstance(q, str) for q in queries):
+        raise SchemaValidationError(
+            "Model reranker params.queries must contain only strings"
+        )
+    return list(queries)
 
 
 def _combine(values: List[float], mode: str) -> float:

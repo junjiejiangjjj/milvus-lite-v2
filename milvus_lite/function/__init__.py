@@ -11,7 +11,10 @@ from milvus_lite.function.operator import Operator
 from milvus_lite.function.ops import MapOp
 from milvus_lite.function.types import (
     DECAY_SCORE_FIELD,
+    DISTANCE_FIELD,
     STAGE_INGESTION,
+    STAGE_L0_RERANK,
+    STAGE_L2_RERANK,
     STAGE_RERANK,
     ID_FIELD,
     SCORE_FIELD,
@@ -31,7 +34,10 @@ __all__ = [
     "EmbeddingExpr",
     "build_ingestion_chain",
     "DECAY_SCORE_FIELD",
+    "DISTANCE_FIELD",
     "STAGE_INGESTION",
+    "STAGE_L0_RERANK",
+    "STAGE_L2_RERANK",
     "STAGE_RERANK",
     "ID_FIELD",
     "SCORE_FIELD",

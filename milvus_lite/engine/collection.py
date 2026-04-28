@@ -102,6 +102,30 @@ def _row_matches_filter(record: dict, compiled_filter) -> bool:
     return bool(result) if result is not None else False
 
 
+def _strip_injected_output_fields(
+    results: List[List[dict]],
+    output_fields: Optional[List[str]],
+) -> List[List[dict]]:
+    """Restore the user's projection after internal field injection."""
+    if output_fields is None:
+        return results
+
+    keep = set(output_fields)
+    stripped: List[List[dict]] = []
+    for hits in results:
+        out_hits = []
+        for hit in hits:
+            new_hit = dict(hit)
+            entity = hit.get("entity") or {}
+            new_hit["entity"] = {
+                k: v for k, v in entity.items()
+                if k in keep
+            }
+            out_hits.append(new_hit)
+        stripped.append(out_hits)
+    return stripped
+
+
 class Collection:
     """A single Collection — schema + WAL + MemTable + Manifest + DeltaIndex.
 
@@ -621,6 +645,7 @@ class Collection:
             return []
 
         self._require_loaded()
+        _user_output_fields = list(output_fields) if output_fields is not None else None
 
         # Save original query texts for reranking (before embedding)
         _query_texts: Optional[List[str]] = None
@@ -656,6 +681,23 @@ class Collection:
         # Resolve the target vector field
         vector_field = self._resolve_anns_field(anns_field)
         field_schema = next(f for f in self._schema.fields if f.name == vector_field)
+
+        _boost_field_injected = False
+        if ranker is not None and output_fields is not None:
+            requested = set(output_fields)
+            output_fields = [
+                f.name for f in self._schema.fields
+                if f.name == self._pk_name or f.name in requested or not f.is_primary
+            ]
+            _boost_field_injected = True
+
+        # If grouping is active, ensure the group key is available for
+        # post-processing even when the user did not request it.
+        _group_by_field_injected = False
+        if group_by_field is not None and output_fields is not None:
+            if group_by_field not in output_fields:
+                output_fields = list(output_fields) + [group_by_field]
+                _group_by_field_injected = True
 
         # If reranking is active, ensure the rerank input field is fetched
         _rerank_field_injected = False
@@ -756,6 +798,9 @@ class Collection:
                 for hits in raw_results:
                     for hit in hits:
                         hit["distance"] = -hit["distance"]
+
+        if _boost_field_injected or _group_by_field_injected:
+            raw_results = _strip_injected_output_fields(raw_results, _user_output_fields)
 
         return raw_results
 
@@ -1127,11 +1172,14 @@ class Collection:
                     k: v for k, v in row.items()
                     if k not in _virtual and k not in strip_fields
                 }
-                hits.append({
+                hit = {
                     "id": row[ID_FIELD],
                     "distance": row[SCORE_FIELD],
                     "entity": entity,
-                })
+                }
+                if group_by_field is not None and group_by_field in row:
+                    hit["_group_by_value"] = row[group_by_field]
+                hits.append(hit)
             out_results.append(hits)
 
         return out_results

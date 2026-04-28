@@ -83,6 +83,65 @@ def test_output_fields_includes_vector_when_listed(col):
     assert len(hit["entity"]["vec"]) == 4
 
 
+def test_boost_ranker_filter_uses_hidden_fields(col):
+    ranker = {
+        "functions": [{
+            "name": "boost_active",
+            "params": {
+                "reranker": "boost",
+                "filter": "active == true",
+                "weight": 0.1,
+            },
+        }],
+        "params": {"boost_mode": "multiply", "function_mode": "multiply"},
+    }
+
+    res = col.search(
+        [[0.0, 0.8, 0.2, 0.0]],
+        top_k=3,
+        metric_type="L2",
+        output_fields=["title"],
+        ranker=ranker,
+    )
+
+    assert [hit["id"] for hit in res[0]] == [3, 1, 2]
+    assert all(set(hit["entity"]) == {"title"} for hit in res[0])
+
+
+def test_boost_ranker_preserves_requested_vector_field(col):
+    ranker = {
+        "functions": [{
+            "name": "boost_all",
+            "params": {"reranker": "boost", "weight": 1.0},
+        }],
+        "params": {"boost_mode": "multiply", "function_mode": "multiply"},
+    }
+
+    res = col.search(
+        [[1.0, 0.0, 0.0, 0.0]],
+        top_k=1,
+        output_fields=["vec"],
+        ranker=ranker,
+    )
+
+    assert res[0][0]["id"] == 1
+    assert res[0][0]["entity"] == {"vec": [1.0, 0.0, 0.0, 0.0]}
+
+
+def test_group_by_uses_hidden_field_without_projecting_it(col):
+    res = col.search(
+        [[1.0, 0.0, 0.0, 0.0]],
+        top_k=2,
+        group_by_field="active",
+        group_size=1,
+        output_fields=["title"],
+    )
+
+    assert len(res[0]) == 2
+    assert [hit["_group_by_value"] for hit in res[0]] == [True, False]
+    assert all(set(hit["entity"]) == {"title"} for hit in res[0])
+
+
 def test_output_fields_pk_in_list_is_dropped_silently(col):
     """The pk is always surfaced as 'id'; listing it in output_fields
     is a no-op (not an error)."""

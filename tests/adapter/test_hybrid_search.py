@@ -180,6 +180,46 @@ def test_hybrid_weighted_dense_bm25(milvus_client):
     milvus_client.drop_collection(name)
 
 
+def test_hybrid_top_level_function_score_weighted(milvus_client):
+    """Hybrid FunctionScore weighted reranker runs at the L2 merge level."""
+    name = _create_hybrid_collection(milvus_client, "hybrid_fn_weighted")
+
+    from milvus_lite.analyzer.hash import term_to_id
+    from milvus_lite.analyzer.sparse import compute_tf
+
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        anns_field="dense",
+        param={},
+        limit=5,
+    )
+    bm25_query = compute_tf([term_to_id("machine"), term_to_id("learning")])
+    bm25_req = AnnSearchRequest(
+        data=[bm25_query],
+        anns_field="bm25_emb",
+        param={"metric_type": "BM25"},
+        limit=5,
+    )
+    ranker = Function(
+        name="weighted_l2",
+        function_type=FunctionType.RERANK,
+        input_field_names=[],
+        output_field_names=[],
+        params={"reranker": "weighted", "weights": [1.0, 0.0]},
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req, bm25_req],
+        ranker=ranker,
+        limit=3,
+        output_fields=["text"],
+    )
+
+    assert [hit["id"] for hit in results[0]][0] == 1
+    milvus_client.drop_collection(name)
+
+
 def test_hybrid_rrf_dense_bm25(milvus_client):
     """Hybrid search: dense + BM25 with RRFRanker."""
     name = _create_hybrid_collection(milvus_client, "hybrid_rrf1")
@@ -239,6 +279,35 @@ def test_hybrid_output_fields(milvus_client):
     for hit in results[0]:
         assert "text" in hit["entity"]
         assert "category" in hit["entity"]
+
+    milvus_client.drop_collection(name)
+
+
+def test_hybrid_group_by_hidden_field_not_output(milvus_client):
+    """Hybrid group_by uses an internal field without returning it."""
+    name = _create_hybrid_collection(milvus_client, "hybrid_gb_hidden")
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0, 0.0, 0.0]],
+        anns_field="dense",
+        param={},
+        limit=5,
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req],
+        ranker=RRFRanker(),
+        limit=2,
+        group_by_field="category",
+        group_size=1,
+        output_fields=["text"],
+    )
+
+    id_to_category = {1: 1, 2: 1, 3: 2, 4: 2, 5: 2}
+    ids = [hit["id"] for hit in results[0]]
+    assert len(ids) == 2
+    assert len({id_to_category[pk] for pk in ids}) == 2
+    assert all("category" not in hit["entity"] for hit in results[0])
 
     milvus_client.drop_collection(name)
 
