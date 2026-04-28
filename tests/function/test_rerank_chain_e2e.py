@@ -39,6 +39,32 @@ def test_weighted_chain_e2e():
     assert scores == sorted(scores, reverse=True)
 
 
+def test_weighted_l2_no_norm_chain_sorts_ascending():
+    chain = build_hybrid_rerank_chain(
+        "weighted",
+        {"weights": [1.0], "norm_score": False},
+        {"limit": 2, "metric_types": ["L2"]},
+    )
+    path0 = DataFrame([[_hit(1, 0.2), _hit(2, 1.0), _hit(3, 3.0)]])
+    result = chain.execute(path0)
+    chunk = result.chunk(0)
+    assert [h[ID_FIELD] for h in chunk] == [1, 2]
+    assert [h[SCORE_FIELD] for h in chunk] == [0.2, 1.0]
+
+
+def test_weighted_l2_norm_chain_sorts_descending():
+    chain = build_hybrid_rerank_chain(
+        "weighted",
+        {"weights": [1.0], "norm_score": True},
+        {"limit": 2, "metric_types": ["L2"]},
+    )
+    path0 = DataFrame([[_hit(1, 0.2), _hit(2, 1.0), _hit(3, 3.0)]])
+    result = chain.execute(path0)
+    chunk = result.chunk(0)
+    assert [h[ID_FIELD] for h in chunk] == [1, 2]
+    assert chunk[0][SCORE_FIELD] > chunk[1][SCORE_FIELD]
+
+
 def test_rrf_multi_query():
     chain = build_hybrid_rerank_chain("rrf", {}, {"limit": 10})
     path0 = DataFrame([

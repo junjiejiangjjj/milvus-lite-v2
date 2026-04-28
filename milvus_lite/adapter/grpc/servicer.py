@@ -72,14 +72,19 @@ def _extract_anns_field(sub_req) -> str | None:
 def _hit_score_for_chain(hit: dict, metric_type: str) -> float:
     """Convert Collection.search() hit distance to chain score.
 
-    Collection.search() returns IP hits as raw dot-product scores, while
-    other metrics keep lower-is-better distances. FuncChain expects higher
-    scores to sort first.
+    FuncChain follows Milvus merge semantics: incoming scores keep the
+    metric's natural direction, and MergeOp decides whether it needs to
+    normalize, direction-convert, and sort ascending or descending.
     """
     distance = hit["distance"]
-    if metric_type == "IP":
+    metric = metric_type.upper()
+    if metric == "COSINE":
+        return 1.0 - distance
+    if metric == "BM25":
+        return -distance
+    if metric in {"IP", "L2"}:
         return distance
-    return -distance
+    return distance
 
 
 class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
@@ -954,6 +959,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 "offset": rp["offset"],
                 "group_by_field": gb_field,
                 "group_size": rp.get("group_size") or 1,
+                "metric_types": route_metrics,
             }
             if top_level_l2_func is not None:
                 chain = build_hybrid_function_score_chain(

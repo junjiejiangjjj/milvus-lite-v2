@@ -138,6 +138,24 @@ def test_build_weighted_chain_honors_norm_score_false():
     assert result[1] == {ID_FIELD: 2, SCORE_FIELD: 4.0}
 
 
+def test_build_weighted_l2_chain_sorts_ascending_without_norm():
+    schema = _schema_with_rerank(
+        strategy="weighted", weights=[1.0], norm_score=False
+    )
+    chain = build_rerank_chain(
+        schema,
+        {"limit": 2},
+        search_metrics=["L2"],
+    )
+    result = chain.execute(DataFrame([[
+        {ID_FIELD: 1, SCORE_FIELD: 0.2},
+        {ID_FIELD: 2, SCORE_FIELD: 1.0},
+        {ID_FIELD: 3, SCORE_FIELD: 3.0},
+    ]])).chunk(0)
+
+    assert [row[ID_FIELD] for row in result] == [1, 2]
+
+
 # ── build_hybrid_rerank_chain ────────────────────────────────
 
 

@@ -113,9 +113,12 @@ def build_rerank_chain(
 
     # ── Head: Merge ──
     _build_rerank_head(chain, reranker_type, rerank_func, search_metrics or [])
+    sort_descending = True
+    if chain.operators and hasattr(chain.operators[0], "sort_descending"):
+        sort_descending = chain.operators[0].sort_descending
 
     # ── Tail: Sort/GroupBy -> [RoundDecimal] -> Select ──
-    _build_rerank_tail(chain, search_params)
+    _build_rerank_tail(chain, search_params, sort_descending=sort_descending)
 
     return chain
 
@@ -144,19 +147,30 @@ def build_hybrid_rerank_chain(
     """
     chain = FuncChain("hybrid_rerank", STAGE_RERANK)
 
+    sort_descending = True
+
     if strategy == "rrf":
         rrf_k = params.get("k", 60.0)
         chain.merge("rrf", rrf_k=rrf_k)
     elif strategy == "weighted":
         weights = params.get("weights", [])
-        normalize = params.get("norm_score", True)
-        chain.merge("weighted", weights=weights, normalize=normalize)
+        normalize = params.get("norm_score", False)
+        chain.merge(
+            "weighted",
+            weights=weights,
+            normalize=normalize,
+            metric_types=search_params.get("metric_types", []),
+        )
+        sort_descending = chain.operators[0].sort_descending
     else:
         raise ValueError(f"Unsupported hybrid rerank strategy: {strategy!r}")
 
     # skip_select=True: HybridSearch caller handles field filtering
     # during format conversion (entity fields must pass through).
-    _build_rerank_tail(chain, search_params, skip_select=True)
+    _build_rerank_tail(
+        chain, search_params, skip_select=True,
+        sort_descending=sort_descending,
+    )
     return chain
 
 
@@ -168,10 +182,13 @@ def build_hybrid_function_score_chain(
     """Build the L2 HybridSearch chain from FunctionScore.reranker."""
     chain = FuncChain("hybrid_rerank", STAGE_RERANK)
     reranker_type = _get_reranker_type(rerank_func)
+    sort_descending = True
     query_texts = None
     if reranker_type == "model":
         query_texts = _extract_model_queries(rerank_func)
     _build_rerank_head(chain, reranker_type, rerank_func, search_metrics or [])
+    if chain.operators and hasattr(chain.operators[0], "sort_descending"):
+        sort_descending = chain.operators[0].sort_descending
     if reranker_type == "model":
         from milvus_lite.function.expr.rerank_model import RerankModelExpr
         from milvus_lite.function.ops.map_op import MapOp
@@ -179,7 +196,10 @@ def build_hybrid_function_score_chain(
         for op in chain.operators:
             if isinstance(op, MapOp) and isinstance(op.expr, RerankModelExpr):
                 op.expr.query_texts = query_texts
-    _build_rerank_tail(chain, search_params, skip_select=True)
+    _build_rerank_tail(
+        chain, search_params, skip_select=True,
+        sort_descending=sort_descending,
+    )
     return chain
 
 
@@ -317,7 +337,13 @@ def _build_rerank_head(
 
     elif reranker_type == "decay":
         score_mode = rerank_func.params.get("score_mode", "max")
-        chain.merge(score_mode, metric_types=search_metrics)
+        normalize = rerank_func.params.get("norm_score", False)
+        chain.merge(
+            score_mode,
+            metric_types=search_metrics,
+            normalize=normalize,
+            force_descending=True,
+        )
         # Map(DecayExpr)
         in_name = rerank_func.input_field_names[0]
         decay_expr = DecayExpr(
@@ -354,6 +380,7 @@ def _build_rerank_tail(
     search_params: Dict[str, Any],
     *,
     skip_select: bool = False,
+    sort_descending: bool = True,
 ) -> None:
     """Build the common tail: Sort/GroupBy -> [RoundDecimal] -> [Select].
 
@@ -371,9 +398,15 @@ def _build_rerank_tail(
 
     if group_by_field:
         group_size = search_params.get("group_size", 1)
-        chain.group_by(group_by_field, group_size, limit, offset)
+        chain.group_by(
+            group_by_field,
+            group_size,
+            limit,
+            offset,
+            sort_descending=sort_descending,
+        )
     else:
-        chain.sort(SCORE_FIELD, desc=True)
+        chain.sort(SCORE_FIELD, desc=sort_descending)
         if limit > 0:
             chain.limit(limit, offset)
 

@@ -9,6 +9,7 @@ Corresponds to Milvus: internal/util/function/chain/operator_merge.go
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 from milvus_lite.function.dataframe import DataFrame
@@ -25,7 +26,7 @@ class MergeOp(Operator):
 
     Strategies:
         rrf      — Reciprocal Rank Fusion: ``Σ 1/(k + rank_i)``
-        weighted — Weighted sum with per-route min-max normalization
+        weighted — Weighted sum with optional metric-aware normalization
         max      — Maximum score across routes
         sum      — Sum of scores across routes
         avg      — Average of scores across routes
@@ -38,6 +39,17 @@ class MergeOp(Operator):
         self._weights: List[float] = kwargs.get("weights", [])
         self._rrf_k: float = kwargs.get("rrf_k", 60.0)
         self._normalize: bool = kwargs.get("normalize", True)
+        self._metric_types: List[str] = list(kwargs.get("metric_types", []))
+        self._force_descending: bool = kwargs.get("force_descending", False)
+        self._sort_descending, self._score_norm_funcs = _resolve_merge_behavior(
+            normalize=self._normalize,
+            force_descending=self._force_descending,
+            metric_types=self._metric_types,
+        )
+
+    @property
+    def sort_descending(self) -> bool:
+        return self._sort_descending
 
     def execute(self, ctx: FuncContext, df: DataFrame) -> DataFrame:
         raise RuntimeError("MergeOp requires execute_multi()")
@@ -47,8 +59,6 @@ class MergeOp(Operator):
     ) -> DataFrame:
         if not inputs:
             raise ValueError("MergeOp requires at least one input")
-        if len(inputs) == 1:
-            return inputs[0]
 
         nq = inputs[0].num_chunks
         for idx, inp in enumerate(inputs[1:], start=1):
@@ -58,6 +68,12 @@ class MergeOp(Operator):
                     f"of chunks: input 0 has {nq}, input {idx} has "
                     f"{inp.num_chunks}"
                 )
+        if self._strategy == "weighted" and len(self._weights) != len(inputs):
+            raise ValueError(
+                f"weighted merge requires {len(inputs)} weights, "
+                f"got {len(self._weights)}"
+            )
+
         merged_chunks: List[List[dict]] = []
 
         for q in range(nq):
@@ -103,9 +119,6 @@ class MergeOp(Operator):
     ) -> List[dict]:
         num_routes = len(inputs)
         weights = list(self._weights)
-        if len(weights) < num_routes:
-            default_w = 1.0 / num_routes
-            weights.extend([default_w] * (num_routes - len(weights)))
 
         pk_entity: Dict[Any, dict] = {}
         pk_route_scores: Dict[Any, List[Optional[float]]] = {}
@@ -123,28 +136,15 @@ class MergeOp(Operator):
         if not pk_route_scores:
             return []
 
-        # Per-route min-max normalization
-        route_mins = [float("inf")] * num_routes
-        route_maxs = [float("-inf")] * num_routes
-        for scores in pk_route_scores.values():
-            for r in range(num_routes):
-                if scores[r] is not None:
-                    route_mins[r] = min(route_mins[r], scores[r])
-                    route_maxs[r] = max(route_maxs[r], scores[r])
-
         results: List[dict] = []
         for pk, scores in pk_route_scores.items():
             final = 0.0
             for r in range(num_routes):
                 if scores[r] is not None:
-                    if self._normalize:
-                        rng = route_maxs[r] - route_mins[r]
-                        score = (
-                            (scores[r] - route_mins[r]) / rng
-                            if rng > 0 else 1.0
-                        )
-                    else:
-                        score = scores[r]
+                    score = scores[r]
+                    norm_func = self._score_norm_func(r)
+                    if norm_func is not None:
+                        score = norm_func(score)
                     final += weights[r] * score
             merged = pk_entity[pk]
             merged[SCORE_FIELD] = final
@@ -162,11 +162,14 @@ class MergeOp(Operator):
         pk_entity: Dict[Any, dict] = {}
         pk_scores: Dict[Any, List[float]] = {}
 
-        for inp in inputs:
+        for input_idx, inp in enumerate(inputs):
             chunk = inp.chunk(q) if q < inp.num_chunks else []
             for hit in chunk:
                 pk = hit.get(ID_FIELD)
                 score = hit.get(SCORE_FIELD, 0.0)
+                norm_func = self._score_norm_func(input_idx)
+                if norm_func is not None:
+                    score = norm_func(score)
                 if pk not in pk_entity:
                     pk_entity[pk] = dict(hit)
                 pk_scores.setdefault(pk, []).append(score)
@@ -185,3 +188,72 @@ class MergeOp(Operator):
             merged[SCORE_FIELD] = final
             results.append(merged)
         return results
+
+    def _score_norm_func(self, input_idx: int):
+        if input_idx < len(self._score_norm_funcs):
+            return self._score_norm_funcs[input_idx]
+        return None
+
+
+def _resolve_merge_behavior(
+    *,
+    normalize: bool,
+    force_descending: bool,
+    metric_types: List[str],
+):
+    norm_funcs = [None] * len(metric_types)
+    if not metric_types:
+        return True, norm_funcs
+
+    if normalize:
+        return True, [_normalize_func(metric_type) for metric_type in metric_types]
+
+    mixed, sort_descending = _classify_metric_order(metric_types)
+    if mixed or force_descending:
+        return True, [
+            _direction_convert_func(metric_type) for metric_type in metric_types
+        ]
+
+    return sort_descending, norm_funcs
+
+
+def _classify_metric_order(metric_types: List[str]) -> Tuple[bool, bool]:
+    positive = sum(1 for metric_type in metric_types if _positively_related(metric_type))
+    negative = len(metric_types) - positive
+    if positive and negative:
+        return True, True
+    return False, negative == 0
+
+
+def _positively_related(metric_type: str) -> bool:
+    return metric_type.upper() in {
+        "IP",
+        "COSINE",
+        "BM25",
+        "MHJACCARD",
+        "MAX_SIM",
+        "MAXSIM",
+        "MAX_SIM_IP",
+        "MAXSIMIP",
+        "MAX_SIM_COSINE",
+        "MAXSIMCOSINE",
+    }
+
+
+def _direction_convert_func(metric_type: str):
+    if _positively_related(metric_type):
+        return None
+    return lambda distance: 1.0 - 2.0 * math.atan(float(distance)) / math.pi
+
+
+def _normalize_func(metric_type: str):
+    upper = metric_type.upper()
+    if upper == "COSINE":
+        return lambda score: (1.0 + float(score)) * 0.5
+    if upper == "IP":
+        return lambda score: 0.5 + math.atan(float(score)) / math.pi
+    if upper == "BM25":
+        return lambda score: 2.0 * math.atan(float(score)) / math.pi
+    if _positively_related(metric_type):
+        return lambda score: 0.5 + math.atan(float(score)) / math.pi
+    return lambda distance: 1.0 - 2.0 * math.atan(float(distance)) / math.pi

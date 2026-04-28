@@ -32,6 +32,7 @@ class GroupByOp(Operator):
         limit: int,
         offset: int = 0,
         scorer: str = "max",
+        sort_descending: bool = True,
     ) -> None:
         if scorer not in self._VALID_SCORERS:
             raise ValueError(f"Unknown group scorer: {scorer!r}")
@@ -40,6 +41,7 @@ class GroupByOp(Operator):
         self._limit = limit
         self._offset = offset
         self._scorer = scorer
+        self._sort_descending = sort_descending
 
     def execute(self, ctx: FuncContext, df: DataFrame) -> DataFrame:
         new_chunks = []
@@ -55,13 +57,16 @@ class GroupByOp(Operator):
             # 2. Per-group sort + truncate
             scored_groups = []
             for key, hits in groups.items():
-                hits.sort(key=lambda r: r.get(SCORE_FIELD, 0), reverse=True)
+                hits.sort(
+                    key=lambda r: r.get(SCORE_FIELD, 0),
+                    reverse=self._sort_descending,
+                )
                 top_hits = hits[: self._group_size]
                 group_score = self._compute_group_score(top_hits)
                 scored_groups.append((group_score, key, top_hits))
 
             # 3. Sort groups + offset + limit
-            scored_groups.sort(key=lambda g: g[0], reverse=True)
+            scored_groups.sort(key=lambda g: g[0], reverse=self._sort_descending)
             selected = scored_groups[self._offset : self._offset + self._limit]
 
             # 4. Flatten + add $group_score

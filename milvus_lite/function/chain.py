@@ -96,11 +96,21 @@ class FuncChain:
         limit: int,
         offset: int = 0,
         scorer: str = "max",
+        sort_descending: bool = True,
     ) -> FuncChain:
         """Add a :class:`GroupByOp`."""
         from milvus_lite.function.ops.group_by_op import GroupByOp
 
-        return self.add(GroupByOp(field, group_size, limit, offset, scorer))
+        return self.add(
+            GroupByOp(
+                field,
+                group_size,
+                limit,
+                offset,
+                scorer,
+                sort_descending=sort_descending,
+            )
+        )
 
     # ── Execution ──────────���──────────────────────────────────
 

@@ -1,5 +1,6 @@
 """Tests for MergeOp."""
 
+import math
 import pytest
 
 from milvus_lite.function.dataframe import DataFrame
@@ -61,19 +62,25 @@ def test_merge_weighted_basic():
 
 
 def test_merge_weighted_normalization():
-    """With two hits per route, min-max norm should produce 0.0 and 1.0."""
+    """With norm_score=true, Milvus uses metric-aware atan normalization."""
     path0 = _df([[_hit(1, 10.0), _hit(2, 20.0)]])
     path1 = _df([[_hit(1, 5.0)]])
-    op = MergeOp("weighted", weights=[0.5, 0.5])
+    op = MergeOp(
+        "weighted",
+        weights=[0.5, 0.5],
+        normalize=True,
+        metric_types=["IP", "IP"],
+    )
     result = op.execute_multi(_ctx(), [path0, path1])
     chunk = result.chunk(0)
     pk1 = next(h for h in chunk if h[ID_FIELD] == 1)
     pk2 = next(h for h in chunk if h[ID_FIELD] == 2)
-    # path0: pk1 norm=0.0, pk2 norm=1.0; path1: pk1 norm=1.0 (only one)
-    # pk1 final = 0.5*0.0 + 0.5*1.0 = 0.5
-    # pk2 final = 0.5*1.0 + 0 = 0.5
-    assert abs(pk1[SCORE_FIELD] - 0.5) < 1e-9
-    assert abs(pk2[SCORE_FIELD] - 0.5) < 1e-9
+    norm10 = 0.5 + math.atan(10.0) / math.pi
+    norm5 = 0.5 + math.atan(5.0) / math.pi
+    norm20 = 0.5 + math.atan(20.0) / math.pi
+    assert abs(pk1[SCORE_FIELD] - (0.5 * norm10 + 0.5 * norm5)) < 1e-9
+    assert abs(pk2[SCORE_FIELD] - (0.5 * norm20)) < 1e-9
+    assert pk1[SCORE_FIELD] > pk2[SCORE_FIELD]
 
 
 # ── Simple strategies ────────────────────────────────────────
@@ -107,10 +114,12 @@ def test_merge_avg():
 
 
 def test_merge_single_input_passthrough():
-    df = _df([[_hit(1, 0.5)]])
+    df = _df([[_hit(1, 0.5), _hit(2, 0.4)]])
     op = MergeOp("rrf")
     result = op.execute_multi(_ctx(), [df])
-    assert result is df
+    assert result is not df
+    assert [h[ID_FIELD] for h in result.chunk(0)] == [1, 2]
+    assert result.chunk(0)[0][SCORE_FIELD] == pytest.approx(1.0 / 61.0)
 
 
 def test_merge_multi_query():
@@ -134,19 +143,15 @@ def test_merge_execute_raises():
 
 
 def test_merge_weighted_identical_scores():
-    """When all scores in a route are the same, range=0 → norm defaults to 1.0."""
     path0 = _df([[_hit(1, 5.0), _hit(2, 5.0)]])
     path1 = _df([[_hit(1, 3.0)]])
-    op = MergeOp("weighted", weights=[0.6, 0.4])
+    op = MergeOp("weighted", weights=[0.6, 0.4], normalize=False)
     result = op.execute_multi(_ctx(), [path0, path1])
     chunk = result.chunk(0)
     pk1 = next(h for h in chunk if h[ID_FIELD] == 1)
     pk2 = next(h for h in chunk if h[ID_FIELD] == 2)
-    # path0 range=0 → norm=1.0 for both; path1 single → norm=1.0
-    # pk1 = 0.6*1.0 + 0.4*1.0 = 1.0
-    # pk2 = 0.6*1.0 = 0.6
-    assert abs(pk1[SCORE_FIELD] - 1.0) < 1e-9
-    assert abs(pk2[SCORE_FIELD] - 0.6) < 1e-9
+    assert abs(pk1[SCORE_FIELD] - 4.2) < 1e-9
+    assert abs(pk2[SCORE_FIELD] - 3.0) < 1e-9
 
 
 def test_merge_weighted_without_normalization():
@@ -159,6 +164,38 @@ def test_merge_weighted_without_normalization():
     pk2 = next(h for h in chunk if h[ID_FIELD] == 2)
     assert abs(pk1[SCORE_FIELD] - 4.75) < 1e-9
     assert abs(pk2[SCORE_FIELD] - 4.0) < 1e-9
+
+
+def test_merge_weighted_l2_without_normalization_sorts_ascending():
+    path0 = _df([[_hit(1, 1.0), _hit(2, 4.0)]])
+    path1 = _df([[_hit(1, 2.0), _hit(2, 3.0)]])
+    op = MergeOp(
+        "weighted",
+        weights=[0.5, 0.5],
+        normalize=False,
+        metric_types=["L2", "L2"],
+    )
+    result = op.execute_multi(_ctx(), [path0, path1])
+    chunk = result.chunk(0)
+    assert op.sort_descending is False
+    assert next(h for h in chunk if h[ID_FIELD] == 1)[SCORE_FIELD] == 1.5
+    assert next(h for h in chunk if h[ID_FIELD] == 2)[SCORE_FIELD] == 3.5
+
+
+def test_merge_weighted_mixed_metrics_converts_distance_direction():
+    path0 = _df([[_hit(1, 0.0), _hit(2, 10.0)]])  # L2
+    path1 = _df([[_hit(1, 0.1), _hit(2, 0.1)]])  # IP
+    op = MergeOp(
+        "weighted",
+        weights=[1.0, 0.0],
+        normalize=False,
+        metric_types=["L2", "IP"],
+    )
+    result = op.execute_multi(_ctx(), [path0, path1])
+    chunk = result.chunk(0)
+    assert op.sort_descending is True
+    assert next(h for h in chunk if h[ID_FIELD] == 1)[SCORE_FIELD] == 1.0
+    assert next(h for h in chunk if h[ID_FIELD] == 2)[SCORE_FIELD] < 0.1
 
 
 # ── Inputs with mismatched num_chunks ────────────────────────
@@ -177,10 +214,9 @@ def test_merge_mismatched_num_chunks():
 
 
 def test_merge_weighted_extra_weights_ignored():
-    """Extra weights beyond num_routes are silently ignored."""
+    """Weighted merge requires exactly one weight per route."""
     path0 = _df([[_hit(1, 0.8)]])
     path1 = _df([[_hit(1, 0.4)]])
     op = MergeOp("weighted", weights=[0.7, 0.3, 0.5])  # 3 weights, 2 routes
-    result = op.execute_multi(_ctx(), [path0, path1])
-    chunk = result.chunk(0)
-    assert len(chunk) == 1
+    with pytest.raises(ValueError, match="requires 2 weights"):
+        op.execute_multi(_ctx(), [path0, path1])
