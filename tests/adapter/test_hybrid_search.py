@@ -280,9 +280,16 @@ def test_hybrid_top_level_decay_uses_hidden_input_field(milvus_client):
         output_fields=["label"],
     )
 
-    assert [hit["id"] for hit in results[0]][0] == 2
+    expected_labels = {1: "a", 2: "b", 3: "c"}
+    ids = [hit["id"] for hit in results[0]]
+    distances = [hit["distance"] for hit in results[0]]
+
+    assert ids[:2] == [2, 3]
+    assert distances[0] == pytest.approx(-0.9)
+    assert distances[1] == pytest.approx(-0.8)
     assert all("ts" not in hit["entity"] for hit in results[0])
-    assert all("label" in hit["entity"] for hit in results[0])
+    for hit in results[0]:
+        assert hit["entity"]["label"] == expected_labels[hit["id"]]
     milvus_client.drop_collection(name)
 
 
@@ -335,9 +342,15 @@ def test_hybrid_top_level_model_uses_hidden_input_field(
         output_fields=["label"],
     )
 
-    assert [hit["id"] for hit in results[0]][0] == 2
+    expected_labels = {1: "a", 2: "b", 3: "c"}
+    ids = [hit["id"] for hit in results[0]]
+    distances = [hit["distance"] for hit in results[0]]
+
+    assert ids[0] == 2
+    assert distances[0] == pytest.approx(-1.0)
     assert all("text" not in hit["entity"] for hit in results[0])
-    assert all("label" in hit["entity"] for hit in results[0])
+    for hit in results[0]:
+        assert hit["entity"]["label"] == expected_labels[hit["id"]]
     milvus_client.drop_collection(name)
 
 
