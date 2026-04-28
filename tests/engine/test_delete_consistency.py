@@ -7,7 +7,8 @@ their tombstones from delta_index. The reader then queries the live
 delta_index (no tombstone) against old segments (still have the data)
 and sees "ghost" deleted records.
 
-Fix: stop calling gc_below in compaction; tombstones accumulate in memory.
+Fix: capture segment and DeltaIndex snapshots together under the
+maintenance lock, so a reader sees one compaction generation.
 """
 
 import threading
@@ -65,6 +66,53 @@ def test_delete_not_lost_across_compaction(tmp_path, schema, monkeypatch):
     # num_entities should match live count: 40 + 2 - 20 = 22
     col.load()
     assert col.num_entities == 22
+    col.close()
+
+
+def test_query_snapshot_survives_tombstone_gc_during_read(tmp_path, monkeypatch):
+    """A query must not mix old segments with a post-GC DeltaIndex.
+
+    The patched assemble_candidates call forces compaction to run after
+    query() has captured its read snapshot. Before the fix, query()
+    captured only segments before this point and fetched DeltaIndex
+    afterward, so the deleted pk became visible again.
+    """
+    import milvus_lite.engine.collection as collection_mod
+    import milvus_lite.engine.compaction as compaction_mod
+
+    local_schema = CollectionSchema(fields=[
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+        FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=4),
+    ])
+
+    monkeypatch.setattr(collection_mod, "MEMTABLE_SIZE_LIMIT", 1)
+    monkeypatch.setattr(compaction_mod, "COMPACTION_MIN_FILES_PER_BUCKET", 2)
+
+    col = Collection("c", str(tmp_path / "d"), local_schema)
+    col._schedule_bg_maintenance = lambda: None
+
+    col.insert([{"id": 7, "vec": _vec(7)}])
+    col.delete([7])
+    col.insert([{"id": 2, "vec": _vec(2)}])
+    assert col._delta_index.snapshot == {7: 2}
+
+    original_assemble = collection_mod.assemble_candidates
+    did_compact = False
+
+    def assemble_after_gc(*args, **kwargs):
+        nonlocal did_compact
+        if not did_compact:
+            did_compact = True
+            col._bg_compact_and_index()
+            assert col._delta_index.snapshot == {}
+        return original_assemble(*args, **kwargs)
+
+    monkeypatch.setattr(collection_mod, "assemble_candidates", assemble_after_gc)
+
+    rows = col.query(expr=None, limit=100)
+    assert [row["id"] for row in rows] == [2]
+    assert did_compact
+
     col.close()
 
 

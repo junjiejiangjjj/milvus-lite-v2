@@ -430,11 +430,11 @@ class Collection:
             return None
 
         # 2. Segments
-        delta_snap = self._delta_index.frozen_copy()
+        seg_snap, delta_snap = self._read_snapshot()
         best_seq = -1
         best_segment = None
         best_row_idx = -1
-        for seg in self._segments_snapshot():
+        for seg in seg_snap:
             row_idx = seg.find_row(pk)
             if row_idx is None:
                 continue
@@ -529,8 +529,7 @@ class Collection:
         compiled_filter = self._compile_filter(expr) if expr else None
         # Snapshot tombstones so the bg worker's gc_below doesn't
         # invalidate entries we rely on during this read.
-        delta_snap = self._delta_index.frozen_copy()
-        seg_snap = self._segments_snapshot()
+        seg_snap, delta_snap = self._read_snapshot()
 
         out: List[dict] = []
 
@@ -695,19 +694,20 @@ class Collection:
                     f"query_vectors must be a 2-D list, got shape {q_arr.shape}"
                 )
             compiled_filter = self._compile_filter(expr) if expr else None
+            seg_snap, delta_snap = self._read_snapshot()
             raw_results = execute_search_with_index(
-            query_vectors=q_arr,
-            segments=self._segments_snapshot(),
-            memtable=self._memtable,
-            delta_index=self._delta_index.frozen_copy(),
-            top_k=effective_top_k,
-            metric_type=metric_type,
-            pk_field=self._pk_name,
-            vector_field=vector_field,
-            partition_names=partition_names,
-            compiled_filter=compiled_filter,
-            output_fields=output_fields,
-        )
+                query_vectors=q_arr,
+                segments=seg_snap,
+                memtable=self._memtable,
+                delta_index=delta_snap,
+                top_k=effective_top_k,
+                metric_type=metric_type,
+                pk_field=self._pk_name,
+                vector_field=vector_field,
+                partition_names=partition_names,
+                compiled_filter=compiled_filter,
+                output_fields=output_fields,
+            )
 
         # Apply range filter (before group_by)
         if radius is not None or range_filter is not None:
@@ -825,11 +825,11 @@ class Collection:
         Candidate = Tuple[float, Any, Any]  # (dist, pk, (tbl, row_idx))
         per_query_candidates: List[List[Candidate]] = [[] for _ in range(nq)]
 
-        # Tombstone snapshot — protects us from concurrent gc_below.
-        delta_snap = self._delta_index.frozen_copy()
+        # Read snapshot — keeps segment cache and tombstones from crossing
+        # compaction / tombstone-GC generations.
+        seg_snapshot, delta_snap = self._read_snapshot()
 
         # ── Build global pk→best_seq map for cross-segment dedup ──
-        seg_snapshot = self._segments_snapshot()
         global_pk_seq: Dict[Any, int] = {}
         for seg in seg_snapshot:
             if partition_filter is not None:
@@ -1081,8 +1081,10 @@ class Collection:
 
         compiled_filter = self._compile_filter(expr) if expr else None
 
+        seg_snap, delta_snap = self._read_snapshot()
+
         all_pks, all_seqs, _all_vectors, all_rec_sources, filter_mask = assemble_candidates(
-            segments=self._segments_snapshot(),
+            segments=seg_snap,
             memtable=self._memtable,
             vector_field=self._vector_name,
             partition_names=partition_names,
@@ -1095,9 +1097,10 @@ class Collection:
         # Combine bitmap (dedup + tombstone) with filter_mask via build_valid_mask.
         from milvus_lite.search.bitmap import build_valid_mask
         from milvus_lite.search.assembler import materialize_record
-        # Snapshot tombstones — bg gc_below may mutate delta_index.
+        # Use the DeltaIndex captured with seg_snap above; bg GC may
+        # mutate the live DeltaIndex after candidate assembly starts.
         mask = build_valid_mask(
-            all_pks, all_seqs, self._delta_index.frozen_copy(),
+            all_pks, all_seqs, delta_snap,
             filter_mask=filter_mask, memtable=self._memtable,
         )
 
@@ -1520,7 +1523,9 @@ class Collection:
         pk_chunks: List[List[Any]] = []
         seq_chunks: List[np.ndarray] = []
 
-        for seg in self._segments_snapshot():
+        seg_snap, delta_snap = self._read_snapshot()
+
+        for seg in seg_snap:
             if partition_names is not None and seg.partition not in partition_names:
                 continue
             if seg.num_rows == 0:
@@ -1546,7 +1551,7 @@ class Collection:
 
         from milvus_lite.search.bitmap import build_valid_mask
         mask = build_valid_mask(
-            all_pks, all_seqs, self._delta_index.frozen_copy(),
+            all_pks, all_seqs, delta_snap,
             memtable=self._memtable,
         )
         return int(mask.sum())
@@ -1786,7 +1791,7 @@ class Collection:
                         pass
 
     def _segments_snapshot(self) -> Tuple["Segment", ...]:
-        """Atomic snapshot of the segment cache values.
+        """Thread-safe snapshot of the segment cache values.
 
         ``dict.values()`` is a live view — iterating it while the bg
         worker mutates ``_segment_cache`` raises RuntimeError. Readers
@@ -1798,7 +1803,22 @@ class Collection:
         an evicted Segment is still correct — just a slightly stale
         view of the dataset.
         """
-        return tuple(self._segment_cache.values())
+        with self._maintenance_lock:
+            return tuple(self._segment_cache.values())
+
+    def _read_snapshot(self) -> Tuple[Tuple["Segment", ...], Any]:
+        """Return a consistent read snapshot of segments and tombstones.
+
+        Compaction can replace segment files and then GC tombstones that
+        are no longer needed by the new segment generation. Readers must
+        not combine an old segment snapshot with a post-GC DeltaIndex,
+        or deleted rows in the old segments can become visible again.
+        """
+        with self._maintenance_lock:
+            return (
+                tuple(self._segment_cache.values()),
+                self._delta_index.frozen_copy(),
+            )
 
     def _refresh_segment_cache(self) -> None:
         """Reconcile self._segment_cache with the manifest's data files.
