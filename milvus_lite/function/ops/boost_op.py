@@ -109,9 +109,13 @@ def _apply_boost_to_distance(
     boost_mode: str,
     metric_type: str,
 ) -> float:
+    metric = metric_type.upper()
     if boost_mode == "multiply":
+        if metric == "COSINE":
+            score = 1.0 - distance
+            return 1.0 - score * value
         return distance * value
 
-    if metric_type in ("IP", "BM25"):
+    if metric in ("COSINE", "IP", "BM25"):
         return distance - value
     return distance + value

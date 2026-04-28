@@ -513,6 +513,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     l2_func,
                     search_params=search_params,
                     search_metrics=[parsed["metric_type"]],
+                    collection_schema=col.schema,
                 )
                 result_df = chain.execute(DataFrame(chunks))
 
@@ -1046,6 +1047,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     top_level_l2_func,
                     search_params=search_params,
                     search_metrics=route_metrics,
+                    collection_schema=col.schema,
                 )
             else:
                 chain = build_hybrid_rerank_chain(

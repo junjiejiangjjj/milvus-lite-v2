@@ -82,6 +82,45 @@ def test_boost_ranker_filter_multiplies_lower_is_better_distance():
     assert boosted[0][1]["distance"] == pytest.approx(0.02)
 
 
+def test_boost_ranker_cosine_weight_boosts_higher_is_better_score():
+    results = [[
+        {"id": 1, "distance": 0.10, "entity": {"doctype": "body"}},
+        {"id": 2, "distance": 0.40, "entity": {"doctype": "abstract"}},
+    ]]
+    ranker = {
+        "functions": [{
+            "name": "boost",
+            "params": {
+                "reranker": "boost",
+                "filter": "doctype == 'abstract'",
+                "weight": 2.0,
+            },
+        }],
+        "params": {"boost_mode": "multiply", "function_mode": "multiply"},
+    }
+
+    from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+    from milvus_lite.search.filter import compile_filter
+    from milvus_lite.search.filter.eval.python_backend import _eval_row
+
+    schema = CollectionSchema(fields=[
+        FieldSchema("id", DataType.INT64, is_primary=True),
+        FieldSchema("doctype", DataType.VARCHAR, max_length=64),
+    ])
+
+    boosted = apply_boost_ranker(
+        results,
+        ranker,
+        metric_type="COSINE",
+        pk_name="id",
+        compile_filter=lambda expr: compile_filter(expr, schema),
+        row_matches_filter=lambda row, compiled: bool(_eval_row(compiled.ast, row)),
+    )
+
+    assert [h["id"] for h in boosted[0]] == [2, 1]
+    assert boosted[0][0]["distance"] == pytest.approx(-0.2)
+
+
 def test_boost_ranker_function_score_sum_mode_is_deterministic():
     results = [[
         {"id": 1, "distance": 1.0, "entity": {}},

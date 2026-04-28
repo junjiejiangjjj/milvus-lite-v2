@@ -133,10 +133,14 @@ def build_hybrid_function_score_chain(
     rerank_func,
     search_params: Dict[str, Any],
     search_metrics: Optional[List[str]] = None,
+    collection_schema=None,
 ) -> FuncChain:
     """Build the L2 HybridSearch chain from FunctionScore.reranker."""
     chain = FuncChain("hybrid_rerank", STAGE_RERANK)
     reranker_type = _get_reranker_type(rerank_func)
+    _validate_rerank_func(
+        reranker_type, rerank_func, search_metrics or [], collection_schema
+    )
     sort_descending = True
     query_texts = None
     if reranker_type == "model":
@@ -176,6 +180,88 @@ def _extract_model_queries(func) -> List[str]:
     if not all(isinstance(q, str) for q in queries):
         raise ValueError("model reranker params.queries must contain only strings")
     return list(queries)
+
+
+def _validate_rerank_func(
+    reranker_type: str,
+    func,
+    search_metrics: List[str],
+    collection_schema=None,
+) -> None:
+    from milvus_lite.schema.types import DataType
+
+    params = getattr(func, "params", {}) or {}
+
+    if reranker_type == "rrf":
+        k = float(params.get("k", 60.0))
+        if k <= 0 or k >= 16384:
+            raise ValueError("The rank params k should be in range (0, 16384)")
+        return
+
+    if reranker_type == "weighted":
+        weights = params.get("weights", [])
+        if not weights:
+            raise ValueError("weighted reranker requires weights parameter")
+        if len(weights) != len(search_metrics):
+            raise ValueError(
+                "the length of weights param mismatch with ann search requests"
+            )
+        if any(float(w) < 0 or float(w) > 1 for w in weights):
+            raise ValueError("rank param weight should be in range [0, 1]")
+        return
+
+    if reranker_type == "decay":
+        if len(getattr(func, "input_field_names", []) or []) != 1:
+            raise ValueError("decay reranker requires exactly 1 input field")
+        score_mode = str(params.get("score_mode", "max")).lower()
+        if score_mode not in ("max", "sum", "avg"):
+            raise ValueError(
+                "unsupported score_mode: only supports [max, sum, avg]"
+            )
+        if collection_schema is not None:
+            field = _field_by_name(collection_schema, func.input_field_names[0])
+            if field is None:
+                raise ValueError(
+                    f"input field {func.input_field_names[0]} not found in collection schema"
+                )
+            if field.dtype not in {
+                DataType.INT8,
+                DataType.INT16,
+                DataType.INT32,
+                DataType.INT64,
+                DataType.FLOAT,
+                DataType.DOUBLE,
+            }:
+                raise ValueError(
+                    f"decay input field {field.name} must be numeric, "
+                    f"got {field.dtype.name}"
+                )
+        return
+
+    if reranker_type == "model":
+        if len(getattr(func, "input_field_names", []) or []) != 1:
+            raise ValueError("model reranker requires exactly 1 input field")
+        if collection_schema is not None:
+            field = _field_by_name(collection_schema, func.input_field_names[0])
+            if field is None:
+                raise ValueError(
+                    f"input field {func.input_field_names[0]} not found in collection schema"
+                )
+            if field.dtype != DataType.VARCHAR:
+                raise ValueError(
+                    f"model input field {field.name} must be VARCHAR, "
+                    f"got {field.dtype.name}"
+                )
+
+
+def _field_by_name(collection_schema, field_name: str):
+    return next(
+        (
+            field for field in getattr(collection_schema, "fields", [])
+            if field.name == field_name
+        ),
+        None,
+    )
 
 
 def _get_reranker_type(func) -> str:

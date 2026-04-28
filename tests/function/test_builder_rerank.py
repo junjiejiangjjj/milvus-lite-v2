@@ -8,6 +8,9 @@ from milvus_lite.function.builder import (
 )
 from milvus_lite.function.ops.map_op import MapOp
 from milvus_lite.schema.types import (
+    CollectionSchema,
+    DataType,
+    FieldSchema,
     Function,
     FunctionType,
 )
@@ -25,6 +28,14 @@ def _rerank_function(**params):
 
 def _op_names(chain):
     return [op.name for op in chain.operators]
+
+
+def _schema():
+    return CollectionSchema(fields=[
+        FieldSchema("id", DataType.INT64, is_primary=True),
+        FieldSchema("text", DataType.VARCHAR, max_length=128),
+        FieldSchema("ts", DataType.INT64),
+    ])
 
 
 # ── build_hybrid_rerank_chain ────────────────────────────────
@@ -45,6 +56,24 @@ def test_build_hybrid_weighted():
     )
     names = _op_names(chain)
     assert names[0] == "Merge"
+
+
+def test_build_hybrid_function_score_weighted_validates_weights():
+    func = Function(
+        name="weighted_fn",
+        function_type=FunctionType.RERANK,
+        input_field_names=[],
+        output_field_names=[],
+        params={"reranker": "weighted", "weights": [1.2]},
+    )
+
+    with pytest.raises(ValueError, match="range"):
+        build_hybrid_function_score_chain(
+            func,
+            {"limit": 10},
+            search_metrics=["IP"],
+            collection_schema=_schema(),
+        )
 
 
 def test_build_hybrid_with_group_by():
@@ -91,6 +120,32 @@ def test_build_hybrid_model_uses_queries_from_params(monkeypatch):
     assert model_maps[0].expr.query_texts == ["query 1", "query 2"]
 
 
+def test_build_hybrid_model_validates_varchar_input(monkeypatch):
+    class _Provider:
+        def rerank(self, query, docs, top_n=None):
+            return []
+
+    monkeypatch.setattr(
+        "milvus_lite.rerank.factory.create_rerank_provider",
+        lambda params: _Provider(),
+    )
+    func = Function(
+        name="model_fn",
+        function_type=FunctionType.RERANK,
+        input_field_names=["ts"],
+        output_field_names=[],
+        params={"reranker": "model", "provider": "mock", "queries": ["q"]},
+    )
+
+    with pytest.raises(ValueError, match="VARCHAR"):
+        build_hybrid_function_score_chain(
+            func,
+            {"limit": 10},
+            search_metrics=["IP"],
+            collection_schema=_schema(),
+        )
+
+
 def test_build_hybrid_function_score_decay_chain():
     func = _rerank_function(
         reranker="decay",
@@ -108,3 +163,27 @@ def test_build_hybrid_function_score_decay_chain():
     assert names[0] == "Merge"
     assert names.count("Map") == 2
     assert "Sort" in names
+
+
+def test_build_hybrid_decay_validates_numeric_input():
+    func = Function(
+        name="decay_fn",
+        function_type=FunctionType.RERANK,
+        input_field_names=["text"],
+        output_field_names=[],
+        params={
+            "reranker": "decay",
+            "function": "gauss",
+            "origin": 0,
+            "scale": 100,
+            "decay": 0.5,
+        },
+    )
+
+    with pytest.raises(ValueError, match="numeric"):
+        build_hybrid_function_score_chain(
+            func,
+            {"limit": 10},
+            search_metrics=["IP"],
+            collection_schema=_schema(),
+        )
