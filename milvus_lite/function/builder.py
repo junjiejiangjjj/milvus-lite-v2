@@ -1,13 +1,13 @@
-"""Chain builders — construct FuncChains from schema functions.
+"""Chain builders — construct FuncChains from functions.
 
 ``build_ingestion_chain`` creates a chain for insert-time auto-generation
 (BM25, TEXT_EMBEDDING).
 
-``build_rerank_chain`` creates a chain for search-time reranking from
-schema-level RERANK/DECAY functions (4 patterns: RRF/Weighted/Decay/Model).
-
 ``build_hybrid_rerank_chain`` creates a chain for HybridSearch from
-request-level rank_params (RRF/Weighted, no schema functions involved).
+request-level rank_params.
+
+``build_hybrid_function_score_chain`` creates a chain for request-level
+FunctionScore rerankers.
 """
 
 from __future__ import annotations
@@ -76,51 +76,6 @@ def build_ingestion_chain(
             has_steps = True
 
     return chain if has_steps else None
-
-
-# ── Rerank (schema-level functions) ──────────────────────────
-
-
-def build_rerank_chain(
-    schema,
-    search_params: Dict[str, Any],
-    search_metrics: Optional[List[str]] = None,
-) -> Optional[FuncChain]:
-    """Build a rerank chain from RERANK/DECAY functions in ``schema.functions``.
-
-    4 chain patterns (aligned with Milvus ``rerank_builder.go``):
-
-    - **RRF**:      ``Merge(rrf) -> Sort -> Limit -> [RoundDecimal] -> Select``
-    - **Weighted**: ``Merge(weighted) -> Sort -> Limit -> [RoundDecimal] -> Select``
-    - **Decay**:    ``Merge(score_mode) -> Map(Decay) -> Map(ScoreCombine) -> Sort -> Limit -> [RoundDecimal] -> Select``
-    - **Model**:    ``Merge(max) -> Map(RerankModel) -> Sort -> Limit -> [RoundDecimal] -> Select``
-
-    Args:
-        schema: CollectionSchema with ``functions`` attribute.
-        search_params: dict with keys ``limit``, ``offset``,
-            ``round_decimal``, ``group_by_field``, ``group_size``.
-        search_metrics: metric type per search path (for weighted normalization).
-
-    Returns:
-        A :class:`FuncChain` or ``None`` when no RERANK functions exist.
-    """
-    rerank_func = _find_rerank_function(schema)
-    if rerank_func is None:
-        return None
-
-    chain = FuncChain("rerank", STAGE_RERANK)
-    reranker_type = _get_reranker_type(rerank_func)
-
-    # ── Head: Merge ──
-    _build_rerank_head(chain, reranker_type, rerank_func, search_metrics or [])
-    sort_descending = True
-    if chain.operators and hasattr(chain.operators[0], "sort_descending"):
-        sort_descending = chain.operators[0].sort_descending
-
-    # ── Tail: Sort/GroupBy -> [RoundDecimal] -> Select ──
-    _build_rerank_tail(chain, search_params, sort_descending=sort_descending)
-
-    return chain
 
 
 # ── Hybrid rerank (request-level params) ─────────────────────
@@ -203,80 +158,7 @@ def build_hybrid_function_score_chain(
     return chain
 
 
-# ── Single-search rerank (no MergeOp) ────────────────────────
-
-
-def build_single_rerank_chain(
-    rerank_func=None,
-    decay_func=None,
-) -> FuncChain:
-    """Build a rerank chain for single-path search (no MergeOp).
-
-    Used by ``Collection.search()`` when the schema has RERANK or DECAY
-    functions.  The chain is pre-built at init time and reused across
-    searches; only ``RerankModelExpr.query_texts`` needs to be set before
-    each execution.
-
-    Unlike ``build_rerank_chain`` (which always starts with MergeOp for
-    multi-path fusion), this chain has no Merge and no tail (Sort/Limit
-    are added by the caller per-search since top_k/offset vary).
-
-    Args:
-        rerank_func: schema ``Function`` with a model reranker, or None.
-        decay_func: schema ``Function`` with decay reranker, or None.
-
-    Returns:
-        A :class:`FuncChain` with Map steps only (no Sort/Limit/Select).
-    """
-    chain = FuncChain("single_rerank", STAGE_RERANK)
-
-    if rerank_func is not None:
-        from milvus_lite.function.expr.rerank_model import RerankModelExpr
-        from milvus_lite.rerank.factory import create_rerank_provider
-
-        in_name = rerank_func.input_field_names[0]
-        provider = create_rerank_provider(rerank_func.params)
-        chain.map(RerankModelExpr(provider), [in_name], [SCORE_FIELD])
-
-    if decay_func is not None:
-        from milvus_lite.function.expr.decay_expr import DecayExpr
-        from milvus_lite.function.expr.score_combine import ScoreCombineExpr
-
-        p = decay_func.params
-        in_name = decay_func.input_field_names[0]
-        chain.map(
-            DecayExpr(
-                function=p["function"],
-                origin=p["origin"],
-                scale=p["scale"],
-                offset=p.get("offset", 0.0),
-                decay=p.get("decay", 0.5),
-            ),
-            [in_name],
-            [DECAY_SCORE_FIELD],
-        )
-        chain.map(
-            ScoreCombineExpr("multiply"),
-            [SCORE_FIELD, DECAY_SCORE_FIELD],
-            [SCORE_FIELD],
-        )
-
-    return chain
-
-
 # ── Helpers ──────────────────────────────────────────────────
-
-
-def _find_rerank_function(schema):
-    """Find the first RERANK function in schema, or None."""
-    from milvus_lite.schema.types import FunctionType
-
-    if not schema.functions:
-        return None
-    for func in schema.functions:
-        if func.function_type == FunctionType.RERANK:
-            return func
-    return None
 
 
 def _extract_model_queries(func) -> List[str]:

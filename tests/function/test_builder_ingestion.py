@@ -61,28 +61,6 @@ def test_build_ingestion_chain_no_functions():
     assert chain is None
 
 
-def test_build_ingestion_chain_rerank_only():
-    """RERANK functions don't produce an ingestion chain."""
-    schema = CollectionSchema(
-        fields=[
-            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
-            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1024),
-        ],
-        functions=[
-            Function(
-                name="rerank_fn",
-                function_type=FunctionType.RERANK,
-                input_field_names=["text"],
-                output_field_names=[],
-                params={"reranker": "decay", "function": "gauss",
-                        "origin": 0, "scale": 1},
-            ),
-        ],
-    )
-    chain = build_ingestion_chain(schema, _field_by_name(schema))
-    assert chain is None
-
-
 def test_ingestion_chain_bm25_end_to_end():
     """Build chain and execute on sample records."""
     schema = _bm25_schema()

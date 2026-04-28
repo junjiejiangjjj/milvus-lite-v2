@@ -5,7 +5,13 @@ import json
 import pytest
 
 from milvus_lite.exceptions import SchemaValidationError
-from milvus_lite.schema.types import CollectionSchema, DataType, FieldSchema
+from milvus_lite.schema.types import (
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    Function,
+    FunctionType,
+)
 from milvus_lite.schema.validation import (
     RESERVED_FIELD_NAMES,
     separate_dynamic_fields,
@@ -36,6 +42,28 @@ def _basic_schema(**kwargs) -> CollectionSchema:
 
 def test_valid_schema_ok():
     validate_schema(_basic_schema())
+
+
+def test_schema_rejects_rerank_function():
+    schema = CollectionSchema(
+        fields=[
+            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True),
+            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=1024),
+            FieldSchema(name="vec", dtype=DataType.FLOAT_VECTOR, dim=8),
+        ],
+        functions=[
+            Function(
+                name="rerank_fn",
+                function_type=FunctionType.RERANK,
+                input_field_names=["text"],
+                output_field_names=[],
+                params={"provider": "cohere"},
+            )
+        ],
+    )
+
+    with pytest.raises(SchemaValidationError, match="not supported in collection schema"):
+        validate_schema(schema)
 
 
 def test_no_fields():

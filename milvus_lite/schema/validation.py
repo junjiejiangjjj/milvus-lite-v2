@@ -236,115 +236,13 @@ def _validate_function(func: Function, field_by_name: dict[str, FieldSchema]) ->
                 f"must be FLOAT_VECTOR, got {out_field.dtype.name}"
             )
     elif func.function_type == FunctionType.RERANK:
-        # Common: exactly one input field, empty output
-        if len(func.input_field_names) != 1:
-            raise SchemaValidationError(
-                f"RERANK function {func.name!r} requires exactly one input field"
-            )
-        in_name = func.input_field_names[0]
-        in_field = field_by_name.get(in_name)
-        if in_field is None:
-            raise SchemaValidationError(
-                f"RERANK function {func.name!r} input field {in_name!r} "
-                f"not found in schema"
-            )
-        if func.output_field_names:
-            raise SchemaValidationError(
-                f"RERANK function {func.name!r} must have empty output_field_names"
-            )
-
-        reranker = func.params.get("reranker", "").lower()
-        provider = func.params.get("provider", "")
-
-        if reranker == "decay":
-            # Decay reranker: input must be numeric
-            _NUMERIC_DTYPES = frozenset({
-                DataType.INT8, DataType.INT16, DataType.INT32, DataType.INT64,
-                DataType.FLOAT, DataType.DOUBLE,
-            })
-            if in_field.dtype not in _NUMERIC_DTYPES:
-                raise SchemaValidationError(
-                    f"RERANK function {func.name!r} input field {in_name!r} "
-                    f"must be numeric, got {in_field.dtype.name}"
-                )
-            _validate_decay_params(func.name, func.params)
-        elif provider:
-            # Semantic reranker (e.g. Cohere): input must be VARCHAR
-            if in_field.dtype != DataType.VARCHAR:
-                raise SchemaValidationError(
-                    f"RERANK function {func.name!r} input field {in_name!r} "
-                    f"must be VARCHAR, got {in_field.dtype.name}"
-                )
-        else:
-            raise SchemaValidationError(
-                f"RERANK function {func.name!r} requires 'provider' or "
-                f"'reranker' in params"
-            )
+        raise SchemaValidationError(
+            f"RERANK function {func.name!r} is not supported in collection schema; "
+            "use request-level function_score/ranker instead"
+        )
     else:
         raise SchemaValidationError(
             f"unknown function type {func.function_type!r} for function {func.name!r}"
-        )
-
-
-def _validate_decay_params(func_name: str, params: dict) -> None:
-    """Validate decay reranker parameters."""
-    # function (required)
-    fn = params.get("function", "")
-    if fn not in ("gauss", "exp", "linear"):
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay function must be one of "
-            f"['gauss', 'exp', 'linear'], got {fn!r}"
-        )
-    # origin (required)
-    origin = params.get("origin")
-    if origin is None:
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay origin not specified"
-        )
-    if not isinstance(origin, (int, float)) or isinstance(origin, bool):
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay origin must be a number, "
-            f"got {origin!r}"
-        )
-    # scale (required)
-    scale = params.get("scale")
-    if scale is None:
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay scale not specified"
-        )
-    if not isinstance(scale, (int, float)) or isinstance(scale, bool):
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay scale must be a number, "
-            f"got {scale!r}"
-        )
-    if scale <= 0:
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay scale must be > 0, "
-            f"got {scale}"
-        )
-    # offset (optional, default 0)
-    offset = params.get("offset", 0)
-    if not isinstance(offset, (int, float)) or isinstance(offset, bool):
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay offset must be a number, "
-            f"got {offset!r}"
-        )
-    if offset < 0:
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay offset must be >= 0, "
-            f"got {offset}"
-        )
-    # decay (optional, default 0.5)
-    decay = params.get("decay", 0.5)
-    if not isinstance(decay, (int, float)) or isinstance(decay, bool):
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay param must be a number, "
-            f"got {decay!r}"
-        )
-    if not (0 < decay < 1):
-        raise SchemaValidationError(
-            f"RERANK function {func_name!r}: decay must be 0 < decay < 1, "
-            f"got {decay}"
         )
 
 
