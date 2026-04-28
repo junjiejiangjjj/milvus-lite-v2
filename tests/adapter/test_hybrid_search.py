@@ -10,6 +10,8 @@ Tests:
 7. Reranker unit tests (no gRPC)
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from pymilvus import (
@@ -62,6 +64,31 @@ def _create_hybrid_collection(client, name):
     idx.add_index(field_name="dense", index_type="BRUTE_FORCE",
                   metric_type="COSINE", params={})
     client.create_index(name, idx)
+    client.load_collection(name)
+    return name
+
+
+def _create_hybrid_l2_projection_collection(client, name):
+    """Collection for testing hidden fields needed by top-level L2 rerank."""
+    schema = MilvusClient.create_schema(auto_id=False)
+    schema.add_field("id", DataType.INT64, is_primary=True)
+    schema.add_field("text", DataType.VARCHAR, max_length=65535)
+    schema.add_field("label", DataType.VARCHAR, max_length=64)
+    schema.add_field("ts", DataType.INT64)
+    schema.add_field("dense", DataType.FLOAT_VECTOR, dim=2)
+
+    idx = client.prepare_index_params()
+    idx.add_index(field_name="dense", index_type="BRUTE_FORCE",
+                  metric_type="IP", params={})
+    client.create_collection(name, schema=schema, index_params=idx)
+    client.insert(name, [
+        {"id": 1, "text": "bad document", "label": "a", "ts": 0,
+         "dense": [1.0, 0.0]},
+        {"id": 2, "text": "good document", "label": "b", "ts": 100,
+         "dense": [0.9, 0.0]},
+        {"id": 3, "text": "ordinary document", "label": "c", "ts": 100,
+         "dense": [0.8, 0.0]},
+    ])
     client.load_collection(name)
     return name
 
@@ -217,6 +244,100 @@ def test_hybrid_top_level_function_score_weighted(milvus_client):
     )
 
     assert [hit["id"] for hit in results[0]][0] == 1
+    milvus_client.drop_collection(name)
+
+
+def test_hybrid_top_level_decay_uses_hidden_input_field(milvus_client):
+    """Top-level decay reranker can use a non-output input field."""
+    name = _create_hybrid_l2_projection_collection(
+        milvus_client, "hybrid_decay_hidden"
+    )
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0]],
+        anns_field="dense",
+        param={"metric_type": "IP"},
+        limit=3,
+    )
+    ranker = Function(
+        name="decay_l2",
+        function_type=FunctionType.RERANK,
+        input_field_names=["ts"],
+        output_field_names=[],
+        params={
+            "reranker": "decay",
+            "function": "linear",
+            "origin": 100,
+            "scale": 1,
+            "decay": 0.5,
+        },
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req],
+        ranker=ranker,
+        limit=3,
+        output_fields=["label"],
+    )
+
+    assert [hit["id"] for hit in results[0]][0] == 2
+    assert all("ts" not in hit["entity"] for hit in results[0])
+    assert all("label" in hit["entity"] for hit in results[0])
+    milvus_client.drop_collection(name)
+
+
+def test_hybrid_top_level_model_uses_hidden_input_field(
+    milvus_client,
+    monkeypatch,
+):
+    """Top-level model reranker can use a non-output text input field."""
+    class _Provider:
+        def rerank(self, query, docs, top_n=None):
+            return [
+                SimpleNamespace(
+                    index=i,
+                    relevance_score=1.0 if query in doc else 0.0,
+                )
+                for i, doc in enumerate(docs)
+            ]
+
+    monkeypatch.setattr(
+        "milvus_lite.rerank.factory.create_rerank_provider",
+        lambda params: _Provider(),
+    )
+
+    name = _create_hybrid_l2_projection_collection(
+        milvus_client, "hybrid_model_hidden"
+    )
+    dense_req = AnnSearchRequest(
+        data=[[1.0, 0.0]],
+        anns_field="dense",
+        param={"metric_type": "IP"},
+        limit=3,
+    )
+    ranker = Function(
+        name="model_l2",
+        function_type=FunctionType.RERANK,
+        input_field_names=["text"],
+        output_field_names=[],
+        params={
+            "reranker": "model",
+            "provider": "mock",
+            "queries": ["good"],
+        },
+    )
+
+    results = milvus_client.hybrid_search(
+        name,
+        reqs=[dense_req],
+        ranker=ranker,
+        limit=3,
+        output_fields=["label"],
+    )
+
+    assert [hit["id"] for hit in results[0]][0] == 2
+    assert all("text" not in hit["entity"] for hit in results[0])
+    assert all("label" in hit["entity"] for hit in results[0])
     milvus_client.drop_collection(name)
 
 
