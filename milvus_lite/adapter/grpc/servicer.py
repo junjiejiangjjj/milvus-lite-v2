@@ -969,7 +969,9 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 )
             result_df = chain.execute(*dfs)
 
-            # Convert back to {"id", "distance", "entity"} format
+            # Convert chain rows back to the SearchResultData input shape.
+            # For L2 rerank/merge, the value in "distance" is already the
+            # final score stored in SearchResultData.scores.
             from milvus_lite.function.types import GROUP_SCORE_FIELD
             _virtual = {ID_FIELD, SCORE_FIELD, GROUP_SCORE_FIELD}
             merged = []
@@ -979,7 +981,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                     entity = {k: v for k, v in row.items() if k not in _virtual}
                     hit = {
                         "id": row[ID_FIELD],
-                        "distance": -row[SCORE_FIELD],
+                        "distance": row[SCORE_FIELD],
                         "entity": entity,
                     }
                     if gb_field is not None and gb_field in row:

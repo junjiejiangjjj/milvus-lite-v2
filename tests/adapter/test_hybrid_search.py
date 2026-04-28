@@ -285,8 +285,8 @@ def test_hybrid_top_level_decay_uses_hidden_input_field(milvus_client):
     distances = [hit["distance"] for hit in results[0]]
 
     assert ids[:2] == [2, 3]
-    assert distances[0] == pytest.approx(-0.9)
-    assert distances[1] == pytest.approx(-0.8)
+    assert distances[0] == pytest.approx(0.9)
+    assert distances[1] == pytest.approx(0.8)
     assert all("ts" not in hit["entity"] for hit in results[0])
     for hit in results[0]:
         assert hit["entity"]["label"] == expected_labels[hit["id"]]
@@ -347,7 +347,7 @@ def test_hybrid_top_level_model_uses_hidden_input_field(
     distances = [hit["distance"] for hit in results[0]]
 
     assert ids[0] == 2
-    assert distances[0] == pytest.approx(-1.0)
+    assert distances[0] == pytest.approx(1.0)
     assert all("text" not in hit["entity"] for hit in results[0])
     for hit in results[0]:
         assert hit["entity"]["label"] == expected_labels[hit["id"]]
