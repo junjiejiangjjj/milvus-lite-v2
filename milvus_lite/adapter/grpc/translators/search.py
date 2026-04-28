@@ -32,7 +32,7 @@ from typing import List, Optional, Tuple
 from pymilvus.grpc_gen import common_pb2
 
 from milvus_lite.exceptions import SchemaValidationError
-from milvus_lite.rerank.boost import decode_boost_function_score
+from milvus_lite.rerank.boost import decode_hybrid_function_score
 
 
 # PlaceholderType enum values from common.proto
@@ -121,6 +121,8 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
     if strict_group_size is not None:
         strict_group_size = bool(strict_group_size)
 
+    function_score = decode_hybrid_function_score(request.function_score)
+
     return {
         "query_vectors": query_vectors,
         "top_k": top_k,
@@ -137,7 +139,8 @@ def parse_search_request(request, default_metric_type: str = "COSINE") -> dict:
         "range_filter": range_filter_val,
         "offset": int(raw_params.get("offset", 0)),
         "round_decimal": int(raw_params.get("round_decimal", -1)),
-        "ranker": decode_boost_function_score(request.function_score),
+        "ranker": function_score.get("boost"),
+        "rerank": function_score.get("rerank"),
     }
 
 

@@ -356,6 +356,105 @@ def test_hybrid_top_level_model_uses_hidden_input_field(
     milvus_client.drop_collection(name)
 
 
+def test_search_top_level_decay_uses_hidden_input_field(milvus_client):
+    """Search L2 decay reranker can use a non-output input field."""
+    name = _create_hybrid_l2_projection_collection(
+        milvus_client, "search_decay_hidden"
+    )
+    ranker = Function(
+        name="decay_l2",
+        function_type=FunctionType.RERANK,
+        input_field_names=["ts"],
+        output_field_names=[],
+        params={
+            "reranker": "decay",
+            "function": "linear",
+            "origin": 100,
+            "scale": 1,
+            "decay": 0.5,
+        },
+    )
+
+    results = milvus_client.search(
+        name,
+        data=[[1.0, 0.0]],
+        anns_field="dense",
+        search_params={"metric_type": "IP", "params": {}},
+        limit=3,
+        output_fields=["label"],
+        ranker=ranker,
+    )
+
+    expected_labels = {1: "a", 2: "b", 3: "c"}
+    ids = [hit["id"] for hit in results[0]]
+    distances = [hit["distance"] for hit in results[0]]
+
+    assert ids[:2] == [2, 3]
+    assert distances[0] == pytest.approx(0.9)
+    assert distances[1] == pytest.approx(0.8)
+    assert all("ts" not in hit["entity"] for hit in results[0])
+    for hit in results[0]:
+        assert hit["entity"]["label"] == expected_labels[hit["id"]]
+    milvus_client.drop_collection(name)
+
+
+def test_search_top_level_model_uses_hidden_input_field(
+    milvus_client,
+    monkeypatch,
+):
+    """Search L2 model reranker can use a non-output text input field."""
+    class _Provider:
+        def rerank(self, query, docs, top_n=None):
+            return [
+                SimpleNamespace(
+                    index=i,
+                    relevance_score=1.0 if query in doc else 0.0,
+                )
+                for i, doc in enumerate(docs)
+            ]
+
+    monkeypatch.setattr(
+        "milvus_lite.rerank.factory.create_rerank_provider",
+        lambda params: _Provider(),
+    )
+
+    name = _create_hybrid_l2_projection_collection(
+        milvus_client, "search_model_hidden"
+    )
+    ranker = Function(
+        name="model_l2",
+        function_type=FunctionType.RERANK,
+        input_field_names=["text"],
+        output_field_names=[],
+        params={
+            "reranker": "model",
+            "provider": "mock",
+            "queries": ["good"],
+        },
+    )
+
+    results = milvus_client.search(
+        name,
+        data=[[1.0, 0.0]],
+        anns_field="dense",
+        search_params={"metric_type": "IP", "params": {}},
+        limit=3,
+        output_fields=["label"],
+        ranker=ranker,
+    )
+
+    expected_labels = {1: "a", 2: "b", 3: "c"}
+    ids = [hit["id"] for hit in results[0]]
+    distances = [hit["distance"] for hit in results[0]]
+
+    assert ids[0] == 2
+    assert distances[0] == pytest.approx(1.0)
+    assert all("text" not in hit["entity"] for hit in results[0])
+    for hit in results[0]:
+        assert hit["entity"]["label"] == expected_labels[hit["id"]]
+    milvus_client.drop_collection(name)
+
+
 def test_hybrid_rrf_dense_bm25(milvus_client):
     """Hybrid search: dense + BM25 with RRFRanker."""
     name = _create_hybrid_collection(milvus_client, "hybrid_rrf1")

@@ -427,6 +427,10 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
         the same metric the index was built with.
         """
         try:
+            from milvus_lite.function.builder import build_hybrid_function_score_chain
+            from milvus_lite.function.dataframe import DataFrame
+            from milvus_lite.function.types import ID_FIELD, SCORE_FIELD
+
             col = self._db.get_collection(request.collection_name)
             # Pull the canonical metric from the first IndexSpec if any.
             first_spec = col._index_specs.get(col._vector_name) if col._index_specs else None  # noqa: SLF001
@@ -438,23 +442,99 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
             group_by_field = parsed.get("group_by_field")
             group_size = parsed.get("group_size") or 1
             strict = parsed.get("group_size_strict") or False
+            requested_output_fields = parsed["output_fields"]
+            l2_func = parsed.get("rerank")
+
+            internal_output_fields = []
+            if l2_func is not None:
+                if group_by_field is not None:
+                    internal_output_fields.append(group_by_field)
+                internal_output_fields.extend(
+                    list(getattr(l2_func, "input_field_names", []))
+                )
+            if requested_output_fields is None:
+                search_output_fields = None
+            else:
+                search_output_fields = list(dict.fromkeys(
+                    requested_output_fields + internal_output_fields
+                ))
+
+            search_top_k = parsed["top_k"]
+            search_offset = parsed.get("offset", 0)
+            search_group_by_field = group_by_field
+            if l2_func is not None:
+                search_top_k = parsed["top_k"] + search_offset
+                if group_by_field is not None:
+                    search_top_k = max(search_top_k, parsed["top_k"] * group_size * 3)
+                search_top_k = max(search_top_k, parsed["top_k"] * 10)
+                search_offset = 0
+                search_group_by_field = None
 
             results = col.search(
                 query_vectors=parsed["query_vectors"],
-                top_k=parsed["top_k"],
+                top_k=search_top_k,
                 metric_type=parsed["metric_type"],
                 partition_names=parsed["partition_names"],
                 expr=parsed["expr"],
-                output_fields=parsed["output_fields"],
+                output_fields=search_output_fields,
                 anns_field=parsed.get("anns_field"),
-                group_by_field=group_by_field,
+                group_by_field=search_group_by_field,
                 group_size=group_size,
                 strict_group_size=strict,
                 radius=parsed.get("radius"),
                 range_filter=parsed.get("range_filter"),
-                offset=parsed.get("offset", 0),
+                offset=search_offset,
                 ranker=parsed.get("ranker"),
             )
+
+            if l2_func is not None:
+                chunks = []
+                for query_hits in results:
+                    chunk = []
+                    for hit in query_hits:
+                        flat = {
+                            ID_FIELD: hit["id"],
+                            SCORE_FIELD: _hit_score_for_chain(
+                                hit, parsed["metric_type"]
+                            ),
+                        }
+                        flat.update(hit.get("entity", {}))
+                        chunk.append(flat)
+                    chunks.append(chunk)
+
+                search_params = {
+                    "limit": parsed["top_k"],
+                    "offset": parsed.get("offset", 0),
+                    "group_by_field": group_by_field,
+                    "group_size": group_size,
+                    "metric_types": [parsed["metric_type"]],
+                }
+                chain = build_hybrid_function_score_chain(
+                    l2_func,
+                    search_params=search_params,
+                    search_metrics=[parsed["metric_type"]],
+                )
+                result_df = chain.execute(DataFrame(chunks))
+
+                from milvus_lite.function.types import GROUP_SCORE_FIELD
+                virtual = {ID_FIELD, SCORE_FIELD, GROUP_SCORE_FIELD}
+                reranked = []
+                for ci in range(result_df.num_chunks):
+                    hits = []
+                    for row in result_df.chunk(ci):
+                        entity = {
+                            k: v for k, v in row.items() if k not in virtual
+                        }
+                        hit = {
+                            "id": row[ID_FIELD],
+                            "distance": row[SCORE_FIELD],
+                            "entity": entity,
+                        }
+                        if group_by_field is not None and group_by_field in row:
+                            hit["_group_by_value"] = row[group_by_field]
+                        hits.append(hit)
+                    reranked.append(hits)
+                results = reranked
 
             # Apply round_decimal to distance values
             rd = parsed.get("round_decimal", -1)
@@ -468,7 +548,7 @@ class MilvusServicer(milvus_pb2_grpc.MilvusServiceServicer):
                 schema=col.schema,
                 top_k=parsed["top_k"],
                 pk_name=col._pk_name,  # noqa: SLF001
-                output_fields=parsed["output_fields"],
+                output_fields=requested_output_fields,
                 group_by_field=group_by_field,
             )
 

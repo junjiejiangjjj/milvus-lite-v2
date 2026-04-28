@@ -253,7 +253,7 @@ def _normalize_l2_params(reranker: str, params: Dict[str, Any]) -> Dict[str, Any
     if reranker == "weighted":
         weighted = _normalize_proxy_params(reranker, out)
         out.update(weighted)
-        out.setdefault("norm_score", True)
+        out.setdefault("norm_score", False)
         return out
 
     if reranker == "model" or out.get("provider"):
